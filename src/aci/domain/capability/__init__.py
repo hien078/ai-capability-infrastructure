@@ -1,7 +1,9 @@
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.capability.models import (
+    ArtifactFile,
     BundleItem,
     Capability,
+    CapabilityArtifact,
     CapabilityBinding,
     CapabilityBundle,
     CapabilityMetrics,
@@ -17,8 +19,10 @@ from aci.domain.capability.models import (
 )
 
 __all__ = [
+    "ArtifactFile",
     "BundleItem",
     "Capability",
+    "CapabilityArtifact",
     "CapabilityBinding",
     "CapabilityBundle",
     "CapabilityMetrics",

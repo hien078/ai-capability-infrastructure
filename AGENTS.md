@@ -4,7 +4,7 @@
 
 ## Commands (verified)
 
-- `.venv/bin/python -m pytest -q` (or plain `pytest -q`) — 19 tests: 17 unit + 2 integration (live-DB ones skip without Postgres). Works with no install (`pyproject.toml` sets `pythonpath = ["src"]`); full deps live in `.venv/`.
+- `.venv/bin/python -m pytest -q` (or plain `pytest -q`) — 50 tests: 29 unit + 21 integration (live-DB ones skip without Postgres). Works with no install (`pyproject.toml` sets `pythonpath = ["src"]`); full deps live in `.venv/`.
 - `ruff check src tests` + `ruff format --check src tests` — both clean required (line-length 100, rules `E,F,I,UP,B`).
 - `.venv/bin/python -m mypy src` — strict, clean. System python lacks mypy; use `.venv` or `uvx mypy src`.
 - DB: `docker compose up -d db` (`pgvector/pgvector:pg16`, service `db`), then `alembic upgrade head` (needs `.venv` on PATH: `.venv/bin/alembic`). `migrations/env.py` reads `ACI_DATABASE_URL` first, falls back to `alembic.ini`.
@@ -13,14 +13,14 @@
 
 ## Repo state and gotchas
 
-- Real code is `src/aci/domain/capability/{models,errors}.py`, `src/aci/{config,main}.py`, `src/aci/observability/{logging,tracing}.py`, `src/aci/adapters/outbound/postgres/base.py` (engine/session factory + `Base` for migrations). The `application/`, `routing/`, `providers/`, `control_plane/`, `evaluation/` dirs from the plan (§42) do not exist yet — create them in build order, not upfront.
+- Real code is `src/aci/domain/capability/{models,errors}.py`, `src/aci/domain/skills/models.py`, `src/aci/{config,main}.py`, `src/aci/observability/{logging,tracing}.py`, `src/aci/application/protocols.py` (repo/object-store/source-record Protocols, no SQLAlchemy imports), `src/aci/adapters/outbound/postgres/{base,orm,repositories,source_records}.py`, `src/aci/adapters/outbound/object_store/fs.py` (content-addressed, sha256 keys), `src/aci/providers/skills/{parser,package,canonicalization,ingestion}.py`. The `routing/`, `control_plane/`, `evaluation/` dirs from the plan (§42) do not exist yet — create them in build order, not upfront.
 - Locked decisions live in `docs/adr/001–004*.md` (Accepted: capability abstraction, one registry, plane separation, adapter boundary). ADR-005–012 are still plan-only bullet points in `docs/adr/README.md`.
-- Boundary tests in `tests/unit/test_architecture_boundaries.py` + `test_contracts.py` enforce the invariants below — run them after any domain change; extend them when adding layers. `tests/integration/test_postgres.py` (`pytest.mark.integration`) needs live DB + `alembic upgrade head`, otherwise skips.
-- `migrations/versions/0001_enable_pgvector.py` is the only migration (enables `vector`); domain tables (§41) still have to be written in Phase 2. `UNIQUE(capability_id, version)` and FK bundle-items→versions are required from day one.
+- Boundary tests in `tests/unit/test_architecture_boundaries.py` + `test_contracts.py` enforce the invariants below — run them after any domain change; extend them when adding layers. `tests/integration/` (`pytest.mark.integration`) needs live DB + `alembic upgrade head`, otherwise skips. Integration tests must use unique ids (`uid()` helper) — the live DB is shared and persists across runs.
+- Migrations: `0001` pgvector extension, `0002` registry tables + immutability trigger, `0003` `source_records` provenance. `alembic check` must stay clean (ORM ↔ migrations in sync). Ingestion flow: parse SKILL.md → hash files → store blobs → create version/artifact → release pointer channel `raw` (quarantine) → provenance record; re-ingest identical content is idempotent, changed content under the same version raises `CAPABILITY_ALREADY_EXISTS`.
 
 ## Build order (do not skip)
 
-Follow `plan_v2_revised.md` §52 / §75 in order: contracts ✅ → foundation ✅ → registry → skill packages → provenance/license/security gates → eligibility → retrieval → reranker → composer → REST → OpenCode catalog → OpenCode routing plugin → MCP → outcomes → benchmark. Prove the V1 loop (§80) before V2/V3 expansion.
+Follow `plan_v2_revised.md` §52 / §75 in order: contracts ✅ → foundation ✅ → registry ✅ → skill packages ✅ → provenance/license/security gates → eligibility → retrieval → reranker → composer → REST → OpenCode catalog → OpenCode routing plugin → MCP → outcomes → benchmark. Prove the V1 loop (§80) before V2/V3 expansion.
 
 ## Target stack and layout
 

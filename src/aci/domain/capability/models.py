@@ -121,6 +121,28 @@ class CapabilityBinding(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+class ArtifactFile(BaseModel):
+    """One file inside an immutable skill package (plan §20)."""
+
+    model_config = {"frozen": True}
+
+    path: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(ge=0)
+
+
+class CapabilityArtifact(BaseModel):
+    """Immutable content-package metadata for one version (plan §20)."""
+
+    model_config = {"frozen": True}
+
+    capability_id: str
+    version: str
+    package_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    manifest: dict[str, Any] = Field(default_factory=dict)
+    files: list[ArtifactFile] = Field(default_factory=list)
+
+
 class CapabilityMetrics(BaseModel):
     """Derived point-in-time snapshot (plan §6.5). Never mutates a CapabilityVersion."""
 

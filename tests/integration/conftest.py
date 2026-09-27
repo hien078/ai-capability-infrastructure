@@ -1,0 +1,84 @@
+"""Shared live-DB fixtures. Everything here skips when PostgreSQL is down."""
+
+import os
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("sqlalchemy")
+
+from sqlalchemy import Engine, create_engine, text  # noqa: E402
+from sqlalchemy.exc import OperationalError  # noqa: E402
+from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
+
+from aci.adapters.outbound.object_store.fs import FsObjectStore  # noqa: E402
+from aci.adapters.outbound.postgres.base import make_session_factory  # noqa: E402
+from aci.adapters.outbound.postgres.repositories import (  # noqa: E402
+    SqlAlchemyArtifactStore,
+    SqlAlchemyCapabilityRepository,
+    SqlAlchemyReleaseRepository,
+)
+from aci.adapters.outbound.postgres.source_records import (  # noqa: E402
+    SqlAlchemySourceRecordRepository,
+)
+from aci.providers.skills.ingestion import SkillIngestionService  # noqa: E402
+
+DB_URL = os.environ.get("ACI_DATABASE_URL", "postgresql+psycopg://aci:aci@localhost:5432/aci")
+
+
+@pytest.fixture(scope="session")
+def engine() -> Iterator[Engine]:
+    eng = create_engine(DB_URL, connect_args={"connect_timeout": 2})
+    try:
+        with eng.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except OperationalError as exc:
+        eng.dispose()
+        pytest.skip(f"PostgreSQL unavailable: {exc}")
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture()
+def sessions(engine: Engine) -> sessionmaker[Session]:
+    return make_session_factory(engine)
+
+
+@pytest.fixture()
+def capability_repo(
+    sessions: sessionmaker[Session],
+) -> SqlAlchemyCapabilityRepository:
+    return SqlAlchemyCapabilityRepository(sessions)
+
+
+@pytest.fixture()
+def release_repo(sessions: sessionmaker[Session]) -> SqlAlchemyReleaseRepository:
+    return SqlAlchemyReleaseRepository(sessions)
+
+
+@pytest.fixture()
+def artifact_store(sessions: sessionmaker[Session]) -> SqlAlchemyArtifactStore:
+    return SqlAlchemyArtifactStore(sessions)
+
+
+@pytest.fixture()
+def source_records(sessions: sessionmaker[Session]) -> SqlAlchemySourceRecordRepository:
+    return SqlAlchemySourceRecordRepository(sessions)
+
+
+@pytest.fixture()
+def ingestion(
+    capability_repo: SqlAlchemyCapabilityRepository,
+    release_repo: SqlAlchemyReleaseRepository,
+    artifact_store: SqlAlchemyArtifactStore,
+    source_records: SqlAlchemySourceRecordRepository,
+    tmp_path: Path,
+) -> SkillIngestionService:
+    return SkillIngestionService(
+        capabilities=capability_repo,
+        releases=release_repo,
+        artifacts=artifact_store,
+        source_records=source_records,
+        objects=FsObjectStore(tmp_path / "objects"),
+    )
