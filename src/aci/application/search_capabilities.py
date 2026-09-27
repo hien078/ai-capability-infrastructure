@@ -10,7 +10,6 @@ only in the routing pipeline.
 from aci.application.list_candidates import ProductionCandidateLoader
 from aci.application.protocols import CandidateRetriever, CapabilityRepository
 from aci.domain.capability.models import SearchCapabilitiesQuery
-from aci.domain.policy.models import RoutingRequestContext
 from aci.domain.routing.models import CapabilitySearchResult, ScoredCandidate
 
 
@@ -25,9 +24,7 @@ class SearchCapabilitiesService:
         self._retriever = retriever
         self._capabilities = capabilities
 
-    def search(
-        self, query: SearchCapabilitiesQuery, context: RoutingRequestContext
-    ) -> list[CapabilitySearchResult]:
+    def search(self, query: SearchCapabilitiesQuery) -> list[CapabilitySearchResult]:
         candidates = self._loader.load()
 
         if query.kinds:

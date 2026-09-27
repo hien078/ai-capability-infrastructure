@@ -4,7 +4,6 @@ Evidence stays multi-source with confidence; `unknown` stays `unknown`.
 The recorder never collapses verdicts into a single success flag.
 """
 
-from datetime import datetime
 from uuid import uuid4
 
 from aci.application.protocols import BundleRepository, OutcomeRecorder
@@ -17,7 +16,7 @@ class ReportOutcomeService:
         self._outcomes = outcomes
         self._bundles = bundles
 
-    def report(self, evidence: OutcomeEvidence, *, now: datetime | None = None) -> OutcomeEvidence:
+    def report(self, evidence: OutcomeEvidence) -> OutcomeEvidence:
         bundle = self._bundles.get_bundle(evidence.bundle_id)
         if bundle is None:
             raise DomainError(

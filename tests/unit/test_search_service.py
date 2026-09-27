@@ -14,12 +14,7 @@ from aci.domain.capability.models import (
     SearchCapabilitiesQuery,
     SkillSpec,
 )
-from aci.domain.policy.models import (
-    ClientDescriptor,
-    EligibleCandidate,
-    RoutingRequestContext,
-    ScopeContext,
-)
+from aci.domain.policy.models import EligibleCandidate
 from aci.domain.routing.models import RetrievalResult, RetrievalTrace, ScoredCandidate
 
 NOW = datetime(2026, 9, 28, tzinfo=UTC)
@@ -100,12 +95,6 @@ class FakeArtifacts:
         return self.artifacts.get((capability_id, version))
 
 
-def ctx() -> RoutingRequestContext:
-    return RoutingRequestContext(
-        client=ClientDescriptor(type="rest-client"), scope=ScopeContext(principal_id="p-1")
-    )
-
-
 def test_search_filters_kinds_and_domains() -> None:
     loader = FakeLoader(
         [
@@ -118,7 +107,7 @@ def test_search_filters_kinds_and_domains() -> None:
     service = SearchCapabilitiesService(loader, retriever, FakeCapabilities())
 
     results = service.search(
-        SearchCapabilitiesQuery(kinds=["skill"], domains=["software-engineering"]), ctx()
+        SearchCapabilitiesQuery(kinds=["skill"], domains=["software-engineering"])
     )
     assert [r.capability_id for r in results] == ["cap-skill"]
 
@@ -132,7 +121,7 @@ def test_search_with_query_uses_retrieval_ranking() -> None:
     )
     service = SearchCapabilitiesService(loader, retriever, capabilities)
 
-    results = service.search(SearchCapabilitiesQuery(query="debug python", limit=5), ctx())
+    results = service.search(SearchCapabilitiesQuery(query="debug python", limit=5))
     assert retriever.calls == [("debug python", 5)]
     assert results[0].capability_id == "cap-skill"
     assert results[0].score == 0.9
@@ -147,7 +136,7 @@ def test_search_without_query_lists_without_ranking() -> None:
     retriever = FakeRetriever()
     service = SearchCapabilitiesService(loader, retriever, FakeCapabilities())
 
-    results = service.search(SearchCapabilitiesQuery(query="", limit=1), ctx())
+    results = service.search(SearchCapabilitiesQuery(query="", limit=1))
     assert retriever.calls == []  # no vector search for a browse-style query
     assert [r.capability_id for r in results] == ["cap-a"]
     assert results[0].score == 0.0

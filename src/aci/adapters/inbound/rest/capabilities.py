@@ -7,7 +7,6 @@ from fastapi import APIRouter, Depends
 from aci.adapters.inbound.rest.schemas import CapabilityDetail, SearchRequest
 from aci.adapters.inbound.rest.wiring import Container, get_container
 from aci.domain.capability.models import SearchCapabilitiesQuery
-from aci.domain.policy.models import ClientDescriptor, RoutingRequestContext, ScopeContext
 from aci.domain.routing.models import CapabilitySearchResult, ResolvedVersion
 
 router = APIRouter(prefix="/v1/capabilities", tags=["capabilities"])
@@ -23,11 +22,7 @@ def search_capabilities(
         domains=list(body.filters.domains),
         limit=body.limit,
     )
-    context = RoutingRequestContext(
-        client=ClientDescriptor(type="rest-client"),
-        scope=ScopeContext(principal_id="anonymous"),
-    )
-    return container.search_service.search(query, context)
+    return container.search_service.search(query)
 
 
 @router.get("/{capability_id}")
