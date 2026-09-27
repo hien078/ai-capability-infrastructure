@@ -6,7 +6,7 @@
 ## Context
 
 Nếu control plane (ingestion, review, promotion) nằm đồng bộ trong mỗi route request,
-hoặc observability trực tiếp promote version, hệ thống sẽ chậm, khó推理,
+hoặc observability trực tiếp promote version, hệ thống sẽ chậm, khó truy vết,
 và telemetry nhiễu có thể tự ý mutate production.
 
 ## Decision

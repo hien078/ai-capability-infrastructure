@@ -1,12 +1,26 @@
 # AGENTS.md
 
-> Pre-implementation repo. Single source of truth: `plan_v2_revised.md` (Architecture V2, 2026-09-27). No code, build, test, or CI exists yet. Follow the plan; do not invent a competing design.
+> Single source of truth: `plan_v2_revised.md` (Architecture V2, 2026-09-27). Foundation only (Phase 0–1): domain contracts, `/health` + `/ready`, 13 unit tests. No CI, no pre-commit config, no DB migrations yet, no registry/persistence/routing/adapters code. Follow the plan; do not invent a competing design.
+
+## Commands (verified)
+
+- `python3 -m pytest -q` — 13 tests, works with no install (`pyproject.toml` sets `pythonpath = ["src"]`).
+- `ruff check src tests` — clean required; line-length 100, rules `E,F,I,UP,B`.
+- `mypy src` — strict mode, but mypy is not installed in this env; install dev extras first.
+- DB: `docker compose up -d db` (`pgvector/pgvector:pg16`, service name `db`), then `alembic upgrade head` (currently a no-op — see gotcha below).
+- App: `uvicorn aci.main:app --reload` (entrypoint `src/aci/main.py`; `/health` = liveness, `/ready` = sync `SELECT 1`).
+
+## Repo state and gotchas
+
+- Real code is only `src/aci/domain/capability/{models,errors}.py`, `src/aci/{config,main}.py`. The `application/`, `routing/`, `providers/`, `adapters/`, `control_plane/`, `evaluation/` dirs from the plan (§42) do not exist yet — create them in build order, not upfront.
+- Locked decisions live in `docs/adr/001–004*.md` (Accepted: capability abstraction, one registry, plane separation, adapter boundary). ADR-005–012 are still plan-only bullet points in `docs/adr/README.md`.
+- Boundary tests in `tests/unit/test_architecture_boundaries.py` + `test_contracts.py` enforce the invariants below — run them after any domain change; extend them when adding layers.
+- Env quirk: `Settings` uses prefix `ACI_` (`ACI_DATABASE_URL`), but `alembic.ini` hardcodes `sqlalchemy.url` and ignores the env var — keep both in sync or fix `migrations/env.py` to read the env.
+- `migrations/` has `env.py` + `script.py.mako` but no `versions/` dir: the first real migration (registry tables, §41) still has to be written; `UNIQUE(capability_id, version)` and FK bundle-items→versions are required from day one.
 
 ## Build order (do not skip)
 
-Follow `plan_v2_revised.md` §52 / §75 in order: contracts → foundation → registry → skill packages → provenance/license/security gates → eligibility → retrieval → reranker → composer → REST → OpenCode catalog → OpenCode routing plugin → MCP → outcomes → benchmark. Prove the V1 loop (§80) before V2/V3 expansion.
-
-Start with: ADRs (§68), Pydantic schemas (`Capability`, `CapabilityVersion`, `CapabilityRelease`, `CapabilityBinding`, `TaskContext`, `CapabilityBundle`, `OutcomeEvidence`), DB schema + Alembic migrations from day one.
+Follow `plan_v2_revised.md` §52 / §75 in order: contracts ✅ → foundation ✅ → registry → skill packages → provenance/license/security gates → eligibility → retrieval → reranker → composer → REST → OpenCode catalog → OpenCode routing plugin → MCP → outcomes → benchmark. Prove the V1 loop (§80) before V2/V3 expansion.
 
 ## Target stack and layout
 
@@ -15,11 +29,11 @@ Start with: ADRs (§68), Pydantic schemas (`Capability`, `CapabilityVersion`, `C
 
 ## Domain invariants (will fail review if broken)
 
-- One authoritative `Capability Registry`; no parallel Skill/Agent registries (§10, ADR-001).
-- Separate immutable `CapabilityVersion` from mutable `CapabilityRelease` (channel/state pointer), `CapabilityBinding` (protocol exposure), and derived `CapabilityMetrics`. Promotion/rollback changes release pointers only, never mutates published versions (§6, ADR-003).
-- `CapabilitySpec` is a discriminated union (`SkillSpec|ToolSpec|ResourceSpec|WorkflowSpec|ServiceSpec|AgentSpec`); no giant flat object with nullable fields (ADR-002).
-- Kind-specific verbs only: skill→resolve/load/apply, resource→read, tool→invoke, workflow→instantiate/execute, service→call, agent→delegate. No universal `execute_capability()` (§8, §32).
-- Domain/application layers must not import OpenCode, MCP, A2A, FastAPI, or SQLAlchemy types; depend on Protocols (`CapabilityRepository`, `EligibilityPolicy`, `CandidateRetriever`, `CapabilityReranker`, `DependencyResolver`, `BundleComposer`, …). All client/protocol logic lives in `adapters/inbound/{rest,mcp,opencode}/` (§28.5, §44, ADR-004).
+- One authoritative `Capability Registry`; no parallel Skill/Agent registries (§10, ADR-002 file `002-one-canonical-registry.md`).
+- Separate immutable `CapabilityVersion` (frozen Pydantic model) from mutable `CapabilityRelease` (channel/state pointer), `CapabilityBinding` (protocol exposure), and derived `CapabilityMetrics`. Promotion/rollback changes release pointers only, never mutates published versions (§6).
+- `CapabilitySpec` is a discriminated union (`SkillSpec|ToolSpec|ResourceSpec|WorkflowSpec|ServiceSpec|AgentSpec`, discriminator `kind`); no giant flat object with nullable fields.
+- Kind-specific verbs only: skill→resolve/load/apply, resource→read, tool→invoke, workflow→instantiate/execute, service→call, agent→delegate. No universal `execute_capability()` (§8, §32) — a test greps the domain for it.
+- Domain/application layers must not import OpenCode, MCP, A2A, FastAPI, or SQLAlchemy types; depend on Protocols (`CapabilityRepository`, `EligibilityPolicy`, `CandidateRetriever`, `CapabilityReranker`, `DependencyResolver`, `BundleComposer`, …). All client/protocol logic lives in `adapters/inbound/{rest,mcp,opencode}/` (§28.5, §44, ADR-004 file).
 - Faceted taxonomy (domain/task_type/technology/concern/…), not a single tree. `evaluator/memory/integration/model` are roles, not top-level kinds (§7, §9).
 - DB release state is authoritative; `corpus/raw` style folders are convenience only. Identity is stable `capability_id + version`, never display name alone (§21, §60.10).
 
