@@ -10,6 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from aci.domain.capability.models import TaskContext
 from aci.domain.policy.models import EligibleCandidate
 
 DocType = Literal["routing"]
@@ -46,12 +47,56 @@ class RetrievedDocument(BaseModel):
 
 
 class ScoredCandidate(BaseModel):
-    """An eligible candidate plus its retrieval score (§16 output)."""
+    """An eligible candidate plus its retrieval score (§16 output).
+
+    ``document_text`` carries the trusted routing document (§16.1) so the
+    reranker can match against sanitized metadata — never raw skill bodies.
+    """
 
     model_config = {"frozen": True}
 
     candidate: EligibleCandidate
     score: float
+    document_text: str = ""
+
+
+class TaskDescriptor(BaseModel):
+    """Normalized task description for ranking (plan §17)."""
+
+    model_config = {"frozen": True}
+
+    task_text: str = Field(min_length=1, max_length=8000)
+    context: TaskContext = Field(default_factory=TaskContext)
+
+
+class RankedCandidate(BaseModel):
+    """Reranker output: final score + why (§14 trace, §36 telemetry)."""
+
+    model_config = {"frozen": True}
+
+    candidate: EligibleCandidate
+    score: float
+    retrieval_score: float
+    rank: int  # 1-based, stable ordering
+    reasons: list[str] = Field(default_factory=list)
+
+
+class RerankTrace(BaseModel):
+    """Trace data for the rerank stage (§14; §52: version recorded in trace)."""
+
+    model_config = {"frozen": True}
+
+    implementation: str
+    version: str
+    input_count: int
+    output_count: int
+
+
+class RerankResult(BaseModel):
+    model_config = {"frozen": True}
+
+    ranked: list[RankedCandidate] = Field(default_factory=list)
+    trace: RerankTrace
 
 
 class RetrievalTrace(BaseModel):

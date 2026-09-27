@@ -93,9 +93,23 @@ class EmbeddingRetriever:
     ) -> RetrievalResult:
         indexed = 0
         pairs: list[tuple[str, str]] = []
+        texts: dict[tuple[str, str], str] = {}
         for candidate in eligible:
-            pairs.append((candidate.capability_id, candidate.version))
-            indexed += self._ensure_indexed(candidate)
+            key = (candidate.capability_id, candidate.version)
+            pairs.append(key)
+            document = self._embeddings.get_indexed_document(
+                candidate.capability_id, candidate.version, self._embedder.model_id
+            )
+            if document is None or document.digest != candidate.digest:
+                version = self._capabilities.get_version(key[0], key[1])
+                if version is None:
+                    continue  # eligible implies the version exists; defensive
+                document = build_trusted_document(
+                    version, model_id=self._embedder.model_id, now=datetime.now(UTC)
+                )
+                self._embeddings.put_document(document, self._embedder.embed([document.text])[0])
+                indexed += 1
+            texts[key] = document.text
 
         if not pairs:
             return RetrievalResult(
@@ -116,7 +130,11 @@ class EmbeddingRetriever:
         )
         by_key = {(c.capability_id, c.version): c for c in eligible}
         scored = [
-            ScoredCandidate(candidate=by_key[(hit.capability_id, hit.version)], score=hit.score)
+            ScoredCandidate(
+                candidate=by_key[(hit.capability_id, hit.version)],
+                score=hit.score,
+                document_text=texts.get((hit.capability_id, hit.version), ""),
+            )
             for hit in hits
             if (hit.capability_id, hit.version) in by_key
         ]
@@ -131,20 +149,3 @@ class EmbeddingRetriever:
                 model_id=self._embedder.model_id,
             ),
         )
-
-    def _ensure_indexed(self, candidate: EligibleCandidate) -> int:
-        """Index on cache miss; returns 1 if this run embedded the candidate."""
-        existing = self._embeddings.get_indexed_document(
-            candidate.capability_id, candidate.version, self._embedder.model_id
-        )
-        if existing is not None and existing.digest == candidate.digest:
-            return 0  # immutable content already embedded (§46)
-        version = self._capabilities.get_version(candidate.capability_id, candidate.version)
-        if version is None:
-            return 0  # eligible implies the version exists; defensive
-        document = build_trusted_document(
-            version, model_id=self._embedder.model_id, now=datetime.now(UTC)
-        )
-        vector = self._embedder.embed([document.text])[0]
-        self._embeddings.put_document(document, vector)
-        return 1

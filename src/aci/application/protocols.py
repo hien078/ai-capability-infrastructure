@@ -24,8 +24,11 @@ from aci.domain.policy.models import (
 )
 from aci.domain.provenance.models import LicenseAssessment, SecurityAssessment
 from aci.domain.routing.models import (
+    RerankResult,
     RetrievalResult,
     RetrievedDocument,
+    ScoredCandidate,
+    TaskDescriptor,
     TrustedRoutingDocument,
 )
 from aci.domain.skills.models import SourceProvenance
@@ -148,3 +151,19 @@ class CandidateRetriever(Protocol):
     def retrieve(
         self, query: str, eligible: list[EligibleCandidate], *, limit: int = 30
     ) -> RetrievalResult: ...
+
+
+class CapabilityReranker(Protocol):
+    """Rank retrieved candidates (plan §17). Swappable interface.
+
+    Implementations consume trusted/sanitized routing metadata only (§17.1):
+    never raw skill bodies, and they can never rescue ineligible content —
+    eligibility already ran (ADR-009).
+    """
+
+    def rerank(
+        self,
+        task: TaskDescriptor,
+        candidates: list[ScoredCandidate],
+        context: RoutingRequestContext,
+    ) -> RerankResult: ...

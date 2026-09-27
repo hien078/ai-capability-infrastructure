@@ -37,6 +37,7 @@ from aci.application.list_candidates import ProductionCandidateLoader  # noqa: E
 from aci.control_plane.promotion.service import PromotionService  # noqa: E402
 from aci.providers.skills.ingestion import SkillIngestionService  # noqa: E402
 from aci.routing.eligibility import DefaultEligibilityPolicy  # noqa: E402
+from aci.routing.rerankers.heuristic import HeuristicReranker  # noqa: E402
 from aci.routing.retrieval import EmbeddingRetriever  # noqa: E402
 
 DB_URL = os.environ.get("ACI_DATABASE_URL", "postgresql+psycopg://aci:aci@localhost:5432/aci")
@@ -153,6 +154,11 @@ def retriever(
     return EmbeddingRetriever(
         capabilities=capability_repo, embedder=embedder, embeddings=embedding_repo
     )
+
+
+@pytest.fixture()
+def reranker() -> HeuristicReranker:
+    return HeuristicReranker()
 
 
 @pytest.fixture()
