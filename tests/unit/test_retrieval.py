@@ -232,12 +232,15 @@ def test_retriever_searches_only_eligible_pairs() -> None:
         embedder=HashingEmbedder(),
         embeddings=embeddings,  # type: ignore[arg-type]
     )
+    # cap-other has no version behind it: it must be skipped defensively and
+    # never enter the search pairs (searched_count stays truthful).
     eligible = [make_candidate("cap-x"), make_candidate("cap-other")]
-    retriever.retrieve("q", eligible)
+    result = retriever.retrieve("q", eligible)
     pairs, model_id, limit = embeddings.search_calls[0]
-    assert set(pairs) == {("cap-x", "1.0.0"), ("cap-other", "1.0.0")}
+    assert set(pairs) == {("cap-x", "1.0.0")}
     assert model_id == "hashing-256-v1"
     assert limit == 30
+    assert result.trace.searched_count == 1
 
 
 def test_retriever_empty_eligible_is_valid_empty_result() -> None:

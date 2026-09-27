@@ -18,6 +18,7 @@ from aci.adapters.outbound.postgres.repositories import (
 )
 from aci.application.list_candidates import ProductionCandidateLoader
 from aci.control_plane.promotion.service import PromotionService
+from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.capability.models import (
     CapabilityRelation,
     RouteCapabilitiesCommand,
@@ -125,7 +126,7 @@ def test_relation_repository_roundtrip(
     assert listed[0].target_capability_id == cap
 
     # Registry facts are append-only: the same relation_id may not be rewritten.
-    with pytest.raises(ValueError, match="already exists"):
+    with pytest.raises(DomainError) as exc:
         relation_repo.put_relation(
             CapabilityRelation(
                 relation_id=relation.relation_id,
@@ -134,6 +135,7 @@ def test_relation_repository_roundtrip(
                 relation="requires",
             )
         )
+    assert exc.value.code == ErrorCode.CAPABILITY_ALREADY_EXISTS
 
 
 def test_full_chain_composes_checked_bundle(
@@ -162,9 +164,11 @@ def test_full_chain_composes_checked_bundle(
     )
 
     eligible = [c for c in candidate_loader.load() if c.capability_id in {cap_debug, cap_verify}]
-    retrieval = retriever.retrieve("debug python and verify regression", eligible, limit=5)
+    # Task tokens overlap only cap_debug's metadata: rank order is
+    # content-determined, so CHECKS re-roles cap_verify deterministically.
+    retrieval = retriever.retrieve("debug python tracebacks", eligible, limit=5)
     reranked = reranker.rerank(
-        TaskDescriptor(task_text="debug python and verify regression"), retrieval.candidates, _ctx()
+        TaskDescriptor(task_text="debug python tracebacks"), retrieval.candidates, _ctx()
     )
     resolution = resolver.resolve(reranked.ranked)
     bundle = composer.compose(
@@ -202,7 +206,10 @@ def test_conflict_drops_lower_ranked_in_live_chain(
     tmp_path: Path,
 ) -> None:
     cap_a = ingest(ingestion, tmp_path, "a", "debug python tracebacks")
-    cap_b = ingest(ingestion, tmp_path, "b", "debug python tracebacks alternative")
+    # cap_b deliberately shares NO task tokens: rank order between the two is
+    # then content-determined (never uuid-noise), so the conflict always drops
+    # the lower-ranked side deterministically.
+    cap_b = ingest(ingestion, tmp_path, "b", "water the greenhouse tomatoes")
     for cap in (cap_a, cap_b):
         open_gates_and_promote(promotion, license_repo, security_repo, cap)
     put_relation(

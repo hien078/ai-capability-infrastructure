@@ -9,7 +9,6 @@ protocol later; its vectors coexist via ``model_id``.
 
 import hashlib
 import re
-import uuid
 from math import sqrt
 
 _TOKEN = re.compile(r"[a-z0-9]+")
@@ -47,7 +46,3 @@ class HashingEmbedder:
         if norm > 0.0:
             vector = [value / norm for value in vector]
         return vector
-
-
-def new_document_id() -> str:
-    return uuid.uuid4().hex

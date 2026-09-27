@@ -85,6 +85,7 @@ class SqlAlchemyEmbeddingRepository:
                 .filter(
                     EmbeddingDocumentRow.capability_id == capability_id,
                     EmbeddingDocumentRow.version == version,
+                    EmbeddingDocumentRow.doc_type == "routing",
                     EmbeddingVectorRow.model_id == model_id,
                 )
                 .one_or_none()
@@ -118,6 +119,7 @@ class SqlAlchemyEmbeddingRepository:
                     EmbeddingVectorRow.document_id == EmbeddingDocumentRow.document_id,
                 )
                 .filter(
+                    EmbeddingDocumentRow.doc_type == "routing",
                     tuple_(EmbeddingDocumentRow.capability_id, EmbeddingDocumentRow.version).in_(
                         pairs
                     ),

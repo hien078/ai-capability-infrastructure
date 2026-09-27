@@ -96,7 +96,6 @@ class EmbeddingRetriever:
         texts: dict[tuple[str, str], str] = {}
         for candidate in eligible:
             key = (candidate.capability_id, candidate.version)
-            pairs.append(key)
             document = self._embeddings.get_indexed_document(
                 candidate.capability_id, candidate.version, self._embedder.model_id
             )
@@ -109,6 +108,7 @@ class EmbeddingRetriever:
                 )
                 self._embeddings.put_document(document, self._embedder.embed([document.text])[0])
                 indexed += 1
+            pairs.append(key)  # only candidates that actually have a document get searched
             texts[key] = document.text
 
         if not pairs:

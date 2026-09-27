@@ -3,6 +3,7 @@
 from sqlalchemy.orm import Session, sessionmaker
 
 from aci.adapters.outbound.postgres.orm import CapabilityRelationRow
+from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.capability.models import CapabilityRelation
 
 
@@ -43,9 +44,10 @@ class SqlAlchemyRelationRepository:
             existing = session.get(CapabilityRelationRow, relation.relation_id)
             if existing is not None:
                 # Relations are registry facts: same id must not silently change.
-                raise ValueError(
+                raise DomainError(
+                    ErrorCode.CAPABILITY_ALREADY_EXISTS,
                     f"relation {relation.relation_id} already exists; "
-                    "use a new relation_id for corrected facts"
+                    "use a new relation_id for corrected facts",
                 )
             session.add(_row_of(relation))
         return relation
