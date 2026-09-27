@@ -144,12 +144,23 @@ def make_report_outcome_tool(service: ReportOutcomeService) -> Callable[..., Out
         tests_before: dict[str, Any] | None = None,
         tests_after: dict[str, Any] | None = None,
         latency_ms: int | None = None,
+        client_status: str | None = None,
+        lint_passed: bool | None = None,
+        build_passed: bool | None = None,
+        changed_files: int | None = None,
+        tool_calls: int | None = None,
+        human_corrected: bool | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        estimated_usd: float | None = None,
     ) -> OutcomeEvidence:
         """Report what happened after a routed bundle ran.
 
         Verdicts are multi-source (test_harness, static_analysis, human_review,
         agent_self_report, …) with per-source confidence; ``unknown`` stays
-        ``unknown`` — never collapse evidence to a single flag.
+        ``unknown`` — never collapse evidence to a single flag. Build/test/lint
+        observations, the human correction flag, cost, and latency travel
+        alongside (§33).
         """
         evidence = OutcomeEvidence(
             outcome_id=new_outcome_id(),
@@ -163,6 +174,15 @@ def make_report_outcome_tool(service: ReportOutcomeService) -> Callable[..., Out
             tests_before=dict(tests_before or {}),
             tests_after=dict(tests_after or {}),
             latency_ms=latency_ms,
+            client_status=client_status,
+            lint_passed=lint_passed,
+            build_passed=build_passed,
+            changed_files=changed_files,
+            tool_calls=tool_calls,
+            human_corrected=human_corrected,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            estimated_usd=estimated_usd,
         )
         try:
             return service.report(evidence)

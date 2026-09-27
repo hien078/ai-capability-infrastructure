@@ -288,6 +288,14 @@ class OutcomeVerdict(BaseModel):
 
 
 class OutcomeEvidence(BaseModel):
+    """Multi-source evidence for one routed bundle run (§33, ADR-010).
+
+    Never a lone ``{"success": true}``: verdicts stay per-source with
+    confidence, ``unknown`` stays ``unknown``, and the build/test/lint
+    observations, human correction flag, cost, and latency travel alongside —
+    each optional so partial evidence is still honest evidence.
+    """
+
     model_config = {"frozen": True}
 
     outcome_id: str
@@ -298,3 +306,14 @@ class OutcomeEvidence(BaseModel):
     tests_before: dict[str, Any] = Field(default_factory=dict)
     tests_after: dict[str, Any] = Field(default_factory=dict)
     latency_ms: int | None = None
+    # §33 evidence envelope: client completion, build/test/lint observations,
+    # human correction, and cost — all optional, never merged into one flag.
+    client_status: str | None = None
+    lint_passed: bool | None = None
+    build_passed: bool | None = None
+    changed_files: int | None = None
+    tool_calls: int | None = None
+    human_corrected: bool | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    estimated_usd: float | None = None

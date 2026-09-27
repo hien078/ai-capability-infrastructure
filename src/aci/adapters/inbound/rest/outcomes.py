@@ -29,5 +29,14 @@ def report_outcome(
         tests_before=dict(body.tests_before),
         tests_after=dict(body.tests_after),
         latency_ms=body.latency_ms,
+        client_status=body.client_status,
+        lint_passed=body.lint_passed,
+        build_passed=body.build_passed,
+        changed_files=body.changed_files,
+        tool_calls=body.tool_calls,
+        human_corrected=body.human_corrected,
+        input_tokens=body.input_tokens,
+        output_tokens=body.output_tokens,
+        estimated_usd=body.estimated_usd,
     )
     return container.outcome_service.report(evidence)

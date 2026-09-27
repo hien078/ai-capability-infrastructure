@@ -8,7 +8,7 @@ tables arrive in Phase 5; versions carry facet metadata as JSONB + GIN now.
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Index, Text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, ForeignKeyConstraint, Index, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -246,6 +246,17 @@ class OutcomeEventRow(Base):
     latency_ms: Mapped[int | None] = mapped_column(nullable=True)
     tests_before: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     tests_after: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    # §33 evidence envelope (Phase 13): client completion, build/test/lint
+    # observations, human correction flag, and cost — all nullable.
+    client_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lint_passed: Mapped[bool | None] = mapped_column(nullable=True)
+    build_passed: Mapped[bool | None] = mapped_column(nullable=True)
+    changed_files: Mapped[int | None] = mapped_column(nullable=True)
+    tool_calls: Mapped[int | None] = mapped_column(nullable=True)
+    human_corrected: Mapped[bool | None] = mapped_column(nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    estimated_usd: Mapped[float | None] = mapped_column(nullable=True)
 
 
 class OutcomeVerdictRow(Base):

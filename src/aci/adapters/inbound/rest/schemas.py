@@ -88,6 +88,17 @@ class OutcomeRequest(BaseModel):
     tests_before: dict[str, Any] = Field(default_factory=dict)
     tests_after: dict[str, Any] = Field(default_factory=dict)
     latency_ms: int | None = None
+    # §33 evidence envelope (Phase 13): client completion, build/test/lint
+    # observations, human correction flag, and cost — all optional.
+    client_status: str | None = None
+    lint_passed: bool | None = None
+    build_passed: bool | None = None
+    changed_files: int | None = None
+    tool_calls: int | None = None
+    human_corrected: bool | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    estimated_usd: float | None = None
 
 
 class CapabilityDetail(BaseModel):

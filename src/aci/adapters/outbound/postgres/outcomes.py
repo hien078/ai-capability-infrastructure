@@ -27,6 +27,15 @@ class SqlAlchemyOutcomeRecorder:
                     latency_ms=evidence.latency_ms,
                     tests_before=dict(evidence.tests_before),
                     tests_after=dict(evidence.tests_after),
+                    client_status=evidence.client_status,
+                    lint_passed=evidence.lint_passed,
+                    build_passed=evidence.build_passed,
+                    changed_files=evidence.changed_files,
+                    tool_calls=evidence.tool_calls,
+                    human_corrected=evidence.human_corrected,
+                    input_tokens=evidence.input_tokens,
+                    output_tokens=evidence.output_tokens,
+                    estimated_usd=evidence.estimated_usd,
                 )
             )
             # Explicit parent flush: never rely on UOW ordering for raw-FK children.
@@ -71,4 +80,13 @@ class SqlAlchemyOutcomeRecorder:
                 tests_before=dict(event.tests_before),
                 tests_after=dict(event.tests_after),
                 latency_ms=event.latency_ms,
+                client_status=event.client_status,
+                lint_passed=event.lint_passed,
+                build_passed=event.build_passed,
+                changed_files=event.changed_files,
+                tool_calls=event.tool_calls,
+                human_corrected=event.human_corrected,
+                input_tokens=event.input_tokens,
+                output_tokens=event.output_tokens,
+                estimated_usd=event.estimated_usd,
             )
