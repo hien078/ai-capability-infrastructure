@@ -4,16 +4,20 @@ Implementations live in adapters (e.g. Postgres) and own their sessions:
 no SQLAlchemy/FastAPI/protocol types may appear in this module.
 """
 
+from datetime import datetime
 from typing import Protocol
 
 from aci.domain.capability.models import (
     Capability,
     CapabilityArtifact,
     CapabilityBinding,
+    CapabilityBundle,
+    CapabilityRelation,
     CapabilityRelease,
     CapabilityVersion,
     ReleaseChannel,
     ReleaseStatus,
+    RouteCapabilitiesCommand,
 )
 from aci.domain.policy.models import (
     EligibilityDecision,
@@ -24,7 +28,9 @@ from aci.domain.policy.models import (
 )
 from aci.domain.provenance.models import LicenseAssessment, SecurityAssessment
 from aci.domain.routing.models import (
+    RankedCandidate,
     RerankResult,
+    ResolutionResult,
     RetrievalResult,
     RetrievedDocument,
     ScoredCandidate,
@@ -167,3 +173,29 @@ class CapabilityReranker(Protocol):
         candidates: list[ScoredCandidate],
         context: RoutingRequestContext,
     ) -> RerankResult: ...
+
+
+class RelationRepository(Protocol):
+    """Directed capability relations (plan §18; V1: requires/conflicts_with/checks)."""
+
+    def put_relation(self, relation: CapabilityRelation) -> CapabilityRelation: ...
+    def list_relations(self, source_capability_id: str) -> list[CapabilityRelation]: ...
+
+
+class DependencyResolver(Protocol):
+    """Resolve relations after rerank (plan §18). Drops, never rescues."""
+
+    def resolve(self, ranked: list[RankedCandidate]) -> ResolutionResult: ...
+
+
+class BundleComposer(Protocol):
+    """Compose a minimal sufficient bundle, 0-5 items (plan §19; ADR-008)."""
+
+    def compose(
+        self,
+        resolution: ResolutionResult,
+        command: RouteCapabilitiesCommand,
+        *,
+        route_run_id: str,
+        now: datetime,
+    ) -> CapabilityBundle: ...

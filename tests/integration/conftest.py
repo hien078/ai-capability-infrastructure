@@ -25,6 +25,9 @@ from aci.adapters.outbound.postgres.base import make_session_factory  # noqa: E4
 from aci.adapters.outbound.postgres.policy_snapshots import (  # noqa: E402
     SqlAlchemyPolicySnapshotRepository,
 )
+from aci.adapters.outbound.postgres.relations import (  # noqa: E402
+    SqlAlchemyRelationRepository,
+)
 from aci.adapters.outbound.postgres.repositories import (  # noqa: E402
     SqlAlchemyArtifactStore,
     SqlAlchemyCapabilityRepository,
@@ -36,6 +39,8 @@ from aci.adapters.outbound.postgres.source_records import (  # noqa: E402
 from aci.application.list_candidates import ProductionCandidateLoader  # noqa: E402
 from aci.control_plane.promotion.service import PromotionService  # noqa: E402
 from aci.providers.skills.ingestion import SkillIngestionService  # noqa: E402
+from aci.routing.composer import MinimalBundleComposer  # noqa: E402
+from aci.routing.dependencies import DefaultDependencyResolver  # noqa: E402
 from aci.routing.eligibility import DefaultEligibilityPolicy  # noqa: E402
 from aci.routing.rerankers.heuristic import HeuristicReranker  # noqa: E402
 from aci.routing.retrieval import EmbeddingRetriever  # noqa: E402
@@ -159,6 +164,24 @@ def retriever(
 @pytest.fixture()
 def reranker() -> HeuristicReranker:
     return HeuristicReranker()
+
+
+@pytest.fixture()
+def relation_repo(sessions: sessionmaker[Session]) -> SqlAlchemyRelationRepository:
+    return SqlAlchemyRelationRepository(sessions)
+
+
+@pytest.fixture()
+def resolver(
+    relation_repo: SqlAlchemyRelationRepository,
+    release_repo: SqlAlchemyReleaseRepository,
+) -> DefaultDependencyResolver:
+    return DefaultDependencyResolver(relations=relation_repo, releases=release_repo)
+
+
+@pytest.fixture()
+def composer() -> MinimalBundleComposer:
+    return MinimalBundleComposer()
 
 
 @pytest.fixture()

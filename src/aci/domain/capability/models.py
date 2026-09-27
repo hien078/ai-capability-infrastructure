@@ -222,6 +222,40 @@ class BundleItem(BaseModel):
     reason_code: str = ""
 
 
+RelationType = Literal["requires", "conflicts_with", "checks"]
+
+
+class CapabilityRelation(BaseModel):
+    """Directed relation between capabilities (plan §18; V1 subset only).
+
+    Version constraints are exact-match strings in V1 (``None`` = any version).
+    """
+
+    model_config = {"frozen": True}
+
+    relation_id: str
+    source_capability_id: str
+    source_version_constraint: str | None = None
+    target_capability_id: str
+    target_version_constraint: str | None = None
+    relation: RelationType
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+def version_matches(version: str, constraint: str | None) -> bool:
+    """V1 constraint semantics: ``None`` = any version, else exact match."""
+    return constraint is None or constraint == version
+
+
+class BundleBudget(BaseModel):
+    """Budget the composer enforced for one bundle (plan §19.1)."""
+
+    model_config = {"frozen": True}
+
+    max_items: int = Field(default=5, ge=0, le=5)
+    max_context_tokens: int = Field(default=6000, ge=0)
+
+
 class CapabilityBundle(BaseModel):
     model_config = {"frozen": True}
 
@@ -229,6 +263,8 @@ class CapabilityBundle(BaseModel):
     route_run_id: str
     created_at: datetime
     items: list[BundleItem] = Field(max_length=5)
+    execution_order: list[str] = Field(default_factory=list)
+    budget: BundleBudget | None = None
     policy_snapshot_id: str | None = None
 
 

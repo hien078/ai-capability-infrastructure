@@ -81,6 +81,7 @@ class HeuristicReranker:
                     retrieval_score=scored.score,
                     rank=0,
                     reasons=[f"{name}={value:.3f}" for name, value in signals.items()],
+                    document_text=scored.document_text,
                 )
             )
         # Deterministic: score desc, then natural key asc.

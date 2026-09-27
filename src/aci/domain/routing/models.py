@@ -79,6 +79,47 @@ class RankedCandidate(BaseModel):
     retrieval_score: float
     rank: int  # 1-based, stable ordering
     reasons: list[str] = Field(default_factory=list)
+    document_text: str = ""
+
+
+class ResolvedItem(BaseModel):
+    """A candidate that survived dependency resolution, with its bundle role."""
+
+    model_config = {"frozen": True}
+
+    candidate: EligibleCandidate
+    role: Literal["primary", "check", "support"]
+    reason_code: str
+    document_text: str = ""
+
+
+class ResolutionDrop(BaseModel):
+    """Why a ranked candidate did not survive resolution (§14 trace)."""
+
+    model_config = {"frozen": True}
+
+    capability_id: str
+    version: str
+    reason: str  # stable machine-readable code (§45-style)
+    detail: str = ""
+
+
+class ResolutionTrace(BaseModel):
+    """Trace data for the dependency-resolution stage (§14)."""
+
+    model_config = {"frozen": True}
+
+    input_count: int
+    selected_count: int
+    dropped_count: int
+
+
+class ResolutionResult(BaseModel):
+    model_config = {"frozen": True}
+
+    selected: list[ResolvedItem] = Field(default_factory=list)
+    dropped: list[ResolutionDrop] = Field(default_factory=list)
+    trace: ResolutionTrace
 
 
 class RerankTrace(BaseModel):

@@ -170,3 +170,22 @@ class PolicySnapshotRow(Base):
     snapshot_id: Mapped[str] = mapped_column(Text, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     rules: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class CapabilityRelationRow(Base):
+    __tablename__ = "capability_relations"
+    __table_args__ = (
+        ForeignKeyConstraint(["source_capability_id"], ["capabilities.id"], ondelete="CASCADE"),
+        ForeignKeyConstraint(["target_capability_id"], ["capabilities.id"], ondelete="CASCADE"),
+        Index("ix_capability_relations_source", "source_capability_id"),
+    )
+
+    relation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    source_capability_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_version_constraint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_capability_id: Mapped[str] = mapped_column(Text, nullable=False)
+    target_version_constraint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    relation: Mapped[str] = mapped_column(Text, nullable=False)
+    # Attribute name differs from the column name: `metadata` is reserved on
+    # declarative bases. The physical column stays `metadata` (plan §41).
+    meta: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False, default=dict)
