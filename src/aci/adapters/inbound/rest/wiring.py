@@ -87,6 +87,12 @@ class Container:
         self.catalog = CatalogProjection(releases, capabilities, artifacts, objects)
         self.route_runs = route_runs
         self.bundles = bundles
+        # Raw protocol handles, for inbound adapters that project the registry
+        # directly (MCP skills extension reads releases/artifacts/objects).
+        self.releases = releases
+        self.capabilities = capabilities
+        self.artifacts = artifacts
+        self.objects = objects
 
 
 def get_container(request: Request) -> Container:
