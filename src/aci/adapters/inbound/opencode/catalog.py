@@ -95,6 +95,11 @@ class CatalogProjection:
         release = self._releases.get_release(skill_id, "production")
         if release is None or release.status != "active":
             raise DomainError(ErrorCode.CAPABILITY_NOT_FOUND, f"unknown skill {skill_id}")
+        # §28.2: the catalog exposes production *skill* releases only — a
+        # production tool/resource release is registry content, not a skill.
+        version = self._capabilities.get_version(skill_id, release.version)
+        if version is None or version.kind != "skill":
+            raise DomainError(ErrorCode.CAPABILITY_NOT_FOUND, f"unknown skill {skill_id}")
         artifact = self._artifacts.get_artifact(skill_id, release.version)
         if artifact is None:
             raise DomainError(ErrorCode.CAPABILITY_NOT_FOUND, f"no artifact for {skill_id}")
@@ -126,8 +131,22 @@ class CatalogProjection:
 
     @staticmethod
     def _catalog_files(capability_id: str, artifact: CapabilityArtifact) -> list[str]:
-        """Artifact paths → catalog paths (SKILL.md becomes <capability_id>.md)."""
-        return [f"{capability_id}.md" if f.path == "SKILL.md" else f.path for f in artifact.files]
+        """Artifact paths → catalog paths (SKILL.md becomes <capability_id>.md).
+
+        The entry alias wins the ``<name>.md`` catalog name: OpenCode's skill-ID
+        contract requires it to be the SKILL.md entry, so a package that also
+        ships a real ``<capability_id>.md`` has that file shadowed (never
+        advertised twice, never served under the entry name).
+        """
+        alias = f"{capability_id}.md"
+        names: list[str] = []
+        for f in artifact.files:
+            if f.path == alias:
+                continue  # shadowed by the entry alias (skill-ID contract)
+            name = alias if f.path == "SKILL.md" else f.path
+            if name not in names:
+                names.append(name)
+        return names
 
 
 def _media_type(path: str) -> str:

@@ -237,3 +237,46 @@ def test_read_file_missing_blob_is_integrity_error() -> None:
     with pytest.raises(DomainError) as exc:
         projection.read_file("cap-kept", "cap-kept.md")
     assert exc.value.code == ErrorCode.ARTIFACT_INTEGRITY_ERROR
+
+
+def test_read_file_rejects_non_skill_kind() -> None:
+    """§28.2: the catalog serves production *skill* releases only — a
+    production tool release is registry content, not catalog content."""
+    projection = make_projection(
+        releases=[active_production("cap-tool")],
+        versions={("cap-tool", "1.0.0"): make_version("cap-tool", kind="tool")},
+        artifacts={("cap-tool", "1.0.0"): make_artifact("cap-tool")},
+        blobs={SKILL_SHA: SKILL_BYTES},
+    )
+    with pytest.raises(DomainError) as exc:
+        projection.read_file("cap-tool", "cap-tool.md")
+    assert exc.value.code == ErrorCode.CAPABILITY_NOT_FOUND
+
+
+def test_catalog_alias_shadows_same_named_real_file() -> None:
+    """A package shipping a real <capability_id>.md next to SKILL.md must not
+    advertise the entry name twice; the alias (entry) wins the catalog name."""
+    artifact = CapabilityArtifact(
+        capability_id="cap-x",
+        version="1.0.0",
+        package_digest=f"sha256:{'b' * 64}",
+        manifest={"entrypoint": "SKILL.md"},
+        files=[
+            ArtifactFile(path="SKILL.md", size_bytes=len(SKILL_BYTES), sha256=SKILL_SHA),
+            ArtifactFile(path="cap-x.md", size_bytes=3, sha256=GUIDE_SHA),
+            ArtifactFile(path="references/guide.md", size_bytes=len(GUIDE_BYTES), sha256=GUIDE_SHA),
+        ],
+    )
+    projection = make_projection(
+        releases=[active_production("cap-x")],
+        versions={("cap-x", "1.0.0"): make_version("cap-x")},
+        artifacts={("cap-x", "1.0.0"): artifact},
+        blobs={SKILL_SHA: SKILL_BYTES, GUIDE_SHA: GUIDE_BYTES},
+    )
+
+    entry = projection.index()["skills"][0]
+    # No duplicate names; the shadowed real file is not advertised.
+    assert entry["files"] == ["cap-x.md", "references/guide.md"]
+    # The entry alias still serves the canonical SKILL.md bytes.
+    body, _ = projection.read_file("cap-x", "cap-x.md")
+    assert body == SKILL_BYTES
