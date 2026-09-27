@@ -11,6 +11,7 @@ from aci.domain.capability.models import (
     BundleItem,
     Capability,
     CapabilityBundle,
+    CapabilityMetrics,
     CapabilityRelease,
     CapabilityVersion,
     OutcomeEvidence,
@@ -109,3 +110,46 @@ def test_domain_has_no_protocol_imports() -> None:
 def test_error_codes_stable() -> None:
     assert ErrorCode.CAPABILITY_REVOKED == "CAPABILITY_REVOKED"
     assert ErrorCode.POLICY_DENIED == "POLICY_DENIED"
+
+
+def test_version_carries_faceted_taxonomy() -> None:
+    v = CapabilityVersion(
+        capability_id="systematic-debugging",
+        version="2.4.1",
+        kind="skill",
+        content_digest=DIGEST,
+        created_at=NOW,
+        spec=SkillSpec(provides=["root-cause-analysis"]),
+        facets={"domain": ["software-engineering"], "task_type": ["debugging"]},
+    )
+    assert v.facets["domain"] == ["software-engineering"]
+    assert v.spec.provides == ["root-cause-analysis"]
+
+
+def test_skill_spec_requirements_and_routing_hints() -> None:
+    s = SkillSpec(routing_hints={"task_types": ["debugging"]})
+    assert s.requirements.context == []
+    assert s.requirements.optional_context == []
+    assert s.routing_hints == {"task_types": ["debugging"]}
+    assert s.side_effects == "none"
+
+
+def test_release_carries_promotion_audit_trail() -> None:
+    r = CapabilityRelease(
+        capability_id="c",
+        version="1.0.0",
+        channel="production",
+        promoted_at=NOW,
+        approved_by="reviewer-1",
+        policy_snapshot_id="pol_1",
+    )
+    assert r.promoted_at == NOW
+    assert r.approved_by == "reviewer-1"
+
+
+def test_metrics_are_frozen_snapshots_separate_from_version() -> None:
+    m = CapabilityMetrics(capability_id="c", version="1.0.0", computed_at=NOW, usage_count=7)
+    with pytest.raises(ValidationError):
+        m.usage_count = 8  # type: ignore[misc]
+    assert "usage_count" not in set(CapabilityVersion.model_fields)
+    assert "verified_success_rate" not in set(CapabilityVersion.model_fields)

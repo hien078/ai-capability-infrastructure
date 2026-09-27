@@ -40,8 +40,10 @@ thư mục filesystem (`corpus/raw`, …) bị hiểu nhầm là trạng thái a
 
 ## Verification
 
-- `CapabilityVersion` frozen trong `src/aci/domain/capability/models.py`; `CapabilityRelease` mutable.
+- `CapabilityVersion` frozen trong `src/aci/domain/capability/models.py`; `CapabilityRelease` mutable;
+  `CapabilityMetrics` là frozen snapshot dẫn xuất, không field metric nào nằm trên `CapabilityVersion`.
 - `tests/unit/test_contracts.py::test_version_is_immutable`,
-  `test_release_promotion_does_not_mutate_version`.
+  `test_release_promotion_does_not_mutate_version`, `test_metrics_are_frozen_snapshots_separate_from_version`,
+  `test_version_carries_faceted_taxonomy`.
 - `tests/unit/test_architecture_boundaries.py::test_registry_separation_version_release_binding`.
 - Migrations từ ngày đầu phải enforce `UNIQUE(capability_id, version)` và FK bundle→version (plan §41).

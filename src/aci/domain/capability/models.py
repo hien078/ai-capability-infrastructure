@@ -23,11 +23,18 @@ VerdictSource = Literal[
 ]
 
 
+class SkillRequirements(BaseModel):
+    context: list[str] = Field(default_factory=list)
+    optional_context: list[str] = Field(default_factory=list)
+
+
 class SkillSpec(BaseModel):
     kind: Literal["skill"] = "skill"
     entrypoint: str = "SKILL.md"
     artifacts: list[str] = Field(default_factory=lambda: ["SKILL.md"])
     provides: list[str] = Field(default_factory=list)
+    requirements: SkillRequirements = Field(default_factory=SkillRequirements)
+    routing_hints: dict[str, list[str]] = Field(default_factory=dict)
     side_effects: Literal["none"] = "none"
     requested_tools: list[str] = Field(default_factory=list)
 
@@ -91,6 +98,7 @@ class CapabilityVersion(BaseModel):
     created_at: datetime
     display_name: str = ""
     description: str = ""
+    facets: dict[str, list[str]] = Field(default_factory=dict)
     spec: CapabilitySpec
 
 
@@ -99,6 +107,8 @@ class CapabilityRelease(BaseModel):
     version: str
     channel: ReleaseChannel
     status: ReleaseStatus = "active"
+    promoted_at: datetime | None = None
+    approved_by: str | None = None
     policy_snapshot_id: str | None = None
 
 
@@ -109,6 +119,24 @@ class CapabilityBinding(BaseModel):
     binding_type: str
     visibility_scope: str = "public-production"
     config: dict = Field(default_factory=dict)
+
+
+class CapabilityMetrics(BaseModel):
+    """Derived point-in-time snapshot (plan §6.5). Never mutates a CapabilityVersion."""
+
+    model_config = {"frozen": True}
+
+    capability_id: str
+    version: str
+    computed_at: datetime
+    usage_count: int = 0
+    verified_success_rate: float | None = None
+    human_override_rate: float | None = None
+    avg_context_tokens: float | None = None
+    avg_total_tokens: float | None = None
+    avg_latency_ms: float | None = None
+    error_rate: float | None = None
+    regression_rate: float | None = None
 
 
 class TaskContext(BaseModel):

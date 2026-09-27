@@ -4,12 +4,15 @@ from aci.domain.capability.models import (
     Capability,
     CapabilityBinding,
     CapabilityBundle,
+    CapabilityMetrics,
     CapabilityRelease,
     CapabilitySpec,
     CapabilityVersion,
     OutcomeEvidence,
     OutcomeVerdict,
     RouteCapabilitiesCommand,
+    SkillRequirements,
+    SkillSpec,
     TaskContext,
 )
 
@@ -18,6 +21,7 @@ __all__ = [
     "Capability",
     "CapabilityBinding",
     "CapabilityBundle",
+    "CapabilityMetrics",
     "CapabilityRelease",
     "CapabilitySpec",
     "CapabilityVersion",
@@ -26,5 +30,7 @@ __all__ = [
     "OutcomeEvidence",
     "OutcomeVerdict",
     "RouteCapabilitiesCommand",
+    "SkillRequirements",
+    "SkillSpec",
     "TaskContext",
 ]
