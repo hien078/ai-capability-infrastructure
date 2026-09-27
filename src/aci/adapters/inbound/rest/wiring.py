@@ -5,9 +5,13 @@ implementations) and composes the application services, which depend on
 protocols only. Nothing here reaches into domain internals beyond models.
 """
 
+from pathlib import Path
+
 from fastapi import Request
 
+from aci.adapters.inbound.opencode.catalog import CatalogProjection
 from aci.adapters.outbound.model_provider.hashing import HashingEmbedder
+from aci.adapters.outbound.object_store.fs import FsObjectStore
 from aci.adapters.outbound.pgvector.repository import SqlAlchemyEmbeddingRepository
 from aci.adapters.outbound.postgres.assessments import (
     SqlAlchemyLicenseAssessmentRepository,
@@ -64,6 +68,7 @@ class Container:
         reranker = HeuristicReranker()
         resolver = DefaultDependencyResolver(relations, releases)
         composer = MinimalBundleComposer()
+        objects = FsObjectStore(Path(settings.object_store_root))
 
         self.route_service = RouteCapabilitiesService(
             loader,
@@ -79,6 +84,7 @@ class Container:
         self.search_service = SearchCapabilitiesService(loader, retriever, capabilities)
         self.resolve_service = ResolveCapabilityService(capabilities, artifacts)
         self.outcome_service = ReportOutcomeService(outcomes, bundles)
+        self.catalog = CatalogProjection(releases, capabilities, artifacts, objects)
         self.route_runs = route_runs
         self.bundles = bundles
 
