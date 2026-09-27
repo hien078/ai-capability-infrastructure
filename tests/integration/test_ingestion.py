@@ -233,3 +233,82 @@ def test_ingest_defaults_version_and_records_transformations(
     assert len(rec) == 1
     assert rec[0].local_transformations == result.transformations
     assert capability_repo.get_version(expected_id, "0.1.0") is not None
+
+
+def test_reingest_repairs_partial_state_after_crash(
+    ingestion: SkillIngestionService,
+    capability_repo: SqlAlchemyCapabilityRepository,
+    release_repo: SqlAlchemyReleaseRepository,
+    artifact_store: SqlAlchemyArtifactStore,
+    source_records: SqlAlchemySourceRecordRepository,
+    tmp_path: Path,
+) -> None:
+    """Each registry write is its own transaction (§31.1): a crash between
+    create_version and the remaining writes must be repairable by re-ingesting
+    the identical content — the idempotent path backfills what is missing."""
+    from aci.adapters.outbound.object_store.fs import FsObjectStore
+
+    cap = uid("sysdbg")
+    src = tmp_path / "skill-src"
+    write_skill(src, cap)
+
+    class ExplodingArtifacts:
+        """Simulates a crash right after create_version committed."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def put_artifact(self, artifact):  # type: ignore[no-untyped-def]
+            raise RuntimeError("simulated crash after create_version")
+
+        def get_artifact(self, capability_id: str, version: str):
+            return artifact_store.get_artifact(capability_id, version)
+
+    crashed = SkillIngestionService(
+        capabilities=capability_repo,
+        releases=release_repo,
+        artifacts=ExplodingArtifacts(),
+        source_records=source_records,
+        objects=FsObjectStore(tmp_path / "objects"),
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        crashed.ingest_local(src, now=NOW)
+
+    # Partial state: version exists, artifact/release/provenance do not.
+    assert capability_repo.get_version(cap, "1.2.0") is not None
+    assert artifact_store.get_artifact(cap, "1.2.0") is None
+    assert release_repo.get_release(cap, "raw") is None
+    assert source_records.list_source_records(cap) == []
+
+    # Re-ingesting identical content reports idempotency AND backfills.
+    result = ingestion.ingest_local(src, now=NOW)
+    assert result.already_ingested is True
+    assert result.capability_created is False
+
+    assert artifact_store.get_artifact(cap, "1.2.0") is not None
+    assert release_repo.get_release(cap, "raw") is not None
+    assert len(source_records.list_source_records(cap)) == 1
+    # and the raw pointer still points at this version
+    assert release_repo.get_release(cap, "raw").version == "1.2.0"
+
+
+def test_reingest_does_not_move_raw_pointer_back(
+    ingestion: SkillIngestionService,
+    release_repo: SqlAlchemyReleaseRepository,
+    tmp_path: Path,
+) -> None:
+    """Backfill must only create a missing raw pointer, never rewind one that
+    a newer version legitimately moved forward."""
+    cap = uid("sysdbg")
+    src = tmp_path / "skill-src"
+    write_skill(src, cap)
+    ingestion.ingest_local(src, now=NOW)
+    write_skill(src, cap, version="1.3.0")
+    ingestion.ingest_local(src, now=NOW)
+    assert release_repo.get_release(cap, "raw").version == "1.3.0"
+
+    # re-ingest the OLD identical content: pointer must stay at 1.3.0
+    write_skill(src, cap, version="1.2.0")
+    result = ingestion.ingest_local(src, now=NOW)
+    assert result.already_ingested is True
+    assert release_repo.get_release(cap, "raw").version == "1.3.0"

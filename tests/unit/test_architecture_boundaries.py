@@ -1,5 +1,6 @@
 """Khóa biên kiến trúc ADR-001..004: abstraction, registry, planes, adapter boundary."""
 
+import ast
 import pathlib
 from typing import get_args
 
@@ -60,3 +61,36 @@ def test_adapter_boundary_domain_never_imports_adapters() -> None:
             code = line.split("#", 1)[0].strip()
             if code.startswith(("import ", "from ")):
                 assert "adapters" not in code, f
+
+
+def _aci_submodules_imported(path: pathlib.Path) -> set[str]:
+    """All `aci.<submodule>` prefixes imported by `path`."""
+    tree = ast.parse(_read(path))
+    mods: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("aci."):
+            mods.add(node.module)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name.startswith("aci."):
+                    mods.add(a.name)
+    return mods
+
+
+def test_non_adapter_layers_never_import_adapters() -> None:
+    """Only adapters may touch SQLAlchemy/protocol implementations (ADR-004)."""
+    src = SRC / "aci"
+    for layer in ("application", "providers", "routing", "control_plane"):
+        for f in _py_files(src / layer):
+            for mod in _aci_submodules_imported(f):
+                assert not mod.startswith("aci.adapters"), f"{f} imports {mod}"
+
+
+def test_domain_imports_nothing_upward() -> None:
+    """Domain is the innermost layer: no application/providers/routing/control_plane."""
+    banned = ("aci.application", "aci.providers", "aci.routing", "aci.control_plane")
+    for f in _py_files(DOMAIN):
+        for mod in _aci_submodules_imported(f):
+            assert not any(mod == b or mod.startswith(b + ".") for b in banned), (
+                f"{f} imports {mod} — domain must stay innermost"
+            )

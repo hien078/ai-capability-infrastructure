@@ -1,11 +1,13 @@
 """License + security assessment persistence (Phase 4, plan §§24-25)."""
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from aci.adapters.outbound.postgres.orm import (
     LicenseAssessmentRow,
     SecurityAssessmentRow,
 )
+from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.provenance.models import (
     LicenseAssessment,
     SecurityAssessment,
@@ -47,12 +49,20 @@ class SqlAlchemyLicenseAssessmentRepository:
         self._sessions = sessions
 
     def put_assessment(self, assessment: LicenseAssessment) -> LicenseAssessment:
-        with self._sessions() as session, session.begin():
-            row = session.get(
-                LicenseAssessmentRow,
-                (assessment.assessment_id, assessment.capability_id, assessment.version),
-            )
-            if row is None:
+        """Append-only by assessment_id: gate evidence keeps its audit trail.
+        Re-assessing means writing a new assessment_id; the latest one wins."""
+        try:
+            with self._sessions() as session, session.begin():
+                row = session.get(
+                    LicenseAssessmentRow,
+                    (assessment.assessment_id, assessment.capability_id, assessment.version),
+                )
+                if row is not None:
+                    raise DomainError(
+                        ErrorCode.CAPABILITY_ALREADY_EXISTS,
+                        f"license assessment {assessment.assessment_id} already exists; "
+                        "append a new assessment_id instead of overwriting evidence",
+                    )
                 session.add(
                     LicenseAssessmentRow(
                         assessment_id=assessment.assessment_id,
@@ -65,12 +75,11 @@ class SqlAlchemyLicenseAssessmentRepository:
                         notes=assessment.notes,
                     )
                 )
-            else:
-                row.license_identifier = assessment.license_identifier
-                row.permissions = assessment.permissions.model_dump()
-                row.assessed_at = assessment.assessed_at
-                row.assessed_by = assessment.assessed_by
-                row.notes = assessment.notes
+        except IntegrityError as exc:  # concurrent append of the same id
+            raise DomainError(
+                ErrorCode.CAPABILITY_ALREADY_EXISTS,
+                f"license assessment {assessment.assessment_id} already exists",
+            ) from exc
         return assessment
 
     def get_assessment(self, capability_id: str, version: str) -> LicenseAssessment | None:
@@ -78,7 +87,7 @@ class SqlAlchemyLicenseAssessmentRepository:
             rows = (
                 session.query(LicenseAssessmentRow)
                 .filter_by(capability_id=capability_id, version=version)
-                .order_by(LicenseAssessmentRow.assessed_at)
+                .order_by(LicenseAssessmentRow.assessed_at, LicenseAssessmentRow.assessment_id)
                 .all()
             )
             if not rows:
@@ -91,12 +100,19 @@ class SqlAlchemySecurityAssessmentRepository:
         self._sessions = sessions
 
     def put_assessment(self, assessment: SecurityAssessment) -> SecurityAssessment:
-        with self._sessions() as session, session.begin():
-            row = session.get(
-                SecurityAssessmentRow,
-                (assessment.assessment_id, assessment.capability_id, assessment.version),
-            )
-            if row is None:
+        """Append-only by assessment_id: scan evidence keeps its audit trail."""
+        try:
+            with self._sessions() as session, session.begin():
+                row = session.get(
+                    SecurityAssessmentRow,
+                    (assessment.assessment_id, assessment.capability_id, assessment.version),
+                )
+                if row is not None:
+                    raise DomainError(
+                        ErrorCode.CAPABILITY_ALREADY_EXISTS,
+                        f"security assessment {assessment.assessment_id} already exists; "
+                        "append a new assessment_id instead of overwriting evidence",
+                    )
                 session.add(
                     SecurityAssessmentRow(
                         assessment_id=assessment.assessment_id,
@@ -109,12 +125,11 @@ class SqlAlchemySecurityAssessmentRepository:
                         reviewed_by=assessment.reviewed_by,
                     )
                 )
-            else:
-                row.scan_status = assessment.scan_status
-                row.findings = list(assessment.findings)
-                row.scanned_at = assessment.scanned_at
-                row.scanner_version = assessment.scanner_version
-                row.reviewed_by = assessment.reviewed_by
+        except IntegrityError as exc:  # concurrent append of the same id
+            raise DomainError(
+                ErrorCode.CAPABILITY_ALREADY_EXISTS,
+                f"security assessment {assessment.assessment_id} already exists",
+            ) from exc
         return assessment
 
     def get_assessment(self, capability_id: str, version: str) -> SecurityAssessment | None:
@@ -122,7 +137,7 @@ class SqlAlchemySecurityAssessmentRepository:
             rows = (
                 session.query(SecurityAssessmentRow)
                 .filter_by(capability_id=capability_id, version=version)
-                .order_by(SecurityAssessmentRow.scanned_at)
+                .order_by(SecurityAssessmentRow.scanned_at, SecurityAssessmentRow.assessment_id)
                 .all()
             )
             if not rows:

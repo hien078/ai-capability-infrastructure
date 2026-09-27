@@ -11,7 +11,7 @@ from aci.application.protocols import (
     ReleaseRepository,
     SecurityAssessmentRepository,
 )
-from aci.domain.capability.models import ReleaseChannel
+from aci.domain.capability.models import ReleaseChannel, ReleaseStatus
 from aci.domain.policy.models import EligibleCandidate, TrustTier
 
 
@@ -37,11 +37,14 @@ class ProductionCandidateLoader:
         self._securities = securities
 
     def load(
-        self, channel: ReleaseChannel = "production", *, status: str = "active"
+        self,
+        channel: ReleaseChannel = "production",
+        *,
+        status: ReleaseStatus | None = "active",
     ) -> list[EligibleCandidate]:
         """Active releases on a channel → annotated candidates. Revoked drop out here."""
         out: list[EligibleCandidate] = []
-        for release in self._releases.list_channel(channel, status=status):  # type: ignore[arg-type]
+        for release in self._releases.list_channel(channel, status=status):
             version = self._capabilities.get_version(release.capability_id, release.version)
             if version is None:
                 continue

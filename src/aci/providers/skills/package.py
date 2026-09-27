@@ -25,9 +25,14 @@ def hash_bytes(data: bytes) -> str:
 
 
 def package_digest(files: list[ArtifactFile]) -> str:
-    """Deterministic content digest over the sorted file listing."""
+    """Deterministic content digest over the sorted file listing.
+
+    The header carries a schema tag + file count so a file name containing
+    ``\\n``/``\\t`` can never make two different packages hash identically.
+    """
     lines = sorted(f"{f.path}\t{f.sha256}" for f in files)
-    return hash_bytes("\n".join(lines).encode("utf-8"))
+    payload = f"aci-skill-package:v1:{len(files)}\n" + "\n".join(lines)
+    return hash_bytes(payload.encode("utf-8"))
 
 
 def build_file_list(source: Path) -> list[ArtifactFile]:
@@ -51,8 +56,8 @@ def build_file_list(source: Path) -> list[ArtifactFile]:
         files.append(
             ArtifactFile(path=rel.as_posix(), sha256=hash_bytes(data), size_bytes=len(data))
         )
+        if len(files) > MAX_FILES:  # reject early, before walking the rest
+            raise _invalid(f"skill package exceeds {MAX_FILES} files")
     if not any(f.path == "SKILL.md" for f in files):
         raise _invalid("skill package must contain SKILL.md at the root")
-    if len(files) > MAX_FILES:
-        raise _invalid(f"skill package exceeds {MAX_FILES} files")
     return files

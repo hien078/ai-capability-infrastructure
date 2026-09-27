@@ -4,6 +4,7 @@ Keys are SHA-256 hex digests; layout is `<root>/<key[:2]>/<key>`. Writes are
 idempotent: identical content is never rewritten, so ingestion can retry.
 """
 
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -26,11 +27,20 @@ class FsObjectStore:
         if path.exists():
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        # write via temp file + atomic rename so readers never see partial blobs
+        # write via temp file + fsync + atomic rename so readers never see
+        # partial blobs and a power loss never leaves a 0-byte object at a
+        # digest key (content-addressed corruption would be permanent).
         with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as tmp:
             tmp.write(data)
+            tmp.flush()
+            os.fsync(tmp.fileno())
             tmp_name = tmp.name
         Path(tmp_name).replace(path)
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
     def get(self, key: str) -> bytes | None:
         path = self._path(key)

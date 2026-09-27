@@ -6,7 +6,7 @@ No protocol, web, or DB imports allowed in this module.
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from aci.domain.taxonomy.models import validate_facets
 
@@ -99,6 +99,14 @@ class Capability(BaseModel):
     created_at: datetime
     owner_scope: OwnerScope = "global"
     owner_scope_id: str | None = None  # org/workspace/principal id when scope is not global
+
+    @model_validator(mode="after")
+    def _scope_id_required(self) -> "Capability":
+        """A scoped capability without its scope id would match every request
+        that also lacks one (None == None) — reject it at the boundary (§27)."""
+        if self.owner_scope != "global" and self.owner_scope_id is None:
+            raise ValueError(f"owner_scope={self.owner_scope!r} requires owner_scope_id")
+        return self
 
 
 class CapabilityVersion(BaseModel):

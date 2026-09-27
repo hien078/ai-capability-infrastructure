@@ -14,6 +14,7 @@ from aci.providers.skills.canonicalization import (
     derive_version,
     transformations_for,
 )
+from aci.providers.skills.ingestion import SkillIngestionService
 from aci.providers.skills.package import build_file_list, hash_bytes, package_digest
 from aci.providers.skills.parser import parse_skill_md
 
@@ -176,3 +177,144 @@ def test_fs_object_store_rejects_bad_keys(tmp_path: Path) -> None:
 def test_artifact_file_validation() -> None:
     with pytest.raises(ValidationError):
         ArtifactFile(path="x", sha256="ZZ", size_bytes=1)
+
+
+# ---------- audit fixes: canonical id, digest separator, TOCTOU, caps ----------
+
+
+def test_canonicalization_rejects_single_char_name() -> None:
+    """A 1-char name cannot form a valid Capability.id (needs 2-64 chars);
+    it must raise a clean domain error, never a pydantic ValidationError."""
+    for name in ("a", "A", "a-", "-a-"):
+        with pytest.raises(DomainError) as exc:
+            canonical_capability_id(name)
+        assert exc.value.code == ErrorCode.SKILL_PACKAGE_INVALID
+
+
+def test_package_digest_count_header_kills_filename_ambiguity() -> None:
+    """A file named 'x\\tAAA...\\ny' used to hash identically to a two-file
+    package; the v1 count header makes every distinct listing distinct."""
+    a = "a" * 64
+    b = "b" * 64
+    two_files = [
+        ArtifactFile(path="x", sha256=a, size_bytes=1),
+        ArtifactFile(path="y", sha256=b, size_bytes=1),
+    ]
+    weird_name = [ArtifactFile(path=f"x\t{a}\ny", sha256=b, size_bytes=1)]
+    assert package_digest(two_files) != package_digest(weird_name)
+
+
+def test_build_rejects_too_many_files_early(tmp_path: Path) -> None:
+    write_skill(tmp_path)
+    for i in range(500):  # 1 SKILL.md + 500 = 501 > MAX_FILES
+        (tmp_path / f"f{i}.txt").write_text("x")
+    with pytest.raises(DomainError) as exc:
+        build_file_list(tmp_path)
+    assert exc.value.code == ErrorCode.SKILL_PACKAGE_INVALID
+
+
+def test_ingest_verifies_hash_before_storing_blob(tmp_path: Path) -> None:
+    """A concurrent writer changing a file between hashing and storing must
+    fail with ARTIFACT_INTEGRITY_ERROR, never store content under a foreign
+    digest key (content-addressed invariant, §39)."""
+    src = tmp_path / "skill-src"
+    write_skill(src)
+    (src / "references").mkdir(exist_ok=True)
+    victim = src / "references" / "checklist.md"
+    victim.write_text("original steps\n", encoding="utf-8")
+
+    class MutatingStore(FsObjectStore):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.calls = 0
+
+        def put(self, key: str, data: bytes) -> None:
+            if self.calls == 0:  # writer strikes while SKILL.md is being stored
+                victim.write_text("TAMPERED\n", encoding="utf-8")
+            self.calls += 1
+            return super().put(key, data)
+
+    svc = SkillIngestionService(
+        capabilities=_FakeCaps(),
+        releases=_FakeReleases(),
+        artifacts=_FakeArtifacts(),
+        source_records=_FakeSourceRecords(),
+        objects=MutatingStore(tmp_path / "objects"),
+    )
+    with pytest.raises(DomainError) as exc:
+        svc.ingest_local(src)
+    assert exc.value.code == ErrorCode.ARTIFACT_INTEGRITY_ERROR
+    # nothing persisted: no version, no blob for the tampered file
+    original_sha = hash_bytes(b"original steps\n")
+    tampered_sha = hash_bytes(b"TAMPERED\n")
+    assert svc._capabilities.get_version("systematic-debugging", "1.2.0") is None
+    assert svc._objects.get(original_sha) is None
+    assert svc._objects.get(tampered_sha) is None
+
+
+class _FakeCaps:
+    def __init__(self) -> None:
+        self.caps: dict = {}
+        self.versions: dict = {}
+
+    def create_capability(self, c):
+        self.caps[c.id] = c
+        return c
+
+    def get_capability(self, cid):
+        return self.caps.get(cid)
+
+    def create_version(self, v):
+        self.versions[(v.capability_id, v.version)] = v
+        return v
+
+    def get_version(self, cid, ver):
+        return self.versions.get((cid, ver))
+
+    def list_versions(self, cid):
+        return [v for (c, _), v in self.versions.items() if c == cid]
+
+    def put_binding(self, b):
+        return b
+
+    def get_binding(self, bid):
+        return None
+
+
+class _FakeReleases:
+    def __init__(self) -> None:
+        self.r: dict = {}
+
+    def set_release(self, r):
+        self.r[(r.capability_id, r.channel)] = r
+        return r
+
+    def get_release(self, cid, ch):
+        return self.r.get((cid, ch))
+
+    def list_releases(self, cid):
+        return [v for (c, _), v in self.r.items() if c == cid]
+
+
+class _FakeArtifacts:
+    def __init__(self) -> None:
+        self.a: dict = {}
+
+    def put_artifact(self, a):
+        self.a[(a.capability_id, a.version)] = a
+        return a
+
+    def get_artifact(self, cid, ver):
+        return self.a.get((cid, ver))
+
+
+class _FakeSourceRecords:
+    def __init__(self) -> None:
+        self.r: list = []
+
+    def add_source_record(self, rec):
+        self.r.append(rec)
+        return rec
+
+    def list_source_records(self, cid):
+        return [x for x in self.r if x.capability_id == cid]

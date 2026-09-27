@@ -20,6 +20,7 @@ upstream changes must produce a new version (§38), never mutate a published one
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from aci.application.protocols import (
     ArtifactStore,
@@ -30,19 +31,20 @@ from aci.application.protocols import (
 )
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.capability.models import (
+    ArtifactFile,
     Capability,
     CapabilityArtifact,
     CapabilityRelease,
     CapabilityVersion,
     SkillSpec,
 )
-from aci.domain.skills.models import IngestionResult, SourceProvenance
+from aci.domain.skills.models import IngestionResult, SkillMetadata, SourceProvenance
 from aci.providers.skills.canonicalization import (
     canonical_capability_id,
     derive_version,
     transformations_for,
 )
-from aci.providers.skills.package import build_file_list, package_digest
+from aci.providers.skills.package import build_file_list, hash_bytes, package_digest
 from aci.providers.skills.parser import parse_skill_md
 
 TOOL_VERSION = "0.1.0"
@@ -94,26 +96,78 @@ class SkillIngestionService:
         # 2. Idempotency / conflict on existing version.
         existing = self._capabilities.get_version(capability_id, version)
         if existing is not None:
-            if existing.content_digest == f"sha256:{digest}":
-                return IngestionResult(
-                    capability_id=capability_id,
-                    version=version,
-                    capability_created=False,
-                    already_ingested=True,
-                    raw_snapshot_digest=f"sha256:{digest}",
-                    package_digest=f"sha256:{digest}",
-                    file_count=len(files),
-                    transformations=transformations,
+            if existing.content_digest != f"sha256:{digest}":
+                raise DomainError(
+                    ErrorCode.CAPABILITY_ALREADY_EXISTS,
+                    f"version {capability_id}@{version} exists with different content; "
+                    "bump the version instead of mutating a published one",
                 )
-            raise DomainError(
-                ErrorCode.CAPABILITY_ALREADY_EXISTS,
-                f"version {capability_id}@{version} exists with different content; "
-                "bump the version instead of mutating a published one",
+            # Identical content: repair any records a crashed ingest left behind
+            # (each write is its own transaction, §31.1), then report idempotency.
+            self._ensure_blobs(source, files)
+            if self._artifacts.get_artifact(capability_id, version) is None:
+                self._artifacts.put_artifact(
+                    CapabilityArtifact(
+                        capability_id=capability_id,
+                        version=version,
+                        package_digest=f"sha256:{digest}",
+                        manifest=self._manifest(metadata),
+                        files=files,
+                    )
+                )
+            if self._releases.get_release(capability_id, "raw") is None:
+                self._releases.set_release(
+                    CapabilityRelease(
+                        capability_id=capability_id,
+                        version=version,
+                        channel="raw",
+                        status="active",
+                        policy_snapshot_id=None,
+                    )
+                )
+            if not any(
+                r.version == version
+                for r in self._source_records.list_source_records(capability_id)
+            ):
+                self._source_records.add_source_record(
+                    self._source_record(
+                        capability_id=capability_id,
+                        version=version,
+                        source=source,
+                        digest=digest,
+                        metadata=metadata,
+                        transformations=transformations,
+                        license_identifier=license_identifier,
+                        source_repository=source_repository,
+                        source_url_reference=source_url_reference,
+                        commit_sha=commit_sha,
+                        source_version=source_version,
+                        derived_from=derived_from,
+                        ingested_at=ingested_at,
+                    )
+                )
+            return IngestionResult(
+                capability_id=capability_id,
+                version=version,
+                capability_created=False,
+                already_ingested=True,
+                raw_snapshot_digest=f"sha256:{digest}",
+                package_digest=f"sha256:{digest}",
+                file_count=len(files),
+                transformations=transformations,
             )
 
         # 3. Store blobs first: DB rows reference digests, never the reverse.
+        #    Bytes are re-read once and re-verified against the recorded hash so
+        #    a concurrent writer can never store content under a foreign digest.
         for f in files:
-            self._objects.put(f.sha256, (source / f.path).read_bytes())
+            data = (source / f.path).read_bytes()
+            if hash_bytes(data) != f.sha256:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_ERROR,
+                    f"file {f.path} changed while ingesting; content hash mismatch",
+                )
+            self._objects.put(f.sha256, data)
 
         # 4. Canonical records.
         capability_created = self._capabilities.get_capability(capability_id) is None
@@ -142,12 +196,7 @@ class SkillIngestionService:
                 capability_id=capability_id,
                 version=version,
                 package_digest=f"sha256:{digest}",
-                manifest={
-                    "name": metadata.name,
-                    "description": metadata.description,
-                    "license": metadata.license,
-                    "entrypoint": "SKILL.md",
-                },
+                manifest=self._manifest(metadata),
                 files=files,
             )
         )
@@ -163,22 +212,20 @@ class SkillIngestionService:
         )
         # 6. Provenance trail (§23).
         self._source_records.add_source_record(
-            SourceProvenance(
-                record_id=f"src-{uuid.uuid4().hex[:12]}",
+            self._source_record(
                 capability_id=capability_id,
                 version=version,
-                source_type="local-directory",
+                source=source,
+                digest=digest,
+                metadata=metadata,
+                transformations=transformations,
+                license_identifier=license_identifier,
                 source_repository=source_repository,
-                source_path=str(source),
                 source_url_reference=source_url_reference,
                 commit_sha=commit_sha,
                 source_version=source_version,
-                raw_snapshot_digest=f"sha256:{digest}",
-                license_identifier=license_identifier or metadata.license,
-                ingested_at=ingested_at,
-                ingestion_tool_version=TOOL_VERSION,
-                local_transformations=transformations,
                 derived_from=derived_from,
+                ingested_at=ingested_at,
             )
         )
         return IngestionResult(
@@ -190,4 +237,64 @@ class SkillIngestionService:
             package_digest=f"sha256:{digest}",
             file_count=len(files),
             transformations=transformations,
+        )
+
+    def _ensure_blobs(self, source: Path, files: list[ArtifactFile]) -> None:
+        """Repair blobs after a partial ingest: missing or corrupt content is
+        re-stored from the (re-verified) source so the content-addressed
+        invariant key == sha256(content) always holds (§39, §60.3)."""
+        for f in files:
+            stored = self._objects.get(f.sha256)
+            if stored is not None and hash_bytes(stored) == f.sha256:
+                continue
+            data = (source / f.path).read_bytes()
+            if hash_bytes(data) != f.sha256:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_ERROR,
+                    f"file {f.path} changed while ingesting; content hash mismatch",
+                )
+            self._objects.put(f.sha256, data)
+
+    @staticmethod
+    def _manifest(metadata: SkillMetadata) -> dict[str, Any]:
+        return {
+            "name": metadata.name,
+            "description": metadata.description,
+            "license": metadata.license,
+            "entrypoint": "SKILL.md",
+        }
+
+    @staticmethod
+    def _source_record(
+        *,
+        capability_id: str,
+        version: str,
+        source: Path,
+        digest: str,
+        metadata: SkillMetadata,
+        transformations: list[str],
+        license_identifier: str | None,
+        source_repository: str | None,
+        source_url_reference: str | None,
+        commit_sha: str | None,
+        source_version: str | None,
+        derived_from: str | None,
+        ingested_at: datetime,
+    ) -> SourceProvenance:
+        return SourceProvenance(
+            record_id=f"src-{uuid.uuid4().hex[:12]}",
+            capability_id=capability_id,
+            version=version,
+            source_type="local-directory",
+            source_repository=source_repository,
+            source_path=str(source),
+            source_url_reference=source_url_reference,
+            commit_sha=commit_sha,
+            source_version=source_version,
+            raw_snapshot_digest=f"sha256:{digest}",
+            license_identifier=license_identifier or metadata.license,
+            ingested_at=ingested_at,
+            ingestion_tool_version=TOOL_VERSION,
+            local_transformations=transformations,
+            derived_from=derived_from,
         )

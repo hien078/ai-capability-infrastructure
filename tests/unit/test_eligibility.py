@@ -156,6 +156,98 @@ def test_empty_candidate_list_is_valid_empty_decision() -> None:
     assert decision.kept == [] and decision.excluded == []
 
 
+# ---------- scope fail-closed (§27) ----------
+
+
+def test_scoped_candidate_without_scope_id_fails_closed() -> None:
+    """owner_scope_id=None must never match a request that also lacks one."""
+    for scope in ("organization", "workspace", "private"):
+        decision = DefaultEligibilityPolicy().filter(
+            [candidate(owner_scope=scope, owner_scope_id=None)],  # type: ignore[arg-type]
+            context(scope={"principal_id": "p-1", "organization_id": None, "workspace_id": None}),
+            PolicyRules(),
+            allowed_kinds=["skill"],
+        )
+        assert decision.kept == [], scope
+        assert decision.excluded[0].reason == "PERMISSION_DENIED"
+
+
+def test_scope_mismatch_still_denies() -> None:
+    decision = DefaultEligibilityPolicy().filter(
+        [candidate(owner_scope="organization", owner_scope_id="org-2")],  # type: ignore[arg-type]
+        context(),
+        PolicyRules(),
+        allowed_kinds=["skill"],
+    )
+    assert decision.kept == []
+    assert decision.excluded[0].reason == "PERMISSION_DENIED"
+
+
+# ---------- language/framework filter (§15) ----------
+
+
+def test_unsupported_language_excludes_before_rerank() -> None:
+    compat = Compatibility(supported_languages=["rust"])
+    decision = DefaultEligibilityPolicy().filter(
+        [candidate(compatibility=compat)],
+        context(task={"language": "python", "frameworks": []}),
+        PolicyRules(),
+        allowed_kinds=["skill"],
+    )
+    assert decision.kept == []
+    assert decision.excluded[0].reason == "CAPABILITY_NOT_ELIGIBLE"
+
+
+def test_undeclared_task_language_stays_eligible() -> None:
+    compat = Compatibility(supported_languages=["rust"])
+    decision = DefaultEligibilityPolicy().filter(
+        [candidate(compatibility=compat)],
+        context(task={"language": None, "frameworks": []}),
+        PolicyRules(),
+        allowed_kinds=["skill"],
+    )
+    assert len(decision.kept) == 1
+
+
+def test_disjoint_frameworks_exclude() -> None:
+    compat = Compatibility(supported_frameworks=["axum"])
+    decision = DefaultEligibilityPolicy().filter(
+        [candidate(compatibility=compat)],
+        context(task={"language": "rust", "frameworks": ["actix"]}),
+        PolicyRules(),
+        allowed_kinds=["skill"],
+    )
+    assert decision.kept == []
+    assert decision.excluded[0].reason == "CAPABILITY_NOT_ELIGIBLE"
+
+
+def test_matching_language_and_framework_pass() -> None:
+    compat = Compatibility(supported_languages=["rust"], supported_frameworks=["axum"])
+    decision = DefaultEligibilityPolicy().filter(
+        [candidate(compatibility=compat)],
+        context(task={"language": "rust", "frameworks": ["axum", "tokio"]}),
+        PolicyRules(),
+        allowed_kinds=["skill"],
+    )
+    assert len(decision.kept) == 1
+
+
+# ---------- license restriction is fail-closed on every channel (§15, §24) ----------
+
+
+def test_license_blocked_excluded_on_non_production_channel_too() -> None:
+    """Pinned decision: eligibility blocks restricted licenses everywhere;
+    non-production content is reviewed via the control plane, not routed around."""
+    decision = DefaultEligibilityPolicy().filter(
+        [candidate(channel="staging", license_blocked=True)],
+        context(),
+        PolicyRules(required_channel="staging"),
+        allowed_kinds=["skill"],
+    )
+    assert decision.kept == []
+    assert decision.excluded[0].reason == "POLICY_DENIED"
+
+
 # ---------- facets ----------
 
 

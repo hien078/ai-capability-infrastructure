@@ -16,7 +16,9 @@ _EDGE_DASHES = re.compile(r"-+")
 def canonical_capability_id(name: str) -> str:
     """Derive a stable capability id from the skill display name."""
     slug = _EDGE_DASHES.sub("-", _NON_ID.sub("-", name.strip().lower())).strip("-")
-    if not slug or not slug[0].isalnum():
+    # Capability.id requires 2-64 chars; reject early with a clean domain error
+    # instead of letting pydantic ValidationError leak out of the provider (§45).
+    if len(slug) < 2 or not slug[0].isalnum():
         raise DomainError(
             ErrorCode.SKILL_PACKAGE_INVALID,
             f"cannot derive a valid capability id from name {name!r}",

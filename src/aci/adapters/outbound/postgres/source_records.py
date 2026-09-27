@@ -60,7 +60,8 @@ class SqlAlchemySourceRecordRepository:
             rows = (
                 session.query(SourceRecordRow)
                 .filter_by(capability_id=capability_id)
-                .order_by(SourceRecordRow.ingested_at)
+                # deterministic even when several records share ingested_at
+                .order_by(SourceRecordRow.ingested_at, SourceRecordRow.record_id)
                 .all()
             )
             return [_record_of(r) for r in rows]

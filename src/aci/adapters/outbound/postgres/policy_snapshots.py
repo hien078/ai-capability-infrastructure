@@ -1,8 +1,10 @@
 """Policy snapshot persistence (plan §46)."""
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from aci.adapters.outbound.postgres.orm import PolicySnapshotRow
+from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.policy.models import PolicySnapshot
 
 
@@ -21,14 +23,20 @@ class SqlAlchemyPolicySnapshotRepository:
         self._sessions = sessions
 
     def put_snapshot(self, snapshot: PolicySnapshot) -> PolicySnapshot:
-        with self._sessions() as session, session.begin():
-            session.add(
-                PolicySnapshotRow(
-                    snapshot_id=snapshot.snapshot_id,
-                    created_at=snapshot.created_at,
-                    rules=snapshot.rules.model_dump(mode="json"),
+        try:
+            with self._sessions() as session, session.begin():
+                session.add(
+                    PolicySnapshotRow(
+                        snapshot_id=snapshot.snapshot_id,
+                        created_at=snapshot.created_at,
+                        rules=snapshot.rules.model_dump(mode="json"),
+                    )
                 )
-            )
+        except IntegrityError as exc:
+            raise DomainError(
+                ErrorCode.CAPABILITY_ALREADY_EXISTS,
+                f"policy snapshot {snapshot.snapshot_id} already exists",
+            ) from exc
         return snapshot
 
     def get_snapshot(self, snapshot_id: str) -> PolicySnapshot | None:

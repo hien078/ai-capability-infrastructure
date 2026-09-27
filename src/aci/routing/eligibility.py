@@ -83,6 +83,10 @@ class DefaultEligibilityPolicy:
             )
 
         # 5. License restriction (defense-in-depth; promotion gates first, §24).
+        #    Deliberately fail-closed on EVERY channel, not just production:
+        #    §15 lists "license restriction" as an unqualified exclusion reason.
+        #    Non-production content is reviewed through the control plane, not
+        #    by routing around the license gate.
         if candidate.license_blocked:
             return (ErrorCode.POLICY_DENIED, "license blocks redistribution")
 
@@ -104,6 +108,10 @@ class DefaultEligibilityPolicy:
         scope = candidate.owner_scope
         if scope == "global":
             return None
+        # Fail closed: a scoped candidate without its scope id must never match
+        # a request that also lacks one (None == None would be fail-open, §27).
+        if candidate.owner_scope_id is None:
+            return (ErrorCode.PERMISSION_DENIED, f"{scope} scope missing owner_scope_id")
         if scope == "organization":
             if context.scope.organization_id == candidate.owner_scope_id:
                 return None
@@ -139,4 +147,19 @@ class DefaultEligibilityPolicy:
                 ErrorCode.CLIENT_INCOMPATIBLE,
                 f"missing client features: {missing}",
             )
+        # §15: unsupported language/framework excludes before rerank. Only a
+        # declared incompatibility excludes — an undeclared task language stays
+        # eligible (the facet filter narrows further down the pipeline).
+        if compat.supported_languages and context.task.language is not None:
+            if context.task.language not in compat.supported_languages:
+                return (
+                    ErrorCode.CAPABILITY_NOT_ELIGIBLE,
+                    f"language {context.task.language!r} not in supported_languages",
+                )
+        if compat.supported_frameworks and context.task.frameworks:
+            if not set(context.task.frameworks) & set(compat.supported_frameworks):
+                return (
+                    ErrorCode.CAPABILITY_NOT_ELIGIBLE,
+                    f"frameworks {context.task.frameworks} disjoint with supported_frameworks",
+                )
         return None

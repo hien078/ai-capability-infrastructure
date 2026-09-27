@@ -1,5 +1,6 @@
 """Contract tests: mutable/immutable boundaries, no protocol leakage (plan §52 Phase 0)."""
 
+import ast
 import pathlib
 from datetime import UTC, datetime
 
@@ -100,11 +101,30 @@ def test_release_promotion_does_not_mutate_version() -> None:
 
 
 def test_domain_has_no_protocol_imports() -> None:
-    src = pathlib.Path(__file__).parents[2] / "src" / "aci" / "domain"
+    """No protocol/db/framework imports outside adapters (ADR-004, §28.5).
+
+    AST-based so docstrings mentioning e.g. "SQLAlchemy" do not false-positive.
+    Covers every non-adapter layer; extend LAYERS when adding one.
+    """
+    src = pathlib.Path(__file__).parents[2] / "src" / "aci"
+    layers = ("domain", "application", "providers", "routing", "control_plane")
     banned = ("fastapi", "mcp", "sqlalchemy", "opencode", "a2a")
-    for f in src.rglob("*.py"):
-        text = f.read_text().lower()
-        assert not any(b in text for b in banned), f"{f} imports protocol/db layer"
+    for layer in layers:
+        for f in (src / layer).rglob("*.py"):
+            for hit in _banned_imports(f, banned):
+                raise AssertionError(f"{f} imports protocol/db layer: {hit}")
+
+
+def _banned_imports(path: pathlib.Path, banned: tuple[str, ...]) -> list[str]:
+    """Top-level module names imported by `path` that are in `banned`."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    hits: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            hits.extend(a.name.split(".")[0].lower() for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            hits.append(node.module.split(".")[0].lower())
+    return [h for h in hits if h in banned]
 
 
 def test_error_codes_stable() -> None:
@@ -153,3 +173,16 @@ def test_metrics_are_frozen_snapshots_separate_from_version() -> None:
         m.usage_count = 8  # type: ignore[misc]
     assert "usage_count" not in set(CapabilityVersion.model_fields)
     assert "verified_success_rate" not in set(CapabilityVersion.model_fields)
+
+
+def test_scoped_capability_requires_owner_scope_id() -> None:
+    """A scoped capability without its scope id would match every request that
+    also lacks one (None == None) — rejected at the boundary (§27)."""
+    for scope in ("organization", "workspace", "private"):
+        with pytest.raises(ValidationError, match="owner_scope_id"):
+            Capability(id="c-1", kind="skill", created_at=NOW, owner_scope=scope)  # type: ignore[arg-type]
+    # with the id present it is valid; global needs none
+    Capability(
+        id="c-1", kind="skill", created_at=NOW, owner_scope="organization", owner_scope_id="org-1"
+    )  # type: ignore[arg-type]
+    Capability(id="c-1", kind="skill", created_at=NOW)

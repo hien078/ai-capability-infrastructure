@@ -16,6 +16,7 @@ from aci.domain.capability.models import (
     OwnerScope,
     ReleaseChannel,
     ReleaseStatus,
+    TaskContext,
 )
 
 TrustTier = Literal["untrusted", "standard", "verified"]
@@ -40,12 +41,17 @@ class ScopeContext(BaseModel):
 
 
 class RoutingRequestContext(BaseModel):
-    """Eligibility input context (§11.1 RequestContext arrives with REST)."""
+    """Eligibility input context (§11.1 RequestContext arrives with REST).
+
+    Carries the client, the requesting scope, and the normalized task context
+    so §15 exclusions (unsupported language/framework) can run before retrieval.
+    """
 
     model_config = {"frozen": True}
 
     client: ClientDescriptor
     scope: ScopeContext
+    task: TaskContext = Field(default_factory=TaskContext)
 
 
 class EligibleCandidate(BaseModel):
