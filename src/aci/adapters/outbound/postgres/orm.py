@@ -271,6 +271,51 @@ class OutcomeVerdictRow(Base):
     confidence: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class BenchmarkCaseRow(Base):
+    """§35 fixture, registered idempotently so results have integrity (§41)."""
+
+    __tablename__ = "benchmark_cases"
+
+    case_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    category: Mapped[str] = mapped_column(Text, nullable=False)
+    fixture: Mapped[str] = mapped_column(Text, nullable=False)
+    task_text: Mapped[str] = mapped_column(Text, nullable=False)
+    annotations: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    budget: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class BenchmarkRunRow(Base):
+    __tablename__ = "benchmark_runs"
+
+    run_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    case_count: Mapped[int] = mapped_column(nullable=False)
+
+
+class BenchmarkResultRow(Base):
+    """One (case × variant) measurement with exact version references (§52)."""
+
+    __tablename__ = "benchmark_results"
+    __table_args__ = (
+        ForeignKeyConstraint(["run_id"], ["benchmark_runs.run_id"], ondelete="CASCADE"),
+        ForeignKeyConstraint(["case_id"], ["benchmark_cases.case_id"], ondelete="CASCADE"),
+        ForeignKeyConstraint(["route_run_id"], ["route_runs.route_run_id"], ondelete="SET NULL"),
+        Index("ix_benchmark_results_run", "run_id"),
+    )
+
+    result_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    case_id: Mapped[str] = mapped_column(Text, nullable=False)
+    variant: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    route_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bundle_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selected: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    router: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+
 class CapabilityRelationRow(Base):
     __tablename__ = "capability_relations"
     __table_args__ = (

@@ -80,7 +80,7 @@ def _aci_submodules_imported(path: pathlib.Path) -> set[str]:
 def test_non_adapter_layers_never_import_adapters() -> None:
     """Only adapters may touch SQLAlchemy/protocol implementations (ADR-004)."""
     src = SRC / "aci"
-    for layer in ("application", "providers", "routing", "control_plane"):
+    for layer in ("application", "providers", "routing", "control_plane", "evaluation"):
         for f in _py_files(src / layer):
             for mod in _aci_submodules_imported(f):
                 assert not mod.startswith("aci.adapters"), f"{f} imports {mod}"

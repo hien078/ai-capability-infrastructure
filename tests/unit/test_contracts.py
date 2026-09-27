@@ -110,7 +110,7 @@ def test_domain_has_no_protocol_imports() -> None:
     Covers every non-adapter layer; extend LAYERS when adding one.
     """
     src = pathlib.Path(__file__).parents[2] / "src" / "aci"
-    layers = ("domain", "application", "providers", "routing", "control_plane")
+    layers = ("domain", "application", "providers", "routing", "control_plane", "evaluation")
     banned = ("fastapi", "mcp", "sqlalchemy", "opencode", "a2a")
     for layer in layers:
         for f in (src / layer).rglob("*.py"):

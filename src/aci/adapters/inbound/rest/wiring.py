@@ -18,6 +18,7 @@ from aci.adapters.outbound.postgres.assessments import (
     SqlAlchemySecurityAssessmentRepository,
 )
 from aci.adapters.outbound.postgres.base import make_engine, make_session_factory
+from aci.adapters.outbound.postgres.benchmarks import SqlAlchemyBenchmarkStore
 from aci.adapters.outbound.postgres.bundles import SqlAlchemyBundleRepository
 from aci.adapters.outbound.postgres.outcomes import SqlAlchemyOutcomeRecorder
 from aci.adapters.outbound.postgres.policy_snapshots import (
@@ -36,6 +37,7 @@ from aci.application.resolve_capability import ResolveCapabilityService
 from aci.application.route_capabilities import RouteCapabilitiesService
 from aci.application.search_capabilities import SearchCapabilitiesService
 from aci.config import Settings
+from aci.evaluation.harness import BenchmarkHarness
 from aci.routing.composer import MinimalBundleComposer
 from aci.routing.dependencies import DefaultDependencyResolver
 from aci.routing.eligibility import DefaultEligibilityPolicy
@@ -61,6 +63,7 @@ class Container:
         route_runs = SqlAlchemyRouteRunRepository(sessions)
         bundles = SqlAlchemyBundleRepository(sessions)
         outcomes = SqlAlchemyOutcomeRecorder(sessions)
+        benchmark_store = SqlAlchemyBenchmarkStore(sessions)
 
         loader = ProductionCandidateLoader(capabilities, releases, licenses, securities)
         eligibility = DefaultEligibilityPolicy()
@@ -85,6 +88,17 @@ class Container:
         self.resolve_service = ResolveCapabilityService(capabilities, artifacts)
         self.outcome_service = ReportOutcomeService(outcomes, bundles)
         self.catalog = CatalogProjection(releases, capabilities, artifacts, objects)
+        self.benchmark_harness = BenchmarkHarness(
+            self.route_service,
+            loader,
+            eligibility,
+            retriever,
+            reranker,
+            policy_snapshots,
+            route_runs,
+            benchmark_store,
+        )
+        self.benchmark_store = benchmark_store
         self.route_runs = route_runs
         self.bundles = bundles
         # Raw protocol handles, for inbound adapters that project the registry
