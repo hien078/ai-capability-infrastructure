@@ -1,24 +1,43 @@
 """Alembic environment. Migrations from day one (plan §41)."""
+import os
+import sys
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import create_engine
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from aci.adapters.outbound.postgres.base import Base  # noqa: E402
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    try:
+        fileConfig(config.config_file_name)
+    except KeyError:
+        pass  # minimal alembic.ini without [loggers]/[formatters] sections
 
-target_metadata = None
+target_metadata = Base.metadata
+
+
+def _database_url() -> str:
+    env_url = os.environ.get("ACI_DATABASE_URL")
+    if env_url:
+        return env_url
+    url = config.get_main_option("sqlalchemy.url")
+    assert url is not None
+    return url
 
 
 def run_migrations_offline() -> None:
-    context.configure(url=config.get_main_option("sqlalchemy.url"), literal_binds=True)
+    context.configure(url=_database_url(), literal_binds=True)
     with context.begin_transaction():
         context.run_migrations()
 
 
 def run_migrations_online() -> None:
-    engine = create_engine(config.get_main_option("sqlalchemy.url"))
+    from sqlalchemy import create_engine
+
+    engine = create_engine(_database_url())
     with engine.connect() as connection:
         context.configure(connection=connection)
         with context.begin_transaction():

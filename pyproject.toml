@@ -20,6 +20,7 @@ dev = [
   "ruff>=0.8",
   "mypy>=1.11",
   "httpx>=0.27",
+  "uvicorn>=0.30",
 ]
 
 [build-system]
@@ -32,6 +33,9 @@ packages = ["src/aci"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+  "integration: requires live PostgreSQL (docker compose up -d db)",
+]
 
 [tool.ruff]
 target-version = "py311"

@@ -4,19 +4,19 @@
 
 ## Commands (verified)
 
-- `python3 -m pytest -q` — 13 tests, works with no install (`pyproject.toml` sets `pythonpath = ["src"]`).
-- `ruff check src tests` — clean required; line-length 100, rules `E,F,I,UP,B`.
-- `mypy src` — strict mode, but mypy is not installed in this env; install dev extras first.
-- DB: `docker compose up -d db` (`pgvector/pgvector:pg16`, service name `db`), then `alembic upgrade head` (currently a no-op — see gotcha below).
-- App: `uvicorn aci.main:app --reload` (entrypoint `src/aci/main.py`; `/health` = liveness, `/ready` = sync `SELECT 1`).
+- `.venv/bin/python -m pytest -q` (or plain `pytest -q`) — 19 tests: 17 unit + 2 integration (live-DB ones skip without Postgres). Works with no install (`pyproject.toml` sets `pythonpath = ["src"]`); full deps live in `.venv/`.
+- `ruff check src tests` + `ruff format --check src tests` — both clean required (line-length 100, rules `E,F,I,UP,B`).
+- `.venv/bin/python -m mypy src` — strict, clean. System python lacks mypy; use `.venv` or `uvx mypy src`.
+- DB: `docker compose up -d db` (`pgvector/pgvector:pg16`, service `db`), then `alembic upgrade head` (needs `.venv` on PATH: `.venv/bin/alembic`). `migrations/env.py` reads `ACI_DATABASE_URL` first, falls back to `alembic.ini`.
+- App: `.venv/bin/uvicorn aci.main:app --reload` (`/health` = liveness, `/ready` = sync `SELECT 1` against live DB). Verified both return `{"status": ...}`.
+- CI (`.github/workflows/ci.yml`): ruff → format-check → `alembic upgrade head` → `pytest -q` on `pgvector:pg16` service.
 
 ## Repo state and gotchas
 
-- Real code is only `src/aci/domain/capability/{models,errors}.py`, `src/aci/{config,main}.py`. The `application/`, `routing/`, `providers/`, `adapters/`, `control_plane/`, `evaluation/` dirs from the plan (§42) do not exist yet — create them in build order, not upfront.
+- Real code is `src/aci/domain/capability/{models,errors}.py`, `src/aci/{config,main}.py`, `src/aci/observability/{logging,tracing}.py`, `src/aci/adapters/outbound/postgres/base.py` (engine/session factory + `Base` for migrations). The `application/`, `routing/`, `providers/`, `control_plane/`, `evaluation/` dirs from the plan (§42) do not exist yet — create them in build order, not upfront.
 - Locked decisions live in `docs/adr/001–004*.md` (Accepted: capability abstraction, one registry, plane separation, adapter boundary). ADR-005–012 are still plan-only bullet points in `docs/adr/README.md`.
-- Boundary tests in `tests/unit/test_architecture_boundaries.py` + `test_contracts.py` enforce the invariants below — run them after any domain change; extend them when adding layers.
-- Env quirk: `Settings` uses prefix `ACI_` (`ACI_DATABASE_URL`), but `alembic.ini` hardcodes `sqlalchemy.url` and ignores the env var — keep both in sync or fix `migrations/env.py` to read the env.
-- `migrations/` has `env.py` + `script.py.mako` but no `versions/` dir: the first real migration (registry tables, §41) still has to be written; `UNIQUE(capability_id, version)` and FK bundle-items→versions are required from day one.
+- Boundary tests in `tests/unit/test_architecture_boundaries.py` + `test_contracts.py` enforce the invariants below — run them after any domain change; extend them when adding layers. `tests/integration/test_postgres.py` (`pytest.mark.integration`) needs live DB + `alembic upgrade head`, otherwise skips.
+- `migrations/versions/0001_enable_pgvector.py` is the only migration (enables `vector`); domain tables (§41) still have to be written in Phase 2. `UNIQUE(capability_id, version)` and FK bundle-items→versions are required from day one.
 
 ## Build order (do not skip)
 

@@ -4,7 +4,7 @@ No protocol, web, or DB imports allowed in this module.
 """
 
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -41,8 +41,8 @@ class SkillSpec(BaseModel):
 
 class ToolSpec(BaseModel):
     kind: Literal["tool"] = "tool"
-    input_schema: dict = Field(default_factory=dict)
-    output_schema: dict = Field(default_factory=dict)
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    output_schema: dict[str, Any] = Field(default_factory=dict)
     side_effects: Literal["none", "read-only", "local_write", "remote_write", "external_effect"] = (
         "read-only"
     )
@@ -118,7 +118,7 @@ class CapabilityBinding(BaseModel):
     version: str
     binding_type: str
     visibility_scope: str = "public-production"
-    config: dict = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
 
 
 class CapabilityMetrics(BaseModel):
@@ -147,12 +147,16 @@ class TaskContext(BaseModel):
     repository_summary: str = Field(default="", max_length=2000)
 
 
+def _default_allowed_kinds() -> list[CapabilityKind]:
+    return ["skill"]
+
+
 class RouteCapabilitiesCommand(BaseModel):
     task_text: str = Field(min_length=1, max_length=8000)
     context: TaskContext = Field(default_factory=TaskContext)
     max_items: int = Field(default=5, ge=0, le=5)
     max_context_tokens: int = Field(default=6000, ge=0)
-    allowed_kinds: list[CapabilityKind] = Field(default_factory=lambda: ["skill"])
+    allowed_kinds: list[CapabilityKind] = Field(default_factory=_default_allowed_kinds)
 
 
 class BundleItem(BaseModel):
@@ -192,6 +196,6 @@ class OutcomeEvidence(BaseModel):
     route_run_id: str
     bundle_id: str
     verdicts: list[OutcomeVerdict] = Field(min_length=1)
-    tests_before: dict = Field(default_factory=dict)
-    tests_after: dict = Field(default_factory=dict)
+    tests_before: dict[str, Any] = Field(default_factory=dict)
+    tests_after: dict[str, Any] = Field(default_factory=dict)
     latency_ms: int | None = None

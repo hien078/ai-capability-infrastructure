@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: aci
+          POSTGRES_PASSWORD: aci
+          POSTGRES_DB: aci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      ACI_DATABASE_URL: postgresql+psycopg://aci:aci@localhost:5432/aci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -e ".[dev]"
+
+      - run: ruff check src tests
+
+      - run: ruff format --check src tests
+
+      - run: alembic upgrade head
+
+      - run: python -m pytest -q
