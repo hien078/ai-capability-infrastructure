@@ -1,0 +1,24 @@
+"""Stable machine-readable errors (plan §45). Adapters translate these; domain raises them."""
+
+from enum import StrEnum
+
+
+class ErrorCode(StrEnum):
+    CAPABILITY_NOT_FOUND = "CAPABILITY_NOT_FOUND"
+    CAPABILITY_VERSION_NOT_FOUND = "CAPABILITY_VERSION_NOT_FOUND"
+    CAPABILITY_NOT_ELIGIBLE = "CAPABILITY_NOT_ELIGIBLE"
+    CAPABILITY_REVOKED = "CAPABILITY_REVOKED"
+    BUNDLE_VALIDATION_FAILED = "BUNDLE_VALIDATION_FAILED"
+    ROUTING_TIMEOUT = "ROUTING_TIMEOUT"
+    POLICY_DENIED = "POLICY_DENIED"
+    ARTIFACT_INTEGRITY_ERROR = "ARTIFACT_INTEGRITY_ERROR"
+    CLIENT_INCOMPATIBLE = "CLIENT_INCOMPATIBLE"
+    RATE_LIMITED = "RATE_LIMITED"
+    AUTHENTICATION_REQUIRED = "AUTHENTICATION_REQUIRED"
+    PERMISSION_DENIED = "PERMISSION_DENIED"
+
+
+class DomainError(Exception):
+    def __init__(self, code: ErrorCode, message: str) -> None:
+        super().__init__(message)
+        self.code = code
