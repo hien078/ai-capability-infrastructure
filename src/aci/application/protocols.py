@@ -14,6 +14,7 @@ from aci.domain.capability.models import (
     CapabilityVersion,
     ReleaseChannel,
 )
+from aci.domain.provenance.models import LicenseAssessment, SecurityAssessment
 from aci.domain.skills.models import SourceProvenance
 
 
@@ -59,3 +60,17 @@ class SourceRecordRepository(Protocol):
 
     def add_source_record(self, record: SourceProvenance) -> SourceProvenance: ...
     def list_source_records(self, capability_id: str) -> list[SourceProvenance]: ...
+
+
+class LicenseAssessmentRepository(Protocol):
+    """License gate records per exact version (plan §24)."""
+
+    def put_assessment(self, assessment: LicenseAssessment) -> LicenseAssessment: ...
+    def get_assessment(self, capability_id: str, version: str) -> LicenseAssessment | None: ...
+
+
+class SecurityAssessmentRepository(Protocol):
+    """Security gate records per exact version (plan §25)."""
+
+    def put_assessment(self, assessment: SecurityAssessment) -> SecurityAssessment: ...
+    def get_assessment(self, capability_id: str, version: str) -> SecurityAssessment | None: ...

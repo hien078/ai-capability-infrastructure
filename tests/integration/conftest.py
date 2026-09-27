@@ -13,6 +13,10 @@ from sqlalchemy.exc import OperationalError  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 
 from aci.adapters.outbound.object_store.fs import FsObjectStore  # noqa: E402
+from aci.adapters.outbound.postgres.assessments import (  # noqa: E402
+    SqlAlchemyLicenseAssessmentRepository,
+    SqlAlchemySecurityAssessmentRepository,
+)
 from aci.adapters.outbound.postgres.base import make_session_factory  # noqa: E402
 from aci.adapters.outbound.postgres.repositories import (  # noqa: E402
     SqlAlchemyArtifactStore,
@@ -22,6 +26,7 @@ from aci.adapters.outbound.postgres.repositories import (  # noqa: E402
 from aci.adapters.outbound.postgres.source_records import (  # noqa: E402
     SqlAlchemySourceRecordRepository,
 )
+from aci.control_plane.promotion.service import PromotionService  # noqa: E402
 from aci.providers.skills.ingestion import SkillIngestionService  # noqa: E402
 
 DB_URL = os.environ.get("ACI_DATABASE_URL", "postgresql+psycopg://aci:aci@localhost:5432/aci")
@@ -65,6 +70,33 @@ def artifact_store(sessions: sessionmaker[Session]) -> SqlAlchemyArtifactStore:
 @pytest.fixture()
 def source_records(sessions: sessionmaker[Session]) -> SqlAlchemySourceRecordRepository:
     return SqlAlchemySourceRecordRepository(sessions)
+
+
+@pytest.fixture()
+def license_repo(sessions: sessionmaker[Session]) -> SqlAlchemyLicenseAssessmentRepository:
+    return SqlAlchemyLicenseAssessmentRepository(sessions)
+
+
+@pytest.fixture()
+def security_repo(sessions: sessionmaker[Session]) -> SqlAlchemySecurityAssessmentRepository:
+    return SqlAlchemySecurityAssessmentRepository(sessions)
+
+
+@pytest.fixture()
+def promotion(
+    capability_repo: SqlAlchemyCapabilityRepository,
+    release_repo: SqlAlchemyReleaseRepository,
+    source_records: SqlAlchemySourceRecordRepository,
+    license_repo: SqlAlchemyLicenseAssessmentRepository,
+    security_repo: SqlAlchemySecurityAssessmentRepository,
+) -> PromotionService:
+    return PromotionService(
+        capabilities=capability_repo,
+        releases=release_repo,
+        source_records=source_records,
+        licenses=license_repo,
+        securities=security_repo,
+    )
 
 
 @pytest.fixture()

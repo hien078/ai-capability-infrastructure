@@ -120,3 +120,43 @@ class SourceRecordRow(Base):
     ingestion_tool_version: Mapped[str] = mapped_column(Text, nullable=False)
     local_transformations: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     derived_from: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
+
+class LicenseAssessmentRow(Base):
+    __tablename__ = "license_assessments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["capability_id", "version"],
+            ["capability_versions.capability_id", "capability_versions.version"],
+            ondelete="CASCADE",
+        ),
+    )
+
+    assessment_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    capability_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    version: Mapped[str] = mapped_column(Text, primary_key=True)
+    license_identifier: Mapped[str] = mapped_column(Text, nullable=False)
+    permissions: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    assessed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    assessed_by: Mapped[str] = mapped_column(Text, nullable=False)
+    notes: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class SecurityAssessmentRow(Base):
+    __tablename__ = "security_assessments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["capability_id", "version"],
+            ["capability_versions.capability_id", "capability_versions.version"],
+            ondelete="CASCADE",
+        ),
+    )
+
+    assessment_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    capability_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    version: Mapped[str] = mapped_column(Text, primary_key=True)
+    scan_status: Mapped[str] = mapped_column(Text, nullable=False)
+    findings: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    scanned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    scanner_version: Mapped[str] = mapped_column(Text, nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)

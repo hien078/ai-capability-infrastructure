@@ -4,7 +4,7 @@
 
 ## Commands (verified)
 
-- `.venv/bin/python -m pytest -q` (or plain `pytest -q`) — 50 tests: 29 unit + 21 integration (live-DB ones skip without Postgres). Works with no install (`pyproject.toml` sets `pythonpath = ["src"]`); full deps live in `.venv/`.
+- `.venv/bin/python -m pytest -q` (or plain `pytest -q`) — 65 tests: 35 unit + 30 integration (live-DB ones skip without Postgres). Works with no install (`pyproject.toml` sets `pythonpath = ["src"]`); full deps live in `.venv/`.
 - `ruff check src tests` + `ruff format --check src tests` — both clean required (line-length 100, rules `E,F,I,UP,B`).
 - `.venv/bin/python -m mypy src` — strict, clean. System python lacks mypy; use `.venv` or `uvx mypy src`.
 - DB: `docker compose up -d db` (`pgvector/pgvector:pg16`, service `db`), then `alembic upgrade head` (needs `.venv` on PATH: `.venv/bin/alembic`). `migrations/env.py` reads `ACI_DATABASE_URL` first, falls back to `alembic.ini`.
@@ -13,14 +13,15 @@
 
 ## Repo state and gotchas
 
-- Real code is `src/aci/domain/capability/{models,errors}.py`, `src/aci/domain/skills/models.py`, `src/aci/{config,main}.py`, `src/aci/observability/{logging,tracing}.py`, `src/aci/application/protocols.py` (repo/object-store/source-record Protocols, no SQLAlchemy imports), `src/aci/adapters/outbound/postgres/{base,orm,repositories,source_records}.py`, `src/aci/adapters/outbound/object_store/fs.py` (content-addressed, sha256 keys), `src/aci/providers/skills/{parser,package,canonicalization,ingestion}.py`. The `routing/`, `control_plane/`, `evaluation/` dirs from the plan (§42) do not exist yet — create them in build order, not upfront.
-- Locked decisions live in `docs/adr/001–004*.md` (Accepted: capability abstraction, one registry, plane separation, adapter boundary). ADR-005–012 are still plan-only bullet points in `docs/adr/README.md`.
+- Real code is `src/aci/domain/capability/{models,errors}.py`, `src/aci/domain/skills/models.py`, `src/aci/domain/provenance/models.py`, `src/aci/{config,main}.py`, `src/aci/observability/{logging,tracing}.py`, `src/aci/application/protocols.py` (repo/object-store/assessment Protocols, no SQLAlchemy imports), `src/aci/adapters/outbound/postgres/{base,orm,repositories,source_records,assessments}.py`, `src/aci/adapters/outbound/object_store/fs.py` (content-addressed, sha256 keys), `src/aci/providers/skills/{parser,package,canonicalization,ingestion}.py`, `src/aci/control_plane/promotion/service.py`. The `routing/`, `evaluation/` dirs from the plan (§42) do not exist yet — create them in build order, not upfront.
+- All 12 ADRs are Accepted in `docs/adr/` (001–012, full Context/Decision/Consequences/Rejected/Verification). Read the relevant ADR before implementing its phase.
 - Boundary tests in `tests/unit/test_architecture_boundaries.py` + `test_contracts.py` enforce the invariants below — run them after any domain change; extend them when adding layers. `tests/integration/` (`pytest.mark.integration`) needs live DB + `alembic upgrade head`, otherwise skips. Integration tests must use unique ids (`uid()` helper) — the live DB is shared and persists across runs.
-- Migrations: `0001` pgvector extension, `0002` registry tables + immutability trigger, `0003` `source_records` provenance. `alembic check` must stay clean (ORM ↔ migrations in sync). Ingestion flow: parse SKILL.md → hash files → store blobs → create version/artifact → release pointer channel `raw` (quarantine) → provenance record; re-ingest identical content is idempotent, changed content under the same version raises `CAPABILITY_ALREADY_EXISTS`.
+- Migrations: `0001` pgvector, `0002` registry + immutability trigger, `0003` `source_records`, `0004` `license_assessments` + `security_assessments`. `alembic check` must stay clean (ORM ↔ migrations in sync). Ingestion: parse SKILL.md → hash → blobs → version/artifact → release pointer `raw` (quarantine) → provenance; re-ingest identical = idempotent, changed content same version = `CAPABILITY_ALREADY_EXISTS`.
+- Promotion gates (ADR-012): `PromotionService.promote()` to `production` requires provenance chain + redistributable license (unknown license blocks by default, §24) + security scan passed; pre-production channels need only the version. Rollback = promote older version; revoke = status flip; both pointer-only.
 
 ## Build order (do not skip)
 
-Follow `plan_v2_revised.md` §52 / §75 in order: contracts ✅ → foundation ✅ → registry ✅ → skill packages ✅ → provenance/license/security gates → eligibility → retrieval → reranker → composer → REST → OpenCode catalog → OpenCode routing plugin → MCP → outcomes → benchmark. Prove the V1 loop (§80) before V2/V3 expansion.
+Follow `plan_v2_revised.md` §52 / §75 in order: contracts ✅ → foundation ✅ → registry ✅ → skill packages ✅ → provenance/license/security gates ✅ → eligibility → retrieval → reranker → composer → REST → OpenCode catalog → OpenCode routing plugin → MCP → outcomes → benchmark. Prove the V1 loop (§80) before V2/V3 expansion.
 
 ## Target stack and layout
 
