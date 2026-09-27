@@ -6,7 +6,9 @@ No protocol, web, or DB imports allowed in this module.
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from aci.domain.taxonomy.models import validate_facets
 
 CapabilityKind = Literal["skill", "resource", "tool", "workflow", "service", "agent"]
 OwnerScope = Literal["global", "organization", "workspace", "private"]
@@ -21,6 +23,17 @@ VerdictSource = Literal[
     "human_review",
     "production_signal",
 ]
+
+
+class Compatibility(BaseModel):
+    """Client/protocol compatibility declaration (plan §48). A filter, not a preference."""
+
+    model_config = {"frozen": True}
+
+    supported_clients: list[str] | None = None  # None = any client
+    minimum_client_features: list[str] = Field(default_factory=list)
+    supported_languages: list[str] = Field(default_factory=list)
+    supported_frameworks: list[str] = Field(default_factory=list)
 
 
 class SkillRequirements(BaseModel):
@@ -85,6 +98,7 @@ class Capability(BaseModel):
     kind: CapabilityKind
     created_at: datetime
     owner_scope: OwnerScope = "global"
+    owner_scope_id: str | None = None  # org/workspace/principal id when scope is not global
 
 
 class CapabilityVersion(BaseModel):
@@ -99,7 +113,14 @@ class CapabilityVersion(BaseModel):
     display_name: str = ""
     description: str = ""
     facets: dict[str, list[str]] = Field(default_factory=dict)
+    compatibility: Compatibility | None = None
     spec: CapabilitySpec
+
+    @field_validator("facets")
+    @classmethod
+    def _check_facets(cls, v: dict[str, list[str]]) -> dict[str, list[str]]:
+        validate_facets(v)
+        return v
 
 
 class CapabilityRelease(BaseModel):

@@ -13,6 +13,14 @@ from aci.domain.capability.models import (
     CapabilityRelease,
     CapabilityVersion,
     ReleaseChannel,
+    ReleaseStatus,
+)
+from aci.domain.policy.models import (
+    EligibilityDecision,
+    EligibleCandidate,
+    PolicyRules,
+    PolicySnapshot,
+    RoutingRequestContext,
 )
 from aci.domain.provenance.models import LicenseAssessment, SecurityAssessment
 from aci.domain.skills.models import SourceProvenance
@@ -38,6 +46,9 @@ class ReleaseRepository(Protocol):
         self, capability_id: str, channel: ReleaseChannel
     ) -> CapabilityRelease | None: ...
     def list_releases(self, capability_id: str) -> list[CapabilityRelease]: ...
+    def list_channel(
+        self, channel: ReleaseChannel, *, status: ReleaseStatus | None = None
+    ) -> list[CapabilityRelease]: ...
 
 
 class ArtifactStore(Protocol):
@@ -74,3 +85,24 @@ class SecurityAssessmentRepository(Protocol):
 
     def put_assessment(self, assessment: SecurityAssessment) -> SecurityAssessment: ...
     def get_assessment(self, capability_id: str, version: str) -> SecurityAssessment | None: ...
+
+
+class EligibilityPolicy(Protocol):
+    """Filter candidates before retrieval/rerank (ADR-009). Never rescues."""
+
+    def filter(
+        self,
+        candidates: list[EligibleCandidate],
+        context: RoutingRequestContext,
+        rules: PolicyRules,
+        *,
+        allowed_kinds: list[str],
+    ) -> EligibilityDecision: ...
+
+
+class PolicySnapshotRepository(Protocol):
+    """Snapshot-able eligibility rules (plan §46)."""
+
+    def put_snapshot(self, snapshot: PolicySnapshot) -> PolicySnapshot: ...
+    def get_snapshot(self, snapshot_id: str) -> PolicySnapshot | None: ...
+    def latest_snapshot(self) -> PolicySnapshot | None: ...

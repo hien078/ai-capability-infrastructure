@@ -25,6 +25,7 @@ from aci.domain.capability.models import (
     CapabilityRelease,
     CapabilityVersion,
     ReleaseChannel,
+    ReleaseStatus,
 )
 
 
@@ -39,6 +40,7 @@ def _capability_of(row: CapabilityRow) -> Capability:
             "kind": row.kind,
             "created_at": row.created_at,
             "owner_scope": row.owner_scope,
+            "owner_scope_id": row.owner_scope_id,
         }
     )
 
@@ -54,6 +56,7 @@ def _version_of(row: CapabilityVersionRow) -> CapabilityVersion:
         "display_name": row.display_name,
         "description": row.description,
         "facets": row.facets,
+        "compatibility": row.compatibility,
         "spec": row.spec,
     }
     return CapabilityVersion.model_validate(data)
@@ -110,6 +113,7 @@ class SqlAlchemyCapabilityRepository:
                     kind=capability.kind,
                     created_at=capability.created_at,
                     owner_scope=capability.owner_scope,
+                    owner_scope_id=capability.owner_scope_id,
                 )
             )
             try:
@@ -141,6 +145,9 @@ class SqlAlchemyCapabilityRepository:
                     display_name=version.display_name,
                     description=version.description,
                     facets=version.facets,
+                    compatibility=version.compatibility.model_dump()
+                    if version.compatibility
+                    else None,
                     spec=version.spec.model_dump(),
                 )
             )
@@ -244,6 +251,16 @@ class SqlAlchemyReleaseRepository:
                 .order_by(CapabilityReleaseRow.channel)
                 .all()
             )
+            return [_release_of(r) for r in rows]
+
+    def list_channel(
+        self, channel: ReleaseChannel, *, status: ReleaseStatus | None = None
+    ) -> list[CapabilityRelease]:
+        with self._sessions() as session:
+            query = session.query(CapabilityReleaseRow).filter_by(channel=channel)
+            if status is not None:
+                query = query.filter_by(status=status)
+            rows = query.order_by(CapabilityReleaseRow.capability_id).all()
             return [_release_of(r) for r in rows]
 
 

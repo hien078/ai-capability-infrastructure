@@ -18,6 +18,9 @@ from aci.adapters.outbound.postgres.assessments import (  # noqa: E402
     SqlAlchemySecurityAssessmentRepository,
 )
 from aci.adapters.outbound.postgres.base import make_session_factory  # noqa: E402
+from aci.adapters.outbound.postgres.policy_snapshots import (  # noqa: E402
+    SqlAlchemyPolicySnapshotRepository,
+)
 from aci.adapters.outbound.postgres.repositories import (  # noqa: E402
     SqlAlchemyArtifactStore,
     SqlAlchemyCapabilityRepository,
@@ -26,8 +29,10 @@ from aci.adapters.outbound.postgres.repositories import (  # noqa: E402
 from aci.adapters.outbound.postgres.source_records import (  # noqa: E402
     SqlAlchemySourceRecordRepository,
 )
+from aci.application.list_candidates import ProductionCandidateLoader  # noqa: E402
 from aci.control_plane.promotion.service import PromotionService  # noqa: E402
 from aci.providers.skills.ingestion import SkillIngestionService  # noqa: E402
+from aci.routing.eligibility import DefaultEligibilityPolicy  # noqa: E402
 
 DB_URL = os.environ.get("ACI_DATABASE_URL", "postgresql+psycopg://aci:aci@localhost:5432/aci")
 
@@ -97,6 +102,31 @@ def promotion(
         licenses=license_repo,
         securities=security_repo,
     )
+
+
+@pytest.fixture()
+def policy_snapshots(sessions: sessionmaker[Session]) -> SqlAlchemyPolicySnapshotRepository:
+    return SqlAlchemyPolicySnapshotRepository(sessions)
+
+
+@pytest.fixture()
+def candidate_loader(
+    capability_repo: SqlAlchemyCapabilityRepository,
+    release_repo: SqlAlchemyReleaseRepository,
+    license_repo: SqlAlchemyLicenseAssessmentRepository,
+    security_repo: SqlAlchemySecurityAssessmentRepository,
+) -> ProductionCandidateLoader:
+    return ProductionCandidateLoader(
+        capabilities=capability_repo,
+        releases=release_repo,
+        licenses=license_repo,
+        securities=security_repo,
+    )
+
+
+@pytest.fixture()
+def eligibility_policy() -> DefaultEligibilityPolicy:
+    return DefaultEligibilityPolicy()
 
 
 @pytest.fixture()

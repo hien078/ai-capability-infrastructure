@@ -22,6 +22,7 @@ class CapabilityRow(Base):
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     owner_scope: Mapped[str] = mapped_column(Text, nullable=False, default="global")
+    owner_scope_id: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
 
 class CapabilityVersionRow(Base):
@@ -39,6 +40,7 @@ class CapabilityVersionRow(Base):
     display_name: Mapped[str] = mapped_column(Text, nullable=False, default="")
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     facets: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    compatibility: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
 
@@ -160,3 +162,11 @@ class SecurityAssessmentRow(Base):
     scanned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     scanner_version: Mapped[str] = mapped_column(Text, nullable=False)
     reviewed_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
+
+class PolicySnapshotRow(Base):
+    __tablename__ = "policy_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    rules: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
