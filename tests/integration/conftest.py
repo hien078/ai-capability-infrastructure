@@ -12,7 +12,11 @@ from sqlalchemy import Engine, create_engine, text  # noqa: E402
 from sqlalchemy.exc import OperationalError  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 
+from aci.adapters.outbound.model_provider.hashing import HashingEmbedder  # noqa: E402
 from aci.adapters.outbound.object_store.fs import FsObjectStore  # noqa: E402
+from aci.adapters.outbound.pgvector.repository import (  # noqa: E402
+    SqlAlchemyEmbeddingRepository,
+)
 from aci.adapters.outbound.postgres.assessments import (  # noqa: E402
     SqlAlchemyLicenseAssessmentRepository,
     SqlAlchemySecurityAssessmentRepository,
@@ -33,6 +37,7 @@ from aci.application.list_candidates import ProductionCandidateLoader  # noqa: E
 from aci.control_plane.promotion.service import PromotionService  # noqa: E402
 from aci.providers.skills.ingestion import SkillIngestionService  # noqa: E402
 from aci.routing.eligibility import DefaultEligibilityPolicy  # noqa: E402
+from aci.routing.retrieval import EmbeddingRetriever  # noqa: E402
 
 DB_URL = os.environ.get("ACI_DATABASE_URL", "postgresql+psycopg://aci:aci@localhost:5432/aci")
 
@@ -127,6 +132,27 @@ def candidate_loader(
 @pytest.fixture()
 def eligibility_policy() -> DefaultEligibilityPolicy:
     return DefaultEligibilityPolicy()
+
+
+@pytest.fixture()
+def embedder() -> HashingEmbedder:
+    return HashingEmbedder()
+
+
+@pytest.fixture()
+def embedding_repo(sessions: sessionmaker[Session]) -> SqlAlchemyEmbeddingRepository:
+    return SqlAlchemyEmbeddingRepository(sessions)
+
+
+@pytest.fixture()
+def retriever(
+    capability_repo: SqlAlchemyCapabilityRepository,
+    embedder: HashingEmbedder,
+    embedding_repo: SqlAlchemyEmbeddingRepository,
+) -> EmbeddingRetriever:
+    return EmbeddingRetriever(
+        capabilities=capability_repo, embedder=embedder, embeddings=embedding_repo
+    )
 
 
 @pytest.fixture()

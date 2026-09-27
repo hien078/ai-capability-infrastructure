@@ -23,6 +23,11 @@ from aci.domain.policy.models import (
     RoutingRequestContext,
 )
 from aci.domain.provenance.models import LicenseAssessment, SecurityAssessment
+from aci.domain.routing.models import (
+    RetrievalResult,
+    RetrievedDocument,
+    TrustedRoutingDocument,
+)
 from aci.domain.skills.models import SourceProvenance
 
 
@@ -106,3 +111,40 @@ class PolicySnapshotRepository(Protocol):
     def put_snapshot(self, snapshot: PolicySnapshot) -> PolicySnapshot: ...
     def get_snapshot(self, snapshot_id: str) -> PolicySnapshot | None: ...
     def latest_snapshot(self) -> PolicySnapshot | None: ...
+
+
+class Embedder(Protocol):
+    """Turns trusted text into vectors. Implementations live in adapters."""
+
+    model_id: str
+
+    def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+
+class EmbeddingRepository(Protocol):
+    """Trusted routing documents + their vectors (plan §§41, 46).
+
+    Documents are immutable per (capability_id, version, doc_type); vectors are
+    per (document, model_id) so embedder changes never collide.
+    """
+
+    def put_document(self, document: TrustedRoutingDocument, vector: list[float]) -> None: ...
+    def get_indexed_document(
+        self, capability_id: str, version: str, model_id: str
+    ) -> TrustedRoutingDocument | None: ...
+    def search(
+        self,
+        query_vector: list[float],
+        pairs: list[tuple[str, str]],
+        *,
+        model_id: str,
+        limit: int,
+    ) -> list[RetrievedDocument]: ...
+
+
+class CandidateRetriever(Protocol):
+    """Retrieve 10-30 candidates from the eligible set (plan §16, ADR-009)."""
+
+    def retrieve(
+        self, query: str, eligible: list[EligibleCandidate], *, limit: int = 30
+    ) -> RetrievalResult: ...

@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from aci.adapters.outbound.postgres.base import Base  # noqa: E402
 from aci.adapters.outbound.postgres import orm as _orm  # noqa: E402,F401  # register tables
+from aci.adapters.outbound import pgvector as _pgvector_orm  # noqa: E402,F401  # register vector tables
 
 config = context.config
 if config.config_file_name is not None:
