@@ -76,11 +76,14 @@ def test_capability_id_and_version_format() -> None:
 
 def test_outcome_requires_verdict_source() -> None:
     with pytest.raises(ValidationError):
-        OutcomeEvidence(outcome_id="o", route_run_id="r", bundle_id="b", verdicts=[])
+        OutcomeEvidence(
+            outcome_id="o", route_run_id="r", bundle_id="b", verdicts=[], received_at=NOW
+        )
     ev = OutcomeEvidence(
         outcome_id="o",
         route_run_id="r",
         bundle_id="b",
+        received_at=NOW,
         verdicts=[OutcomeVerdict(source="test_harness", status="success", confidence="high")],
     )
     assert ev.verdicts[0].source == "test_harness"

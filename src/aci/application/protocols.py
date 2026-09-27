@@ -12,9 +12,11 @@ from aci.domain.capability.models import (
     CapabilityArtifact,
     CapabilityBinding,
     CapabilityBundle,
+    CapabilityKind,
     CapabilityRelation,
     CapabilityRelease,
     CapabilityVersion,
+    OutcomeEvidence,
     ReleaseChannel,
     ReleaseStatus,
     RouteCapabilitiesCommand,
@@ -33,6 +35,7 @@ from aci.domain.routing.models import (
     ResolutionResult,
     RetrievalResult,
     RetrievedDocument,
+    RouteRun,
     ScoredCandidate,
     TaskDescriptor,
     TrustedRoutingDocument,
@@ -110,7 +113,7 @@ class EligibilityPolicy(Protocol):
         context: RoutingRequestContext,
         rules: PolicyRules,
         *,
-        allowed_kinds: list[str],
+        allowed_kinds: list[CapabilityKind],
     ) -> EligibilityDecision: ...
 
 
@@ -125,7 +128,8 @@ class PolicySnapshotRepository(Protocol):
 class Embedder(Protocol):
     """Turns trusted text into vectors. Implementations live in adapters."""
 
-    model_id: str
+    @property
+    def model_id(self) -> str: ...
 
     def embed(self, texts: list[str]) -> list[list[float]]: ...
 
@@ -191,6 +195,9 @@ class DependencyResolver(Protocol):
 class BundleComposer(Protocol):
     """Compose a minimal sufficient bundle, 0-5 items (plan §19; ADR-008)."""
 
+    implementation: str
+    version: str
+
     def compose(
         self,
         resolution: ResolutionResult,
@@ -199,3 +206,24 @@ class BundleComposer(Protocol):
         route_run_id: str,
         now: datetime,
     ) -> CapabilityBundle: ...
+
+
+class RouteRunRepository(Protocol):
+    """Persisted routing telemetry (plan §36)."""
+
+    def put_route_run(self, run: RouteRun) -> RouteRun: ...
+    def get_route_run(self, route_run_id: str) -> RouteRun | None: ...
+
+
+class BundleRepository(Protocol):
+    """Immutable composed bundles, items FK to exact versions (§41.1)."""
+
+    def put_bundle(self, bundle: CapabilityBundle) -> CapabilityBundle: ...
+    def get_bundle(self, bundle_id: str) -> CapabilityBundle | None: ...
+
+
+class OutcomeRecorder(Protocol):
+    """Multi-source outcome evidence ingestion (plan §33; ADR-010)."""
+
+    def record(self, evidence: OutcomeEvidence) -> OutcomeEvidence: ...
+    def get_outcome(self, outcome_id: str) -> OutcomeEvidence | None: ...

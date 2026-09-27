@@ -6,6 +6,7 @@ Every exclusion carries a stable ErrorCode reason for route traces (§14, §45).
 """
 
 from aci.domain.capability.errors import ErrorCode
+from aci.domain.capability.models import CapabilityKind
 from aci.domain.policy.models import (
     EligibilityDecision,
     EligibleCandidate,
@@ -24,7 +25,7 @@ class DefaultEligibilityPolicy:
         context: RoutingRequestContext,
         rules: PolicyRules,
         *,
-        allowed_kinds: list[str],
+        allowed_kinds: list[CapabilityKind],
     ) -> EligibilityDecision:
         kept: list[EligibleCandidate] = []
         excluded: list[Exclusion] = []
@@ -51,7 +52,7 @@ class DefaultEligibilityPolicy:
         candidate: EligibleCandidate,
         context: RoutingRequestContext,
         rules: PolicyRules,
-        allowed_kinds: set[str],
+        allowed_kinds: set[CapabilityKind],
     ) -> tuple[ErrorCode, str] | None:
         # 1. Lifecycle: only active releases on the required channel may route.
         if candidate.status != "active":

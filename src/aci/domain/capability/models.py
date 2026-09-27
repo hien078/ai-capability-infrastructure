@@ -202,6 +202,17 @@ def _default_allowed_kinds() -> list[CapabilityKind]:
     return ["skill"]
 
 
+class SearchCapabilitiesQuery(BaseModel):
+    """Typed search query (plan §11.2)."""
+
+    model_config = {"frozen": True}
+
+    query: str = Field(default="", max_length=2000)
+    kinds: list[CapabilityKind] = Field(default_factory=_default_allowed_kinds)
+    domains: list[str] = Field(default_factory=list)
+    limit: int = Field(default=20, ge=1, le=100)
+
+
 class RouteCapabilitiesCommand(BaseModel):
     task_text: str = Field(min_length=1, max_length=8000)
     context: TaskContext = Field(default_factory=TaskContext)
@@ -282,6 +293,7 @@ class OutcomeEvidence(BaseModel):
     outcome_id: str
     route_run_id: str
     bundle_id: str
+    received_at: datetime
     verdicts: list[OutcomeVerdict] = Field(min_length=1)
     tests_before: dict[str, Any] = Field(default_factory=dict)
     tests_after: dict[str, Any] = Field(default_factory=dict)

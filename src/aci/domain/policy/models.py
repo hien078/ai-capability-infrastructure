@@ -54,6 +54,42 @@ class RoutingRequestContext(BaseModel):
     task: TaskContext = Field(default_factory=TaskContext)
 
 
+class ProtocolDescriptor(BaseModel):
+    model_config = {"frozen": True}
+
+    type: str = Field(min_length=1)  # "rest", "mcp", ...
+    version: str | None = None
+
+
+class RequestContext(BaseModel):
+    """Request envelope identity (plan §11.1). Transport adapters build this;
+    application services never trust it for authorization beyond scope fields.
+    """
+
+    model_config = {"frozen": True}
+
+    request_id: str = Field(min_length=1)
+    trace_id: str = Field(min_length=1)
+    principal_id: str = Field(min_length=1)
+    organization_id: str | None = None
+    workspace_id: str | None = None
+    client: ClientDescriptor
+    protocol: ProtocolDescriptor
+    deadline: datetime | None = None
+    locale: str | None = None
+
+    def to_routing_context(self, task: TaskContext) -> RoutingRequestContext:
+        """Project the envelope onto the eligibility/routing context."""
+        return RoutingRequestContext(client=self.client, scope=self.scope(), task=task)
+
+    def scope(self) -> ScopeContext:
+        return ScopeContext(
+            principal_id=self.principal_id,
+            organization_id=self.organization_id,
+            workspace_id=self.workspace_id,
+        )
+
+
 class EligibleCandidate(BaseModel):
     """A version annotated with everything eligibility needs to decide."""
 

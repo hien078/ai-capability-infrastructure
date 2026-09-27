@@ -22,6 +22,9 @@ from aci.domain.routing.models import ResolutionResult
 DEFAULT_ITEM_TOKENS = 1000  # fallback estimate when no trusted doc text exists
 CHARS_PER_TOKEN = 4  # rough deterministic estimate for the trusted summary
 
+IMPLEMENTATION = "minimal-bundle-composer"
+VERSION = "1"
+
 
 def estimated_tokens(document_text: str) -> int:
     """Deterministic context-cost estimate from the trusted routing document."""
@@ -32,6 +35,9 @@ def estimated_tokens(document_text: str) -> int:
 
 class MinimalBundleComposer:
     """Implements the BundleComposer protocol (§44)."""
+
+    implementation = IMPLEMENTATION
+    version = VERSION
 
     def compose(
         self,

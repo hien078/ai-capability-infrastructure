@@ -172,6 +172,94 @@ class PolicySnapshotRow(Base):
     rules: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
 
+class RouteRunRow(Base):
+    __tablename__ = "route_runs"
+
+    route_run_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    request_id: Mapped[str] = mapped_column(Text, nullable=False)
+    trace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    principal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    organization_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    workspace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    client_type: Mapped[str] = mapped_column(Text, nullable=False)
+    client_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    protocol_type: Mapped[str] = mapped_column(Text, nullable=False)
+    task_text: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_snapshot_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    eligible_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    stages: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    reranker_implementation: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    reranker_version: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    composer_implementation: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    composer_version: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    latency_ms: Mapped[int | None] = mapped_column(nullable=True)
+    error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bundle_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class BundleRow(Base):
+    __tablename__ = "bundles"
+
+    bundle_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    route_run_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("route_runs.route_run_id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    execution_order: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    budget: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    policy_snapshot_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class BundleItemRow(Base):
+    __tablename__ = "bundle_items"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["capability_id", "version"],
+            ["capability_versions.capability_id", "capability_versions.version"],
+            ondelete="CASCADE",
+        ),
+    )
+
+    bundle_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("bundles.bundle_id", ondelete="CASCADE"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(primary_key=True)
+    capability_id: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    load_mode: Mapped[str] = mapped_column(Text, nullable=False)
+    reason_code: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class OutcomeEventRow(Base):
+    __tablename__ = "outcome_events"
+
+    outcome_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    route_run_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("route_runs.route_run_id", ondelete="CASCADE"), nullable=False
+    )
+    bundle_id: Mapped[str] = mapped_column(Text, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    latency_ms: Mapped[int | None] = mapped_column(nullable=True)
+    tests_before: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    tests_after: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class OutcomeVerdictRow(Base):
+    __tablename__ = "outcome_verdicts"
+
+    outcome_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("outcome_events.outcome_id", ondelete="CASCADE"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class CapabilityRelationRow(Base):
     __tablename__ = "capability_relations"
     __table_args__ = (

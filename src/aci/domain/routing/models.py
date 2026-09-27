@@ -6,11 +6,17 @@ skill bodies (§16.1 prompt-injection boundary).
 """
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from aci.domain.capability.models import TaskContext
+from aci.domain.capability.models import (
+    CapabilityArtifact,
+    CapabilityBundle,
+    CapabilityKind,
+    CapabilityVersion,
+    TaskContext,
+)
 from aci.domain.policy.models import EligibleCandidate
 
 DocType = Literal["routing"]
@@ -120,6 +126,72 @@ class ResolutionResult(BaseModel):
     selected: list[ResolvedItem] = Field(default_factory=list)
     dropped: list[ResolutionDrop] = Field(default_factory=list)
     trace: ResolutionTrace
+
+
+class RouteRun(BaseModel):
+    """Persisted telemetry for one routing request (plan §36).
+
+    Stage traces (§14) are stored as structured JSON: eligibility exclusions,
+    retrieval counts, rerank scores, resolution drops. No raw secrets — the
+    task text is the bounded routing input, never file contents (§25.4).
+    """
+
+    model_config = {"frozen": True}
+
+    route_run_id: str
+    request_id: str
+    trace_id: str
+    created_at: datetime
+    principal_id: str
+    organization_id: str | None = None
+    workspace_id: str | None = None
+    client_type: str
+    client_version: str | None = None
+    protocol_type: str
+    task_text: str = Field(max_length=8000)
+    policy_snapshot_id: str | None = None
+    eligible_count: int = 0
+    stages: dict[str, Any] = Field(default_factory=dict)
+    reranker_implementation: str = ""
+    reranker_version: str = ""
+    composer_implementation: str = ""
+    composer_version: str = ""
+    latency_ms: int | None = None
+    error_code: str | None = None
+    bundle_id: str | None = None
+
+
+class RouteResult(BaseModel):
+    """What POST /v1/routes returns: the pinned bundle + run identity."""
+
+    model_config = {"frozen": True}
+
+    route_run_id: str
+    bundle: CapabilityBundle
+
+
+class CapabilitySearchResult(BaseModel):
+    """One search hit (plan §11.2): trusted metadata + score."""
+
+    model_config = {"frozen": True}
+
+    capability_id: str
+    version: str
+    digest: str
+    kind: CapabilityKind
+    display_name: str = ""
+    description: str = ""
+    facets: dict[str, list[str]] = Field(default_factory=dict)
+    score: float = 0.0
+
+
+class ResolvedVersion(BaseModel):
+    """A pinned version plus its immutable artifact (resolve, §12)."""
+
+    model_config = {"frozen": True}
+
+    version: CapabilityVersion
+    artifact: CapabilityArtifact | None = None
 
 
 class RerankTrace(BaseModel):

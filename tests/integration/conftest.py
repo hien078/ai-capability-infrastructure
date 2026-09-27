@@ -8,6 +8,7 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 
+from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import Engine, create_engine, text  # noqa: E402
 from sqlalchemy.exc import OperationalError  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
@@ -22,6 +23,8 @@ from aci.adapters.outbound.postgres.assessments import (  # noqa: E402
     SqlAlchemySecurityAssessmentRepository,
 )
 from aci.adapters.outbound.postgres.base import make_session_factory  # noqa: E402
+from aci.adapters.outbound.postgres.bundles import SqlAlchemyBundleRepository  # noqa: E402
+from aci.adapters.outbound.postgres.outcomes import SqlAlchemyOutcomeRecorder  # noqa: E402
 from aci.adapters.outbound.postgres.policy_snapshots import (  # noqa: E402
     SqlAlchemyPolicySnapshotRepository,
 )
@@ -33,10 +36,16 @@ from aci.adapters.outbound.postgres.repositories import (  # noqa: E402
     SqlAlchemyCapabilityRepository,
     SqlAlchemyReleaseRepository,
 )
+from aci.adapters.outbound.postgres.route_runs import (  # noqa: E402
+    SqlAlchemyRouteRunRepository,
+)
 from aci.adapters.outbound.postgres.source_records import (  # noqa: E402
     SqlAlchemySourceRecordRepository,
 )
 from aci.application.list_candidates import ProductionCandidateLoader  # noqa: E402
+from aci.application.report_outcome import ReportOutcomeService  # noqa: E402
+from aci.application.route_capabilities import RouteCapabilitiesService  # noqa: E402
+from aci.application.search_capabilities import SearchCapabilitiesService  # noqa: E402
 from aci.control_plane.promotion.service import PromotionService  # noqa: E402
 from aci.providers.skills.ingestion import SkillIngestionService  # noqa: E402
 from aci.routing.composer import MinimalBundleComposer  # noqa: E402
@@ -199,3 +208,69 @@ def ingestion(
         source_records=source_records,
         objects=FsObjectStore(tmp_path / "objects"),
     )
+
+
+@pytest.fixture()
+def route_run_repo(sessions: sessionmaker[Session]) -> SqlAlchemyRouteRunRepository:
+    return SqlAlchemyRouteRunRepository(sessions)
+
+
+@pytest.fixture()
+def bundle_repo(sessions: sessionmaker[Session]) -> SqlAlchemyBundleRepository:
+    return SqlAlchemyBundleRepository(sessions)
+
+
+@pytest.fixture()
+def outcome_recorder(sessions: sessionmaker[Session]) -> SqlAlchemyOutcomeRecorder:
+    return SqlAlchemyOutcomeRecorder(sessions)
+
+
+@pytest.fixture()
+def route_service(
+    candidate_loader: ProductionCandidateLoader,
+    eligibility_policy: DefaultEligibilityPolicy,
+    retriever: EmbeddingRetriever,
+    reranker: HeuristicReranker,
+    resolver: DefaultDependencyResolver,
+    composer: MinimalBundleComposer,
+    policy_snapshots: SqlAlchemyPolicySnapshotRepository,
+    route_run_repo: SqlAlchemyRouteRunRepository,
+    bundle_repo: SqlAlchemyBundleRepository,
+) -> RouteCapabilitiesService:
+    return RouteCapabilitiesService(
+        loader=candidate_loader,
+        eligibility=eligibility_policy,
+        retriever=retriever,
+        reranker=reranker,
+        resolver=resolver,
+        composer=composer,
+        policy_snapshots=policy_snapshots,
+        route_runs=route_run_repo,
+        bundles=bundle_repo,
+    )
+
+
+@pytest.fixture()
+def search_service(
+    candidate_loader: ProductionCandidateLoader,
+    retriever: EmbeddingRetriever,
+    capability_repo: SqlAlchemyCapabilityRepository,
+) -> SearchCapabilitiesService:
+    return SearchCapabilitiesService(candidate_loader, retriever, capability_repo)
+
+
+@pytest.fixture()
+def outcome_service(
+    outcome_recorder: SqlAlchemyOutcomeRecorder,
+    bundle_repo: SqlAlchemyBundleRepository,
+) -> ReportOutcomeService:
+    return ReportOutcomeService(outcome_recorder, bundle_repo)
+
+
+@pytest.fixture()
+def rest_client() -> Iterator[TestClient]:
+    """Second client over plain HTTP (§52 Phase 9 acceptance): no OpenCode."""
+    from aci.main import app  # noqa: PLC0415
+
+    with TestClient(app) as client:
+        yield client
