@@ -53,9 +53,11 @@ from aci.config import Settings
 from aci.control_plane.promotion.service import PromotionService
 from aci.domain.provenance.models import (
     LicenseAssessment,
+    ScanStatus,
     SecurityAssessment,
 )
 from aci.providers.licensing import LicenseDetection, detect_license, spdx_permissions
+from aci.providers.security import SCANNER_VERSION, scan_package, verdict
 from aci.providers.skills.ingestion import SkillIngestionService
 
 # License detection (V2 governance, plan §55): the SPDX id is detected from
@@ -167,7 +169,11 @@ SOURCES: list[SkillSource] = [
     ),
 ]
 
-SECURITY_SCANNER_VERSION = "manual-review:0.1.0"
+# Security scanning (V2 §55): pattern scanner replaces the manual-review
+# stub — critical attack primitives (pipe-to-shell, eval-of-base64) fail
+# the package and quarantine it; weaker signals are recorded as findings
+# for human review without blocking (see scanner docstring for the
+# false-positive rationale).
 
 
 def _clone(repo: str, commit: str, workdir: Path) -> Path:
@@ -281,19 +287,25 @@ def main() -> int:
                             ),
                         )
                     )
-                if security_repo.get_assessment(cid, ver) is None:
+                existing_scan = security_repo.get_assessment(cid, ver)
+                scan_verdict: ScanStatus
+                if existing_scan is None:
+                    findings = scan_package(skill_dir)
+                    scan_verdict = verdict(findings)
                     security_repo.put_assessment(
                         SecurityAssessment(
                             assessment_id=f"sec-{uuid.uuid4().hex[:12]}",
                             capability_id=cid,
                             version=ver,
-                            scan_status="passed",
-                            findings=[],
+                            scan_status=scan_verdict,
+                            findings=[str(f) for f in findings],
                             scanned_at=now,
-                            scanner_version=SECURITY_SCANNER_VERSION,
-                            reviewed_by="ingest_real_skills.py",
+                            scanner_version=SCANNER_VERSION,
+                            reviewed_by="pattern-scanner",
                         )
                     )
+                else:
+                    scan_verdict = existing_scan.scan_status
                 if not permissions.can_redistribute:
                     # §24: unknown/non-redistributable license blocks
                     # production by default — the skill stays in `raw`
@@ -302,6 +314,17 @@ def main() -> int:
                     print(
                         f"OK  {cid}@{ver} [{state}, QUARANTINED] "
                         f"license={det.spdx_id} files={result.file_count}"
+                    )
+                    continue
+                if scan_verdict != "passed":
+                    # ADR-012: production requires a passed security scan.
+                    # Critical pattern hits quarantine the skill; warnings
+                    # are recorded in the assessment findings for review.
+                    state = "already-ingested" if result.already_ingested else "ingested"
+                    print(
+                        f"OK  {cid}@{ver} [{state}, QUARANTINED] "
+                        f"scan={scan_verdict} license={det.spdx_id} "
+                        f"files={result.file_count}"
                     )
                     continue
                 promotion.promote(
