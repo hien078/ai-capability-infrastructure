@@ -11,32 +11,40 @@ touches skill bodies, the filesystem, or permissions (ADR-005).
 
 ## Install
 
-1. Copy (or symlink) this directory into your project as
-   `.opencode/plugins/aci-router/` — plugins under `.opencode/plugins/` load
-   automatically. To keep it elsewhere, reference it explicitly:
+> Verified against OpenCode v2.0.18 (2026-09-28, §77). The config `plugin`
+> array accepts **npm package names only** — an object entry
+> `{"package": ..., "options": ...}` is silently skipped as malformed.
 
-   ```jsonc title="opencode.jsonc"
+1. Copy this file into the project (or `~/.config/opencode/plugins/` for
+   global) as a **real file, not a symlink** — bun resolves imports from
+   the file's realpath, so a symlink back into this repo makes
+   `@opencode/plugin` unresolvable:
+
+   ```bash
+   mkdir -p .opencode/plugins
+   cp src/aci/adapters/inbound/opencode/plugin/index.ts \
+      .opencode/plugins/aci-router.ts
+   ```
+
+   Files in the plugins directory load automatically at startup.
+
+2. Declare the plugin's dependencies so bun can resolve them
+   (`.opencode/package.json`):
+
+   ```json
    {
-     "$schema": "https://opencode.ai/config.json",
-     "plugins": [
-       {
-         "package": "/path/to/this/repo/src/aci/adapters/inbound/opencode/plugin",
-         "options": {
-           "baseUrl": "http://127.0.0.1:8000",
-           "principalId": "opencode",
-           "language": "python",
-           "frameworks": ["fastapi"],
-           "maxItems": 5,
-           "maxContextTokens": 6000,
-           "timeoutMs": 2000,
-           "failClosed": false
-         }
-       }
-     ]
+     "dependencies": {
+       "@opencode/plugin": "2.0.18",
+       "@opencode/schema": "2.0.18"
+     }
    }
    ```
 
-2. Point OpenCode's native skill catalog at the platform (Phase 10) so the
+   OpenCode runs `bun install` at startup; pin the versions to your
+   OpenCode version. If the server was already running, restart it — a
+   warm process caches failed module resolution.
+
+3. Point OpenCode's native skill catalog at the platform (Phase 10) so the
    injected IDs resolve and lazy-load from the registry — never from a
    manually maintained local copy:
 
@@ -46,8 +54,14 @@ touches skill bodies, the filesystem, or permissions (ADR-005).
    }
    ```
 
-3. Start the platform: `uvicorn aci.main:app` (serves `/v1/routes` and the
+4. Start the platform: `uvicorn aci.main:app` (serves `/v1/routes` and the
    catalog).
+
+The plugin runs on its built-in defaults (`baseUrl`
+`http://127.0.0.1:8000`, `principalId` `opencode`, fail-open). To pass
+options, publish it as an npm package and use the config tuple form
+`["package-name", {"baseUrl": ..., "language": ...}]`, or edit the
+defaults in the installed copy.
 
 ## Options
 
