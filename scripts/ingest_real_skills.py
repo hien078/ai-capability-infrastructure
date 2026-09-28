@@ -53,42 +53,16 @@ from aci.config import Settings
 from aci.control_plane.promotion.service import PromotionService
 from aci.domain.provenance.models import (
     LicenseAssessment,
-    LicensePermissions,
     SecurityAssessment,
 )
+from aci.providers.licensing import LicenseDetection, detect_license, spdx_permissions
 from aci.providers.skills.ingestion import SkillIngestionService
 
-# (name, permissions) per license — machine-readable §24 permissions.
-# An unknown license is deliberately absent: it gets an honest
-# can_redistribute=False assessment and the skill stays in `raw`
-# quarantine (§24: unknown blocks production by default).
-_LICENSES: dict[str, LicensePermissions] = {
-    "MIT": LicensePermissions(
-        can_ingest=True,
-        can_modify=True,
-        can_store=True,
-        can_redistribute=True,
-        commercial_use_allowed=True,
-        attribution_required=True,
-    ),
-    "Apache-2.0": LicensePermissions(
-        can_ingest=True,
-        can_modify=True,
-        can_store=True,
-        can_redistribute=True,
-        commercial_use_allowed=True,
-        attribution_required=True,
-    ),
-}
-
-_UNKNOWN = LicensePermissions(
-    can_ingest=True,
-    can_modify=False,
-    can_store=True,
-    can_redistribute=False,
-    commercial_use_allowed=False,
-    attribution_required=True,
-)
+# License detection (V2 governance, plan §55): the SPDX id is detected from
+# the skill package itself — per-skill LICENSE.txt first, then the repo-root
+# LICENSE as fallback (a repo-level license covers its skills), then the
+# manifest `license` field. An unmatched license is never a guess: it maps to
+# `unknown` permissions and §24 keeps the skill in `raw` quarantine.
 
 
 @dataclass(frozen=True)
@@ -97,15 +71,17 @@ class SkillSource:
 
     repo: str
     commit: str
-    license: str
     skills: tuple[str, ...]
+    #: Optional manual override (SPDX id). None = auto-detect from the
+    #: package (per-skill file → repo-root file → manifest field).
+    license: str | None = None
 
 
 SOURCES: list[SkillSource] = [
     SkillSource(
         repo="https://github.com/obra/superpowers.git",
         commit="8ca22dba9a94f28898bbce59f2537ff4d87c747d",
-        license="MIT",
+        # MIT detected from the repo-root LICENSE.
         skills=(
             "skills/systematic-debugging",
             "skills/test-driven-development",
@@ -128,7 +104,8 @@ SOURCES: list[SkillSource] = [
     SkillSource(
         repo="https://github.com/anthropics/skills.git",
         commit="33375500bcea98d610eb30ce10ac4e59b89c390d",
-        license="Apache-2.0",
+        # Apache-2.0 detected from per-skill LICENSE.txt; docx/pdf/pptx/xlsx
+        # stay excluded (Proprietary).
         skills=(
             "skills/mcp-builder",
             "skills/webapp-testing",
@@ -149,12 +126,12 @@ SOURCES: list[SkillSource] = [
             "skills/web-artifacts-builder",
         ),
     ),
-    # Unknown license (no LICENSE.txt, no frontmatter field): ingests into
-    # `raw` quarantine and is NOT promoted — §24 blocks production by default.
+    # Unknown license (no LICENSE.txt, no frontmatter field, no repo-root
+    # fallback): the detector reports `unknown` and the skill ingests into
+    # `raw` quarantine — §24 blocks production by default.
     SkillSource(
         repo="https://github.com/anthropics/skills.git",
         commit="33375500bcea98d610eb30ce10ac4e59b89c390d",
-        license="unknown",
         skills=("skills/doc-coauthoring",),
     ),
 ]
@@ -178,6 +155,25 @@ def _clone(repo: str, commit: str, workdir: Path) -> Path:
         capture_output=True,
     )
     return target
+
+
+def _detect(skill_dir: Path, repo_root: Path, override: str | None) -> tuple[LicenseDetection, str]:
+    """Detect the license for one skill package.
+
+    Order: manual override > per-skill file > repo-root file > manifest.
+    Returns the detection plus a human-readable evidence note.
+    """
+    if override is not None:
+        return (
+            LicenseDetection(spdx_id=override, method="manual-override", evidence=""),
+            "manually verified",
+        )
+    det = detect_license(skill_dir)
+    if det.spdx_id == "unknown" and skill_dir != repo_root:
+        root_det = detect_license(repo_root)
+        if root_det.spdx_id != "unknown":
+            return root_det, f"detected from repo-root {root_det.evidence}"
+    return det, f"detected via {det.method} {det.evidence}".rstrip()
 
 
 def main() -> int:
@@ -225,9 +221,11 @@ def main() -> int:
         for rel in source.skills:
             skill_dir = root / rel
             try:
+                det, det_note = _detect(skill_dir, root, source.license)
+                permissions = spdx_permissions(det.spdx_id)
                 result = ingestion.ingest_local(
                     skill_dir,
-                    license_identifier=source.license,
+                    license_identifier=det.spdx_id,
                     source_repository=source.repo,
                     source_url_reference=f"{source.repo}/tree/{source.commit}/{rel}",
                     commit_sha=source.commit,
@@ -241,11 +239,15 @@ def main() -> int:
                             assessment_id=f"lic-{uuid.uuid4().hex[:12]}",
                             capability_id=cid,
                             version=ver,
-                            license_identifier=source.license,
-                            permissions=_LICENSES.get(source.license, _UNKNOWN),
+                            license_identifier=det.spdx_id,
+                            permissions=permissions,
                             assessed_at=now,
-                            assessed_by="ingest_real_skills.py",
-                            notes=f"verified from {source.repo}@{source.commit}",
+                            assessed_by="license-detector:v1",
+                            notes=(
+                                f"{det_note}; verified from "
+                                f"{source.repo}@{source.commit}"
+                                + ("; manifest disagreement" if det.disagreement else "")
+                            ),
                         )
                     )
                 if security_repo.get_assessment(cid, ver) is None:
@@ -261,11 +263,15 @@ def main() -> int:
                             reviewed_by="ingest_real_skills.py",
                         )
                     )
-                if source.license not in _LICENSES:
-                    # §24: unknown license blocks production by default —
-                    # the skill stays in `raw` quarantine, unpromoted.
+                if not permissions.can_redistribute:
+                    # §24: unknown/non-redistributable license blocks
+                    # production by default — the skill stays in `raw`
+                    # quarantine, unpromoted.
                     state = "already-ingested" if result.already_ingested else "ingested"
-                    print(f"OK  {cid}@{ver} [{state}, QUARANTINED] files={result.file_count}")
+                    print(
+                        f"OK  {cid}@{ver} [{state}, QUARANTINED] "
+                        f"license={det.spdx_id} files={result.file_count}"
+                    )
                     continue
                 promotion.promote(
                     cid,
@@ -275,7 +281,10 @@ def main() -> int:
                     now=now,
                 )
                 state = "already-ingested" if result.already_ingested else "ingested"
-                print(f"OK  {cid}@{ver} [{state}] files={result.file_count}")
+                print(
+                    f"OK  {cid}@{ver} [{state}] license={det.spdx_id} "
+                    f"({det.method}) files={result.file_count}"
+                )
             except Exception as exc:  # noqa: BLE001 — operational script, report and continue
                 failures.append(f"{skill_dir}: {exc}")
                 print(f"FAIL {skill_dir}: {exc}", file=sys.stderr)
