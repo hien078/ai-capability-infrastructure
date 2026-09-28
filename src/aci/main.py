@@ -12,6 +12,7 @@ from aci.adapters.inbound.a2a.gateway import A2AGateway, create_a2a_router
 from aci.adapters.inbound.opencode import catalog as opencode_catalog
 from aci.adapters.inbound.rest import bundles as rest_bundles
 from aci.adapters.inbound.rest import capabilities as rest_capabilities
+from aci.adapters.inbound.rest import evaluations as rest_evaluations
 from aci.adapters.inbound.rest import outcomes as rest_outcomes
 from aci.adapters.inbound.rest import routes as rest_routes
 from aci.adapters.inbound.rest.errors import register_error_handlers
@@ -41,6 +42,7 @@ def create_app(container: Container | None = None) -> FastAPI:
     app.include_router(rest_routes.router)
     app.include_router(rest_bundles.router)
     app.include_router(rest_outcomes.router)
+    app.include_router(rest_evaluations.router)
     app.include_router(opencode_catalog.router)
     app.include_router(
         create_a2a_router(

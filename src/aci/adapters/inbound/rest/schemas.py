@@ -106,3 +106,19 @@ class CapabilityDetail(BaseModel):
 
     capability: dict[str, Any]
     versions: list[dict[str, Any]]
+
+
+class EvaluationRubricIn(BaseModel):
+    """Declarative rubric for the evaluation service (V4 §57)."""
+
+    criteria: list[str] = Field(min_length=1)
+    aggregation: Literal["all", "any", "majority"] = "all"
+
+
+class EvaluationRequestIn(BaseModel):
+    """POST /v1/evaluations body (V4 §57; §33.1 external_evaluator)."""
+
+    route_run_id: str = Field(min_length=1)
+    bundle_id: str = Field(min_length=1)
+    task_summary: str = Field(min_length=1, max_length=8000)
+    rubric: EvaluationRubricIn

@@ -1,153 +1,121 @@
-/**
- * ACI routing plugin for OpenCode V2 (plan §28, §28.5; ADR-005; Phase 11).
- *
- * Thin by contract: the plugin contains NO retrieval, rerank, or composition
- * logic. It extracts a minimal TaskContext (§25.4 — hints only, never repo
- * dumps or secrets), calls POST /v1/routes on the platform, and injects the
- * 0–5 selected skill IDs into the prompt. OpenCode then resolves and lazily
- * loads those skills from the HTTP catalog (Phase 10) through its normal
- * path — this plugin never touches skill bodies, filesystems, or permissions.
- *
- * Failure policy (§28.4, ADR-005): fail-open by default — a routing outage
- * logs and admits the prompt without platform-selected skills. Set
- * `failClosed: true` only for compliance flows where admission must stop.
- *
- * Outcome instrumentation (§33): the route/bundle ids are stashed in the
- * admission metadata under `aci` so the client can report real evidence via
- * POST /v1/outcomes when the work finishes.
- *
- * Install: see README.md. Verified against @opencode/plugin@2 (§77):
- * `ctx.session.hook("prompt", …)` receives a mutable draft whose
- * `prompt.skills` entries are `{ id }` (Skill.ID) and follow normal
- * resolution; `metadata` is a free-form record.
- */
-import { Plugin } from "@opencode/plugin"
-import type { Skill } from "@opencode/schema/skill"
+# ACI OpenCode Routing Plugin (Phase 11, plan §28; ADR-005)
 
-export interface RouterOptions {
-  /** ACI REST base URL. */
-  baseUrl?: string
-  /** Caller identity for the request envelope (§11.1). */
-  principalId?: string
-  organizationId?: string
-  workspaceId?: string
-  /** Minimal TaskContext hints (§25.4). Keep these hints — no repo dumps. */
-  language?: string
-  frameworks?: string[]
-  phase?: string
-  /** Bundle budgets (§19). */
-  maxItems?: number
-  maxContextTokens?: number
-  /** Routing must never hang prompt admission. */
-  timeoutMs?: number
-  /** Fail-open default (ADR-005); fail-closed only for compliance flows. */
-  failClosed?: boolean
-}
+A thin OpenCode V2 plugin that routes prompts through the AI Capability
+Infrastructure and injects the selected skill IDs into the prompt. The
+platform keeps the intelligence (eligibility → retrieval → rerank →
+dependency resolution → composition, §14); OpenCode keeps the host behavior
+(resolution, context, tools, permissions, execution loop).
 
-interface RouteResponse {
-  route_run_id: string
-  bundle: {
-    bundle_id: string
-    items: Array<{ capability_id: string; version: string; digest: string }>
-  }
-}
+The plugin contains **no** retrieval/rerank/composition logic and never
+touches skill bodies, the filesystem, or permissions (ADR-005).
 
-const DEFAULTS = {
-  baseUrl: "http://127.0.0.1:8000",
-  principalId: "opencode",
-  maxItems: 5,
-  maxContextTokens: 6000,
-  timeoutMs: 2000,
-  failClosed: false,
-}
+## Install
 
-/** Options after defaults are applied. */
-type ResolvedOptions = RouterOptions & typeof DEFAULTS
+> Verified against OpenCode v2.0.18 (2026-09-28, §77). The config `plugin`
+> array accepts **npm package names only** — an object entry
+> `{"package": ..., "options": ...}` is silently skipped as malformed.
 
-async function routeCapabilities(
-  options: ResolvedOptions,
-  taskText: string,
-): Promise<RouteResponse> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs)
-  try {
-    const response = await fetch(new URL("/v1/routes", options.baseUrl), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        task: { text: taskText },
-        context: {
-          language: options.language,
-          frameworks: options.frameworks ?? [],
-          phase: options.phase,
-        },
-        constraints: {
-          max_items: options.maxItems,
-          max_context_tokens: options.maxContextTokens,
-          allowed_kinds: ["skill"],
-        },
-        principal_id: options.principalId,
-        organization_id: options.organizationId,
-        workspace_id: options.workspaceId,
-        client_type: "opencode",
-      }),
-    })
-    if (!response.ok) {
-      // Stable §45 error bodies: {"error": {"code": ..., "message": ...}}.
-      const body = (await response.json().catch(() => ({}))) as {
-        error?: { code?: string; message?: string }
-      }
-      throw new Error(
-        `route failed (${response.status}): ${body.error?.code ?? "unknown"}`,
-      )
-    }
-    return (await response.json()) as RouteResponse
-  } finally {
-    clearTimeout(timer)
-  }
-}
+1. Copy this file into the project (or `~/.config/opencode/plugins/` for
+   global) as a **real file, not a symlink** — bun resolves imports from
+   the file's realpath, so a symlink back into this repo makes
+   `@opencode/plugin` unresolvable:
 
-export default Plugin.define({
-  id: "aci.router",
-  async setup(ctx) {
-    const options = { ...DEFAULTS, ...(ctx.options as RouterOptions) }
+   ```bash
+   mkdir -p .opencode/plugins
+   cp src/aci/adapters/inbound/opencode/plugin/index.ts \
+      .opencode/plugins/aci-router.ts
+   ```
 
-    await ctx.session.hook("prompt", async (event) => {
-      let route: RouteResponse
-      try {
-        route = await routeCapabilities(options, event.prompt.text)
-      } catch (error) {
-        if (options.failClosed) {
-          // Fail-closed: rethrow so OpenCode does not admit the prompt.
-          throw error
-        }
-        // Fail-open (default): continue admission without routed skills.
-        console.error(
-          `[aci.router] routing unavailable, continuing without skills: ${error}`,
-        )
-        return
-      }
+   Files in the plugins directory load automatically at startup.
 
-      // Inject only the selected skills (progressive disclosure, §28.3).
-      // They resolve through the normal catalog path; the plugin never
-      // loads skill bodies itself.
-      event.prompt.skills ??= []
-      for (const item of route.bundle.items) {
-        // Capability ids are valid OpenCode skill ids by construction
-        // (kebab-case, §28.2 catalog mapping); assert through the brand.
-        event.prompt.skills.push({ id: item.capability_id as Skill.ID })
-      }
+   **Programmatic callers gotcha (verified live, v2.0.18):** the CLI
+   resolves its project location from the **`$PWD` env var**, not
+   `getcwd()`. `subprocess.run(..., cwd=task_dir)` chdirs the child but
+   leaves the inherited `$PWD` pointing at the parent — the session then
+   lands in the *parent's* project, `.opencode/plugins` is never
+   discovered, and the hook fail-opens silently (no log on the CLI
+   stdout, the prompt is admitted naked). A shell `cd` updates both, so
+   interactive runs never hit this. When spawning `opencode run` from
+   code, always export `PWD` matching the intended directory
+   (`scripts/proof_loop.py` does this).
 
-      // Stash ids for outcome instrumentation (§33): report real evidence
-      // via POST /v1/outcomes with these ids when the work finishes.
-      event.metadata = {
-        ...event.metadata,
-        aci: {
-          routeRunId: route.route_run_id,
-          bundleId: route.bundle.bundle_id,
-        },
-      }
-    })
-  },
-})
+2. Declare the plugin's dependencies so bun can resolve them
+   (`.opencode/package.json`):
+
+   ```json
+   {
+     "dependencies": {
+       "@opencode/plugin": "2.0.18",
+       "@opencode/schema": "2.0.18"
+     }
+   }
+   ```
+
+   **Run `bun install` in `.opencode/` yourself** (`cd .opencode && bun
+   install`). A short-lived `opencode run` CLI process installs at startup
+   and works, but the long-lived `opencode serve --service` process does
+   NOT re-install on config change — and **a warm server caches failed
+   module resolution** (verified live 2026-09-28: the service had been up
+   since before the plugin was installed, kept logging `Cannot find
+   package '@opencode/plugin'` on every prompt, and fail-opened silently
+   — prompts were admitted naked with zero route_runs). After installing
+   dependencies, **restart the opencode service** (`pkill -f 'opencode
+   serve'` — it respawns automatically) and verify with a real prompt +
+   a fresh `route_runs` row on the ACI server, not just a clean CLI run.
+
+3. Point OpenCode's native skill catalog at the platform (Phase 10) so the
+   injected IDs resolve and lazy-load from the registry — never from a
+   manually maintained local copy:
+
+   ```jsonc
+   {
+     "skills": ["http://127.0.0.1:8000/opencode/skills/"]
+   }
+   ```
+
+4. Start the platform: `uvicorn aci.main:app` (serves `/v1/routes` and the
+   catalog).
+
+The plugin runs on its built-in defaults (`baseUrl`
+`http://127.0.0.1:8000`, `principalId` `opencode`, fail-open). To pass
+options, publish it as an npm package and use the config tuple form
+`["package-name", {"baseUrl": ..., "language": ...}]`, or edit the
+defaults in the installed copy.
+
+## Options
+
+| Option             | Default                | Meaning                                                       |
+| ------------------ | ---------------------- | ------------------------------------------------------------- |
+| `baseUrl`          | `http://127.0.0.1:8000`| ACI REST base URL                                             |
+| `principalId`      | `opencode`             | caller identity for the request envelope (§11.1)             |
+| `organizationId`   | –                      | optional scope                                                |
+| `workspaceId`      | –                      | optional scope                                                |
+| `language`         | –                      | minimal TaskContext hint (§25.4)                              |
+| `frameworks`       | `[]`                   | minimal TaskContext hints — never repo dumps or secrets       |
+| `phase`            | –                      | e.g. `debugging`                                              |
+| `maxItems`         | `5`                    | bundle budget (§19)                                           |
+| `maxContextTokens` | `6000`                 | bundle budget (§19)                                           |
+| `timeoutMs`        | `2000`                 | routing must never hang prompt admission                      |
+| `failClosed`       | `false`                | fail-open default (ADR-005); `true` only for compliance flows|
+
+## Behavior
+
+- On every admitted prompt the plugin POSTs `/v1/routes` with the prompt text
+  plus the minimal configured context, then pushes the 0–5 selected skill IDs
+  into `prompt.skills`. OpenCode resolves them through the catalog above; only
+  selected skills ever enter context (progressive disclosure, §28.3).
+- **Fail-open (default):** routing errors/timeouts are logged and the prompt
+  is admitted without platform-selected skills. **Fail-closed:** the hook
+  rethrows and OpenCode does not admit the prompt (§28.4).
+- The route run + bundle ids are stashed in the admission metadata under
+  `aci` (`routeRunId`, `bundleId`). Report real evidence for the run via
+  `POST /v1/outcomes` with those ids (§33) — multi-source verdicts, never a
+  lone success flag (ADR-010).
+- Local permissions stay authoritative: the plugin only adds skill IDs; it
+  grants nothing (§28).
+
+## Contract tests
+
+`tests/integration/test_opencode_plugin_contract.py` pins the exact HTTP
+contract this plugin depends on (request shape, response fields, stable §45
+error bodies) against the live app, so adapter drift is caught in CI.

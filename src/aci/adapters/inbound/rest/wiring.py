@@ -36,6 +36,7 @@ from aci.adapters.outbound.postgres.repositories import (
 from aci.adapters.outbound.postgres.route_runs import SqlAlchemyRouteRunRepository
 from aci.adapters.outbound.postgres.tasks import SqlAlchemyTaskRepository
 from aci.application.delegate_task import ProfileDrivenAgentRuntime, UnconfiguredExecutor
+from aci.application.evaluate_bundle import EvaluateBundleService
 from aci.application.list_candidates import ProductionCandidateLoader
 from aci.application.protocols import AgentExecutor
 from aci.application.report_outcome import ReportOutcomeService
@@ -45,6 +46,7 @@ from aci.application.search_capabilities import SearchCapabilitiesService
 from aci.config import Settings
 from aci.domain.agent.models import AgentProfile
 from aci.evaluation.harness import BenchmarkHarness
+from aci.providers.evaluation.rubric_evaluator import RubricContainmentEvaluator
 from aci.routing.composer import MinimalBundleComposer
 from aci.routing.dependencies import DefaultDependencyResolver
 from aci.routing.eligibility import DefaultEligibilityPolicy
@@ -144,6 +146,12 @@ class Container:
         self.search_service = SearchCapabilitiesService(loader, retriever, capabilities)
         self.resolve_service = ResolveCapabilityService(capabilities, artifacts)
         self.outcome_service = ReportOutcomeService(outcomes, bundles)
+        # V4 evaluation service (§57): pluggable BundleEvaluator — the
+        # deterministic rubric checker is the honest default; an LLM judge
+        # plugs in through the same protocol without platform changes.
+        self.evaluation_service = EvaluateBundleService(
+            bundles, outcomes, RubricContainmentEvaluator()
+        )
         self.catalog = CatalogProjection(releases, capabilities, artifacts, objects)
         self.benchmark_harness = BenchmarkHarness(
             self.route_service,
