@@ -28,6 +28,17 @@ touches skill bodies, the filesystem, or permissions (ADR-005).
 
    Files in the plugins directory load automatically at startup.
 
+   **Programmatic callers gotcha (verified live, v2.0.18):** the CLI
+   resolves its project location from the **`$PWD` env var**, not
+   `getcwd()`. `subprocess.run(..., cwd=task_dir)` chdirs the child but
+   leaves the inherited `$PWD` pointing at the parent — the session then
+   lands in the *parent's* project, `.opencode/plugins` is never
+   discovered, and the hook fail-opens silently (no log on the CLI
+   stdout, the prompt is admitted naked). A shell `cd` updates both, so
+   interactive runs never hit this. When spawning `opencode run` from
+   code, always export `PWD` matching the intended directory
+   (`scripts/proof_loop.py` does this).
+
 2. Declare the plugin's dependencies so bun can resolve them
    (`.opencode/package.json`):
 

@@ -20,12 +20,19 @@ Usage:
         [--workdir DIR] [--model local-gateway/OneNexus/glm-5.3]
 
 Requires the ACI server on 127.0.0.1:8000 (uvicorn aci.main:app) and the
-opencode CLI on PATH. The .opencode template (plugin + pinned deps) is
-materialized from the repo's plugin source on first use.
+opencode CLI on PATH. The .opencode template (plugin + pinned deps +
+per-project skills catalog) is materialized from the repo's plugin source
+on every run — the user's global OpenCode config is never touched.
+
+Gotcha (verified live, OpenCode v2.0.18): the CLI resolves its project
+location from $PWD, not getcwd() — programmatic callers MUST export PWD
+pointing at the task directory or the session lands in the caller's
+project and the plugin never loads (fail-open, silently naked).
 """
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -41,6 +48,7 @@ PLUGIN_SRC = REPO / "src/aci/adapters/inbound/opencode/plugin/index.ts"
 TEMPLATE = Path("/tmp/opencode/oc-template/.opencode")
 REPORT_ROOT = REPO / "data/proof-loop"
 OPENCODE = str(Path.home() / ".opencode/bin/opencode")
+BUN = str(Path.home() / ".bun/bin/bun")
 PYTEST = str(REPO / ".venv/bin/python")
 
 
@@ -186,10 +194,54 @@ TASKS = [
 
 
 def run(cmd: list[str], cwd: Path, timeout: int) -> tuple[int, str]:
+    """Run `cmd` in `cwd`.
+
+    OpenCode resolves its project location from the **$PWD env var**, not
+    getcwd() (verified live, v2.0.18): subprocess cwd alone leaves the
+    inherited $PWD pointing at the parent process, so the session lands in
+    the wrong project and .opencode/plugins is never discovered. Always
+    export PWD matching cwd for child processes.
+    """
+    env = {**os.environ, "PWD": str(cwd)}
     proc = subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
+        cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout, check=False
     )
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def ensure_template(base_url: str) -> None:
+    """Materialize the .opencode template (plugin + deps + skills catalog).
+
+    Self-contained: no pre-existing template assumed. The per-project
+    opencode.json points OpenCode's native skill catalog at the platform so
+    injected skill ids resolve and lazy-load (README step 3) — the global
+    user config stays untouched.
+    """
+    plugins = TEMPLATE / "plugins"
+    plugins.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(PLUGIN_SRC, plugins / "aci-router.ts")
+    (TEMPLATE / "opencode.json").write_text(
+        json.dumps(
+            {
+                "$schema": "https://opencode.ai/config.json",
+                "skills": [f"{base_url}/opencode/skills/"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (TEMPLATE / "package.json").write_text(
+        json.dumps({"dependencies": {"@opencode/plugin": "2.0.18", "@opencode/schema": "2.0.18"}}),
+        encoding="utf-8",
+    )
+    if not (TEMPLATE / "node_modules/@opencode/plugin").exists():
+        subprocess.run(
+            [BUN, "install"],
+            cwd=TEMPLATE,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=True,
+        )
 
 
 def acceptance(task_dir: Path) -> bool:
@@ -276,6 +328,7 @@ def main() -> int:
 
     args.workdir.mkdir(parents=True, exist_ok=True)
     REPORT_ROOT.mkdir(parents=True, exist_ok=True)
+    ensure_template(args.base_url)
 
     results: list[dict[str, Any]] = []
     for task in TASKS:
