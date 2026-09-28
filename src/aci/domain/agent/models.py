@@ -150,3 +150,27 @@ class TaskArtifact(BaseModel):
     name: str = Field(min_length=1)
     digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     created_at: datetime
+
+
+class SkillGrant(BaseModel):
+    """A policy-pinned capability version an executor may load (§56.1 skill_policy).
+
+    Grants come from the profile's ``SkillPolicy.required`` resolved against
+    active production releases — eligibility is never bypassed (ADR-009).
+    """
+
+    model_config = {"frozen": True}
+
+    capability_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,63}$")
+    version: str = Field(min_length=1)
+
+
+class ExecutorResult(BaseModel):
+    """The outcome of one delegated execution; feeds the task's terminal state."""
+
+    model_config = {"frozen": True}
+
+    status: Literal["completed", "failed"]
+    messages: list[TaskMessage] = Field(default_factory=list)
+    artifacts: list[TaskArtifact] = Field(default_factory=list)
+    detail: str | None = None

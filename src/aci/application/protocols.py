@@ -7,7 +7,14 @@ no SQLAlchemy/FastAPI/protocol types may appear in this module.
 from datetime import datetime
 from typing import Protocol
 
-from aci.domain.agent.models import AgentTask, TaskArtifact, TaskMessage
+from aci.domain.agent.models import (
+    AgentProfile,
+    AgentTask,
+    ExecutorResult,
+    SkillGrant,
+    TaskArtifact,
+    TaskMessage,
+)
 from aci.domain.capability.models import (
     Capability,
     CapabilityArtifact,
@@ -254,3 +261,23 @@ class TaskRepository(Protocol):
     def list_messages(self, task_id: str) -> list[TaskMessage]: ...
     def put_artifact(self, artifact: TaskArtifact) -> TaskArtifact: ...
     def list_artifacts(self, task_id: str) -> list[TaskArtifact]: ...
+
+
+class AgentExecutor(Protocol):
+    """Pluggable intelligence for delegated work (V3 §56.1; §32 delegated_task).
+
+    The runtime orchestrates — lifecycle, policy checks, persistence; the
+    executor does the work under the profile's budget and tool grants. No model
+    gateway in V1 (§50): a model client, a human operator, or a test double
+    plugs in here. Execution authority stays with the executor's host (§76);
+    the platform never gains write authority from a profile.
+    """
+
+    def execute(
+        self,
+        task: AgentTask,
+        profile: AgentProfile,
+        skills: list[SkillGrant],
+        *,
+        now: datetime,
+    ) -> ExecutorResult: ...
