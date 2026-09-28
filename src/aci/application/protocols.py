@@ -7,6 +7,7 @@ no SQLAlchemy/FastAPI/protocol types may appear in this module.
 from datetime import datetime
 from typing import Protocol
 
+from aci.domain.agent.models import AgentTask, TaskArtifact, TaskMessage
 from aci.domain.capability.models import (
     Capability,
     CapabilityArtifact,
@@ -237,3 +238,19 @@ class OutcomeRecorder(Protocol):
 
     def record(self, evidence: OutcomeEvidence) -> OutcomeEvidence: ...
     def get_outcome(self, outcome_id: str) -> OutcomeEvidence | None: ...
+
+
+class TaskRepository(Protocol):
+    """Delegated-task persistence (V3 §56; §30.1 Task/Message/Artifact).
+
+    Task rows project immutable domain states: ``put_task`` upserts the
+    latest validated state (transitions happen in the domain via
+    ``advance_task``, never here); messages/artifacts are append-only.
+    """
+
+    def put_task(self, task: AgentTask) -> AgentTask: ...
+    def get_task(self, task_id: str) -> AgentTask | None: ...
+    def put_message(self, message: TaskMessage) -> TaskMessage: ...
+    def list_messages(self, task_id: str) -> list[TaskMessage]: ...
+    def put_artifact(self, artifact: TaskArtifact) -> TaskArtifact: ...
+    def list_artifacts(self, task_id: str) -> list[TaskArtifact]: ...

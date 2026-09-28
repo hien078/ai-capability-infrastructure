@@ -333,3 +333,50 @@ class CapabilityRelationRow(Base):
     # Attribute name differs from the column name: `metadata` is reserved on
     # declarative bases. The physical column stays `metadata` (plan §41).
     meta: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False, default=dict)
+
+
+class AgentTaskRow(Base):
+    """V3 §56/§30.1: delegated task state; rows project immutable domain states."""
+
+    __tablename__ = "agent_tasks"
+    __table_args__ = (Index("ix_agent_tasks_capability", "capability_id"),)
+
+    task_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    profile_id: Mapped[str] = mapped_column(Text, nullable=False)
+    capability_id: Mapped[str] = mapped_column(Text, nullable=False)
+    input_text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TaskMessageRow(Base):
+    """§30.1 Message: agent<->caller communication, append-only per task."""
+
+    __tablename__ = "task_messages"
+    __table_args__ = (
+        ForeignKeyConstraint(["task_id"], ["agent_tasks.task_id"], ondelete="CASCADE"),
+        Index("ix_task_messages_task", "task_id"),
+    )
+
+    message_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    author: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TaskArtifactRow(Base):
+    """§30.1 Artifact: named, sha256-digest-pinned task output."""
+
+    __tablename__ = "task_artifacts"
+    __table_args__ = (
+        ForeignKeyConstraint(["task_id"], ["agent_tasks.task_id"], ondelete="CASCADE"),
+        Index("ix_task_artifacts_task", "task_id"),
+    )
+
+    artifact_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
