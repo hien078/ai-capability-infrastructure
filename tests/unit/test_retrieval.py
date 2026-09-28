@@ -53,7 +53,7 @@ def test_document_contains_normalized_metadata_lines() -> None:
             routing_hints={"task_types": ["debugging"]},
         ),
     )
-    doc = build_trusted_document(version, model_id="hashing-256-v1", now=NOW)
+    doc = build_trusted_document(version, model_id="hashing-384-v2", now=NOW)
     assert doc.text == "\n".join(
         [
             "name: Python Traceback Debugger",
@@ -102,13 +102,13 @@ def test_embedder_is_deterministic_across_instances() -> None:
 
 def test_embedder_output_is_l2_normalized() -> None:
     vector = HashingEmbedder().embed(["debug python traceback"])[0]
-    assert len(vector) == 256
+    assert len(vector) == 384
     assert sqrt(sum(v * v for v in vector)) == pytest.approx(1.0)
 
 
 def test_embedder_empty_text_gives_zero_vector() -> None:
     vector = HashingEmbedder().embed(["   "])[0]
-    assert vector == [0.0] * 256
+    assert vector == [0.0] * 384
 
 
 def test_embedder_similarity_tracks_shared_tokens() -> None:
@@ -247,7 +247,7 @@ def test_retriever_searches_only_eligible_pairs() -> None:
     result = retriever.retrieve("q", eligible)
     pairs, model_id, limit = embeddings.search_calls[0]
     assert set(pairs) == {("cap-x", "1.0.0")}
-    assert model_id == "hashing-256-v2"
+    assert model_id == "hashing-384-v2"
     assert limit == 30
     assert result.trace.searched_count == 1
 

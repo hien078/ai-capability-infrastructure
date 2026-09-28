@@ -25,6 +25,12 @@ dev = [
   "uvicorn>=0.30",
   "types-pyyaml>=6.0",
 ]
+# V2 semantic embedder (§55 "more sophisticated rerankers"): ONNX-based local
+# embedding models, no torch. Optional so the core install stays light and
+# offline-deterministic (HashingEmbedder remains the default baseline).
+semantic = [
+  "fastembed>=0.4",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -48,7 +54,9 @@ line-length = 100
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
-python_version = "3.11"
+# 3.12: numpy (a fastembed dependency) ships stubs using `type` statements,
+# which mypy rejects when targeting 3.11. The runtime venv is 3.13.
+python_version = "3.12"
 strict = true
 explicit_package_bases = true
 mypy_path = "src"

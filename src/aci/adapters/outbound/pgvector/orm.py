@@ -14,7 +14,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from aci.adapters.outbound.postgres.base import Base
 
-EMBEDDING_DIMS = 256
+EMBEDDING_DIMS = 384
 
 
 class EmbeddingDocumentRow(Base):

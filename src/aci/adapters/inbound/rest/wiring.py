@@ -11,6 +11,7 @@ from fastapi import Request
 
 from aci.adapters.inbound.opencode.catalog import CatalogProjection
 from aci.adapters.outbound.model_provider.hashing import HashingEmbedder
+from aci.adapters.outbound.model_provider.semantic import FastEmbedEmbedder
 from aci.adapters.outbound.object_store.fs import FsObjectStore
 from aci.adapters.outbound.pgvector.repository import SqlAlchemyEmbeddingRepository
 from aci.adapters.outbound.postgres.assessments import (
@@ -45,6 +46,20 @@ from aci.routing.rerankers.heuristic import HeuristicReranker
 from aci.routing.retrieval import EmbeddingRetriever
 
 
+def _build_embedder(settings: Settings) -> HashingEmbedder | FastEmbedEmbedder:
+    """Pick the embedder from settings (§55: swappable behind the protocol).
+
+    ``hashing`` (default) keeps everything offline and deterministic;
+    ``fastembed`` uses a local ONNX semantic model (needs the `semantic`
+    extra + one-time model download).
+    """
+    if settings.embedder == "fastembed":
+        return FastEmbedEmbedder(model_name=settings.embedder_model)
+    if settings.embedder != "hashing":
+        raise ValueError(f"unknown ACI_EMBEDDER {settings.embedder!r} (hashing|fastembed)")
+    return HashingEmbedder()
+
+
 class Container:
     """Infrastructure + service composition root for the REST adapter."""
 
@@ -67,7 +82,7 @@ class Container:
 
         loader = ProductionCandidateLoader(capabilities, releases, licenses, securities)
         eligibility = DefaultEligibilityPolicy()
-        retriever = EmbeddingRetriever(capabilities, HashingEmbedder(), embeddings)
+        retriever = EmbeddingRetriever(capabilities, _build_embedder(settings), embeddings)
         reranker = HeuristicReranker()
         resolver = DefaultDependencyResolver(relations, releases)
         composer = MinimalBundleComposer()

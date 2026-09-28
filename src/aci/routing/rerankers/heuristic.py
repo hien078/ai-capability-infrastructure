@@ -18,6 +18,17 @@ reranker can replace this without touching the pipeline (§52 acceptance).
 v2 (§75 step 23): token_overlap folds tokens with the shared domain
 normalizer — the same one the embedder uses — so the signal bridges
 morphology ("tests" vs "test") instead of exact-match only.
+
+v3 (V2 semantic embedder, 2026-09-28): per-signal min-max calibration
+across the candidate set. Measured on the corpus-36 probes: retrieval
+cosine spans ~[0.47, 0.55] while token_overlap spans ~[0.0, 0.3], so the
+declared weights lied — the lexical signal carried ~2x the real influence
+of the semantic retrieval score and demoted rank-2-retrieval candidates
+out of the bundle. Calibration makes a weight mean what it says: each
+signal is min-max normalized within the candidate set before weighting
+(parameter-free, deterministic, pure). A signal whose range is zero
+cannot discriminate and contributes nothing. Weights are unchanged
+(§17.1: no tuning on small n); this is a measurement fix, not a fit.
 """
 
 from pydantic import BaseModel
@@ -33,7 +44,9 @@ from aci.domain.routing.models import (
 from aci.domain.routing.text import normalize_tokens
 
 IMPLEMENTATION = "heuristic-reranker"
-VERSION = "2"
+VERSION = "3"
+
+_SIGNAL_NAMES = ("retrieval", "token_overlap", "facet_match", "trust")
 
 _TRUST_PRIOR: dict[str, float] = {"verified": 1.0, "standard": 0.6, "untrusted": 0.3}
 
@@ -71,9 +84,10 @@ class HeuristicReranker:
     ) -> RerankResult:
         _ = context  # client/scope already constrained eligibility; no signal here
         task_tokens = _tokens(task.task_text)
+        raw = [self._signals(task, task_tokens, scored.candidate, scored) for scored in candidates]
+        calibrated = self._calibrate(raw)
         ranked: list[RankedCandidate] = []
-        for scored in candidates:
-            signals = self._signals(task, task_tokens, scored.candidate, scored)
+        for scored, signals in zip(candidates, calibrated, strict=True):
             score = sum(getattr(self._weights, name) * value for name, value in signals.items())
             ranked.append(
                 RankedCandidate(
@@ -98,6 +112,27 @@ class HeuristicReranker:
                 output_count=len(ranked),
             ),
         )
+
+    @staticmethod
+    def _calibrate(raw: list[dict[str, float]]) -> list[dict[str, float]]:
+        """Min-max each signal across the candidate set (v3 calibration).
+
+        Raw signal ranges are incomparable (retrieval cosine lives in a
+        narrow band; token_overlap spans [0, 1]), so declared weights are
+        not true influence. Normalizing within the set makes them honest.
+        A signal with zero range cannot discriminate and contributes 0.
+        """
+        calibrated = [dict.fromkeys(_SIGNAL_NAMES, 0.0) for _ in raw]
+        if not calibrated:
+            return calibrated
+        for name in _SIGNAL_NAMES:
+            values = [signals[name] for signals in raw]
+            lo, hi = min(values), max(values)
+            if hi <= lo:
+                continue
+            for signals, value in zip(calibrated, values, strict=True):
+                signals[name] = (value - lo) / (hi - lo)
+        return calibrated
 
     def _signals(
         self,

@@ -12,6 +12,11 @@ bridge even trivial morphology ("failures" vs "test failure"), capping
 smoke-set recall at tie-luck. The fold is deterministic, so v2 vectors are
 reproducible; the model_id bump lets them coexist with any v1 vectors
 (§46: cache keys carry the model_id).
+
+v3 (V2 semantic embedder, migration 0011): the pgvector column moved to
+384 dims (BAAI/bge-small-en-v1.5), so the default dims follow and the
+model_id becomes ``hashing-384-v2``. The hashing trick is dims-agnostic;
+old 256-dim vectors were re-derivable cache and were dropped.
 """
 
 import hashlib
@@ -19,7 +24,7 @@ from math import sqrt
 
 from aci.domain.routing.text import normalize_tokens
 
-DEFAULT_DIMS = 256
+DEFAULT_DIMS = 384
 
 
 class HashingEmbedder:

@@ -54,31 +54,50 @@ def context() -> RoutingRequestContext:
 def test_rerank_beats_retrieval_only_baseline() -> None:
     """§52 acceptance: reranking must be comparable against retrieval-only.
 
-    Retrieval-only order (cosine) would put ``high-cosine`` first; the
-    heuristic reranker promotes the candidate with strong token overlap +
-    verified trust above it.
+    v3 calibration semantics: signals are min-max normalized within the
+    candidate set, so influence = declared weight × observed spread. Two
+    properties (probed on the real 30-candidate pipeline):
+
+    1. A promotion must be earned: near-top retrieval + full token
+       overlap + verified trust beats the raw-cosine leader.
+    2. A huge semantic gap is NOT overturned by lexical signals — the
+       defect v3 fixes was the lexical signal carrying ~2x its declared
+       weight and demoting rank-2-retrieval candidates.
     """
     reranker = HeuristicReranker()
-    candidates = [
-        # High retrieval score, but zero task-token overlap, untrusted.
-        scored("a-high-cosine", score=0.95, text="write marketing copy", trust_tier="untrusted"),
-        # Lower retrieval score, but every task token present + verified.
-        scored(
-            "b-relevant",
-            score=0.55,
-            text="debug python traceback root cause analysis",
-            trust_tier="verified",
-        ),
-    ]
-    result = reranker.rerank(task(), candidates, context())
 
-    assert result.ranked[0].candidate.capability_id == "b-relevant"
-    assert result.ranked[0].rank == 1
-    assert result.ranked[1].candidate.capability_id == "a-high-cosine"
-    assert result.ranked[1].rank == 2
+    # Property 1: earned promotion (three candidates anchor the min).
+    earned = reranker.rerank(
+        task(),
+        [
+            scored("a-leader", score=0.95, text="write marketing copy", trust_tier="untrusted"),
+            scored(
+                "b-relevant",
+                score=0.85,
+                text="debug python traceback root cause analysis",
+                trust_tier="verified",
+            ),
+            scored("c-anchor", score=0.45, text="sql", trust_tier="untrusted"),
+        ],
+        context(),
+    )
+    assert earned.ranked[0].candidate.capability_id == "b-relevant"
+    assert earned.ranked[0].rank == 1
     # The reranker reordered against the retrieval-only baseline.
-    retrieval_only = sorted(candidates, key=lambda c: c.score, reverse=True)
-    assert [c.candidate.capability_id for c in retrieval_only][0] == "a-high-cosine"
+    retrieval_only = sorted(earned.ranked, key=lambda r: r.retrieval_score, reverse=True)
+    assert retrieval_only[0].candidate.capability_id == "a-leader"
+
+    # Property 2: a huge semantic gap stays on top.
+    blowout = reranker.rerank(
+        task(),
+        [
+            scored("a-far", score=0.95, text="write marketing copy", trust_tier="untrusted"),
+            scored("b-weak", score=0.55, text="debug python traceback", trust_tier="standard"),
+            scored("c-anchor", score=0.45, text="sql", trust_tier="untrusted"),
+        ],
+        context(),
+    )
+    assert blowout.ranked[0].candidate.capability_id == "a-far"
 
 
 def test_rerank_records_reasons_and_trace() -> None:
@@ -88,18 +107,52 @@ def test_rerank_records_reasons_and_trace() -> None:
         context(),
     )
     assert result.trace.implementation == "heuristic-reranker"
-    assert result.trace.version == "2"
+    assert result.trace.version == "3"
     assert result.trace.input_count == 1
     assert result.trace.output_count == 1
     top = result.ranked[0]
-    # Task tokens {debug, a, python, traceback}; the doc lacks "a" → 3/4 overlap.
+    # A single candidate cannot discriminate: every calibrated signal is 0.
     assert top.reasons == [
-        "retrieval=0.600",
-        "token_overlap=0.750",
+        "retrieval=0.000",
+        "token_overlap=0.000",
         "facet_match=0.000",
-        "trust=1.000",
+        "trust=0.000",
     ]
     assert top.retrieval_score == 0.6
+
+
+def test_calibration_makes_declared_weights_true_influence() -> None:
+    """v3: raw ranges are incomparable; normalized ones are not.
+
+    Retrieval cosine lives in a narrow band (~[0.47, 0.55] on the real
+    corpus) while token_overlap spans [0, 1]; uncalibrated, the 0.3-weight
+    lexical signal out-influenced the 0.5-weight retrieval signal. After
+    calibration the candidate with the higher retrieval score wins when
+    the lexical signal is equal, and the trace records normalized values.
+    """
+    reranker = HeuristicReranker()
+    result = reranker.rerank(
+        task("debug python"),
+        [
+            scored("c-low", score=0.50, text="debug python", trust_tier="verified"),
+            scored("c-high", score=0.55, text="debug python", trust_tier="verified"),
+        ],
+        context(),
+    )
+    assert result.ranked[0].candidate.capability_id == "c-high"
+    reasons = {r.candidate.capability_id: r.reasons for r in result.ranked}
+    assert reasons["c-high"] == [
+        "retrieval=1.000",
+        "token_overlap=0.000",
+        "facet_match=0.000",
+        "trust=0.000",
+    ]
+    assert reasons["c-low"] == [
+        "retrieval=0.000",
+        "token_overlap=0.000",
+        "facet_match=0.000",
+        "trust=0.000",
+    ]
 
 
 def test_rerank_never_adds_candidates() -> None:
