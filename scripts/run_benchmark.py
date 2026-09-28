@@ -25,6 +25,7 @@ from pathlib import Path
 from aci.adapters.inbound.rest.wiring import Container
 from aci.config import Settings
 from aci.evaluation.cases import SMOKE_CASES
+from aci.evaluation.dev_cases import DEV_CASES
 from aci.evaluation.metrics import export_report
 from aci.evaluation.models import BenchmarkRun
 
@@ -38,10 +39,18 @@ def main() -> int:
         default="smoke-10",
         help="run label recorded with the benchmark run (default: %(default)s)",
     )
+    parser.add_argument(
+        "--cases",
+        choices=("smoke", "dev"),
+        default="smoke",
+        help="which case set to run (default: %(default)s). 'dev' = the "
+        "31-case set annotated against the real production corpus (§55).",
+    )
     args = parser.parse_args()
 
+    cases = SMOKE_CASES if args.cases == "smoke" else DEV_CASES
     container = Container(Settings())
-    results = container.benchmark_harness.run(SMOKE_CASES, label=args.label)
+    results = container.benchmark_harness.run(cases, label=args.label)
     run_id = results[0].run_id
 
     # The harness mints the run internally; reconstruct it for the report
@@ -50,7 +59,7 @@ def main() -> int:
         run_id=run_id,
         label=args.label,
         created_at=results[0].created_at,
-        case_count=len(SMOKE_CASES),
+        case_count=len(cases),
     )
     report = export_report(run, results)
 
