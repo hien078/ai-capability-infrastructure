@@ -51,9 +51,17 @@ touches skill bodies, the filesystem, or permissions (ADR-005).
    }
    ```
 
-   OpenCode runs `bun install` at startup; pin the versions to your
-   OpenCode version. If the server was already running, restart it — a
-   warm process caches failed module resolution.
+   **Run `bun install` in `.opencode/` yourself** (`cd .opencode && bun
+   install`). A short-lived `opencode run` CLI process installs at startup
+   and works, but the long-lived `opencode serve --service` process does
+   NOT re-install on config change — and **a warm server caches failed
+   module resolution** (verified live 2026-09-28: the service had been up
+   since before the plugin was installed, kept logging `Cannot find
+   package '@opencode/plugin'` on every prompt, and fail-opened silently
+   — prompts were admitted naked with zero route_runs). After installing
+   dependencies, **restart the opencode service** (`pkill -f 'opencode
+   serve'` — it respawns automatically) and verify with a real prompt +
+   a fresh `route_runs` row on the ACI server, not just a clean CLI run.
 
 3. Point OpenCode's native skill catalog at the platform (Phase 10) so the
    injected IDs resolve and lazy-load from the registry — never from a
