@@ -14,7 +14,6 @@ import pytest
 from aci.providers.evaluation.repo_understanding import (
     MAX_CONTEXT_FILES,
     ArchitectureAnalyst,
-    CapabilityMiner,
     RepositoryUnderstandingError,
     map_repository,
     select_context,
@@ -94,14 +93,13 @@ def test_analyst_raises_on_unparseable_never_fabricates() -> None:
             analyst.analyze([{"path": "x", "content": "y"}])
         except RepositoryUnderstandingError:
             raise
-        except Exception:
-            raise RepositoryUnderstandingError("transport failed")
+        except Exception as err:
+            raise RepositoryUnderstandingError("transport failed") from err
 
 
 def test_miner_rejects_non_array() -> None:
     """The miner's contract is a JSON ARRAY of capabilities — an object
     response is a contract violation and must raise."""
-    miner = CapabilityMiner.__new__(CapabilityMiner)
     # simulate the parse path directly with a non-array payload
     import json as _json
 

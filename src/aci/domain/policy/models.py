@@ -52,6 +52,9 @@ class RoutingRequestContext(BaseModel):
     client: ClientDescriptor
     scope: ScopeContext
     task: TaskContext = Field(default_factory=TaskContext)
+    #: §27 canary split key — the request's stable id (deterministic
+    #: hash input; same request → same canary decision, always).
+    request_id: str = ""
 
 
 class ProtocolDescriptor(BaseModel):
@@ -80,7 +83,12 @@ class RequestContext(BaseModel):
 
     def to_routing_context(self, task: TaskContext) -> RoutingRequestContext:
         """Project the envelope onto the eligibility/routing context."""
-        return RoutingRequestContext(client=self.client, scope=self.scope(), task=task)
+        return RoutingRequestContext(
+            client=self.client,
+            scope=self.scope(),
+            task=task,
+            request_id=self.request_id,
+        )
 
     def scope(self) -> ScopeContext:
         return ScopeContext(
@@ -102,6 +110,7 @@ class EligibleCandidate(BaseModel):
     facets: dict[str, list[str]] = Field(default_factory=dict)
     channel: ReleaseChannel
     status: ReleaseStatus
+    canary_percent: int | None = None
     trust_tier: TrustTier = "untrusted"
     license_blocked: bool = False
     owner_scope: OwnerScope = "global"

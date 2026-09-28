@@ -16,7 +16,9 @@ OwnerScope = Literal["global", "organization", "workspace", "private"]
 #: They are NOT ingestion states — quarantine/trust is tracked separately
 #: in `IngestionStatus` so "raw" can never be conflated with a release channel.
 ReleaseChannel = Literal["staging", "production"]
-ReleaseStatus = Literal["active", "disabled", "deprecated", "revoked"]
+#: crawl.md §26-27: canary = promoted but traffic-limited (percentage
+#: routing + auto-rollback); active = full traffic after canary graduates.
+ReleaseStatus = Literal["active", "canary", "disabled", "deprecated", "revoked"]
 #: Ingestion state machine (§22 lifecycle): trust/processing status of
 #: imported material, independent of any release channel. quarantined =
 #: untrusted snapshot stored, inspectable, never advertised; rejected =
@@ -145,6 +147,9 @@ class CapabilityRelease(BaseModel):
     version: str
     channel: ReleaseChannel
     status: ReleaseStatus = "active"
+    #: §27 canary: 0-100 percent of eligible traffic that may select this
+    #: release while in canary; None = full (active semantics).
+    canary_percent: int | None = None
     promoted_at: datetime | None = None
     approved_by: str | None = None
     policy_snapshot_id: str | None = None

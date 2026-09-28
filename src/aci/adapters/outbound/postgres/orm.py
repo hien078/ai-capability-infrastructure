@@ -8,7 +8,7 @@ tables arrive in Phase 5; versions carry facet metadata as JSONB + GIN now.
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, ForeignKeyConstraint, Index, Text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -63,6 +63,7 @@ class CapabilityReleaseRow(Base):
     )
     approved_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     policy_snapshot_id: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    canary_percent: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
 
 
 class CapabilityBindingRow(Base):

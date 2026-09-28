@@ -77,6 +77,7 @@ class ProductionCandidateLoader:
                     facets=version.facets,
                     channel=release.channel,
                     status=release.status,
+                    canary_percent=release.canary_percent,
                     trust_tier=_trust_tier(security.scan_status if security else None),
                     license_blocked=(
                         license_.permissions.blocks_production_redistribution()

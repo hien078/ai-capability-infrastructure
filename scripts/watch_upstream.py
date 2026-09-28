@@ -118,10 +118,7 @@ def main() -> int:
             )
             record = CandidateRecord(proposal=proposal)
             proposals.append(record)
-            print(
-                f"  -> candidate {proposal.candidate_id} "
-                f"[{record.status}] fetch_to_quarantine"
-            )
+            print(f"  -> candidate {proposal.candidate_id} [{record.status}] fetch_to_quarantine")
 
     if args.dry_run:
         print(f"\n(dry-run: {len(proposals)} proposal(s) not written)")
@@ -132,9 +129,7 @@ def main() -> int:
         out = CANDIDATE_ROOT / f"{proposal.candidate_id}.json"
         if out.exists():
             continue  # idempotent: same upstream sha -> same candidate id
-        out.write_text(
-            json.dumps(json.loads(record.model_dump_json()), indent=2), encoding="utf-8"
-        )
+        out.write_text(json.dumps(json.loads(record.model_dump_json()), indent=2), encoding="utf-8")
         written += 1
     print(f"\n{written} candidate proposal(s) written to {CANDIDATE_ROOT}")
     print(

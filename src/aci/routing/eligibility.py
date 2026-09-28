@@ -1,9 +1,17 @@
-"""Eligibility engine (plan §15; ADR-009).
+"""Eligibility engine (plan §15; ADR-009; crawl.md §26-27 canary).
 
 Pure rule evaluation over annotated candidates — no DB, no LLM. Runs BEFORE
 retrieval and rerank; the reranker can never rescue an excluded candidate.
 Every exclusion carries a stable ErrorCode reason for route traces (§14, §45).
+
+Canary (crawl.md §27): a release in status `canary` routes only its
+`canary_percent` share of eligible traffic. The split is DETERMINISTIC —
+hash(request_id, capability_id) — so the same request always reaches the
+same decision (no flapping), different requests spread evenly, and the
+canary population is reproducible for telemetry comparison.
 """
+
+import hashlib
 
 from aci.domain.capability.errors import ErrorCode
 from aci.domain.capability.models import CapabilityKind
@@ -14,6 +22,16 @@ from aci.domain.policy.models import (
     PolicyRules,
     RoutingRequestContext,
 )
+
+
+def _canary_selected(request_id: str, capability_id: str, percent: int) -> bool:
+    """Deterministic canary split: hash(request, capability) % 100 < percent.
+
+    Same request → same decision, always (§27 reproducible canary
+    population); different requests spread ~evenly across the range.
+    """
+    digest = hashlib.sha256(f"{request_id}:{capability_id}".encode()).hexdigest()
+    return int(digest[:8], 16) % 100 < percent
 
 
 class DefaultEligibilityPolicy:
@@ -54,8 +72,17 @@ class DefaultEligibilityPolicy:
         rules: PolicyRules,
         allowed_kinds: set[CapabilityKind],
     ) -> tuple[ErrorCode, str] | None:
-        # 1. Lifecycle: only active releases on the required channel may route.
-        if candidate.status != "active":
+        # 1. Lifecycle: active releases route fully; canary releases route
+        #    their deterministic percentage share (§27); everything else
+        #    is excluded as before.
+        if candidate.status == "canary":
+            percent = candidate.canary_percent if candidate.canary_percent is not None else 100
+            if not _canary_selected(context.request_id, candidate.capability_id, percent):
+                return (
+                    ErrorCode.CAPABILITY_NOT_ELIGIBLE,
+                    f"canary {percent}%: request not in the canary population",
+                )
+        elif candidate.status != "active":
             return (
                 ErrorCode.CAPABILITY_REVOKED
                 if candidate.status == "revoked"

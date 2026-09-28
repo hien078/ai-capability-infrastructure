@@ -73,6 +73,7 @@ def _release_of(row: CapabilityReleaseRow) -> CapabilityRelease:
             "promoted_at": row.promoted_at,
             "approved_by": row.approved_by,
             "policy_snapshot_id": row.policy_snapshot_id,
+            "canary_percent": row.canary_percent,
         }
     )
 
@@ -253,6 +254,7 @@ class SqlAlchemyReleaseRepository:
                         promoted_at=release.promoted_at,
                         approved_by=release.approved_by,
                         policy_snapshot_id=release.policy_snapshot_id,
+                        canary_percent=release.canary_percent,
                     )
                 )
             else:
@@ -261,6 +263,7 @@ class SqlAlchemyReleaseRepository:
                 row.promoted_at = release.promoted_at
                 row.approved_by = release.approved_by
                 row.policy_snapshot_id = release.policy_snapshot_id
+                row.canary_percent = release.canary_percent
         return release
 
     def get_release(self, capability_id: str, channel: ReleaseChannel) -> CapabilityRelease | None:
