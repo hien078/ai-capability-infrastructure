@@ -250,8 +250,47 @@ def main() -> int:
     p.add_argument("rest", nargs=argparse.REMAINDER)
     p.set_defaults(func=cmd_review)
 
+    p = sub.add_parser(
+        "week",
+        help="the weekly human gate: everything auto-approved + everything held",
+    )
+    p.set_defaults(func=cmd_week)
+
     args = parser.parse_args()
     return args.func(args)
+
+
+def cmd_week(_args: argparse.Namespace) -> int:
+    """The ONE human gate of the weekly cycle: what the automation moved
+    (known tier, approved_for_fetch), what it HELD for you (unreviewed
+    sources), and what is sitting in staging awaiting promotion."""
+
+    if not CANDIDATE_ROOT.is_dir():
+        print("no candidate store")
+        return 0
+    auto = held = 0
+    print("== WEEKLY REVIEW (the one human gate) ==")
+    print("\n-- auto-approved for fetch (known tier — gates run in pipeline) --")
+    for path in sorted(CANDIDATE_ROOT.glob("*.json")):
+        record = CandidateRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        if record.status == "approved_for_fetch":
+            auto += 1
+            print(
+                f"  {record.proposal.candidate_id:44s} "
+                f"{record.proposal.source_path} (by {record.decided_by})"
+            )
+    print("\n-- HELD: unreviewed sources (capctl source approve <id> --by you) --")
+    for path in sorted(CANDIDATE_ROOT.glob("*.json")):
+        record = CandidateRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        if record.status == "proposed":
+            held += 1
+            print(
+                f"  {record.proposal.candidate_id:44s} "
+                f"{record.proposal.source_repo} conf={record.proposal.discovery_confidence}"
+            )
+    print(f"\n{auto} auto-approved, {held} held for human review")
+    print("promote anything in staging: capctl promotion propose <cap> <ver>")
+    return 0
 
 
 if __name__ == "__main__":
