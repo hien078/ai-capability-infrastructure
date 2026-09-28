@@ -192,6 +192,202 @@ TASKS = [
     ),
 ]
 
+# Harder fixtures (§80 value-boundary hunt): families where naked agents
+# commonly fail — aliasing, tuple-ordering, exception translation, boundary
+# semantics, defensive copying. Each pins the OBVIOUS-but-wrong fix out via a
+# second assertion, so symptom patches cannot pass acceptance.
+HARD_TASKS = [
+    _task(
+        "class-attr-shared-state",
+        {
+            "limiter.py": (
+                '"""Per-instance rate limiter — with a bug."""\n\n\n'
+                "class RateLimiter:\n"
+                '    """Records timestamps per tenant, PER INSTANCE.\n\n'
+                "    Two limiters are independent trackers: what one records\n"
+                '    the other must never see."""\n\n'
+                "    _windows: dict[str, list[float]] = {}\n\n"
+                "    def record(self, tenant: str, t: float) -> None:\n"
+                "        self._windows.setdefault(tenant, []).append(t)\n\n"
+                "    def count(self, tenant: str) -> int:\n"
+                "        return len(self._windows.get(tenant, []))\n"
+            ),
+            "test_limiter.py": (
+                "from limiter import RateLimiter\n\n\n"
+                "def test_instances_are_isolated() -> None:\n"
+                "    a, b = RateLimiter(), RateLimiter()\n"
+                '    a.record("t1", 1.0)\n'
+                '    a.record("t1", 2.0)\n'
+                '    assert a.count("t1") == 2\n'
+                '    assert b.count("t1") == 0\n\n\n'
+                "def test_independent_windows_per_tenant() -> None:\n"
+                "    r = RateLimiter()\n"
+                '    r.record("t1", 1.0)\n'
+                '    r.record("t2", 1.0)\n'
+                '    assert r.count("t1") == 1\n'
+                '    assert r.count("t2") == 1\n'
+                '    assert r.count("t3") == 0\n'
+            ),
+        },
+        "The tests in test_limiter.py fail. Find the root cause before "
+        "proposing any fix, then fix it and make the whole test suite green. "
+        "Show the verification output.",
+    ),
+    _task(
+        "tie-stable-heap",
+        {
+            "queue.py": (
+                "import heapq\n\n\n"
+                "class JobQueue:\n"
+                '    """Priority queue: lower priority number runs first.\n\n'
+                "    For EQUAL priorities jobs run in insertion order (FIFO),\n"
+                '    never alphabetically."""\n\n'
+                "    def __init__(self) -> None:\n"
+                "        self._heap: list[tuple[int, str]] = []\n\n"
+                "    def push(self, job: str, priority: int) -> None:\n"
+                "        heapq.heappush(self._heap, (priority, job))\n\n"
+                "    def pop(self) -> str:\n"
+                "        return heapq.heappop(self._heap)[1]\n"
+            ),
+            "test_queue.py": (
+                "from queue import JobQueue\n\n\n"
+                "def test_equal_priority_runs_fifo() -> None:\n"
+                "    q = JobQueue()\n"
+                '    q.push("zeta", 1)\n'
+                '    q.push("alpha", 1)\n'
+                '    q.push("mid", 1)\n'
+                '    assert [q.pop() for _ in range(3)] == ["zeta", "alpha", "mid"]\n\n\n'
+                "def test_lower_priority_number_runs_first() -> None:\n"
+                "    q = JobQueue()\n"
+                '    q.push("low", 5)\n'
+                '    q.push("high", 1)\n'
+                '    assert q.pop() == "high"\n'
+                '    assert q.pop() == "low"\n'
+            ),
+        },
+        "The tests in test_queue.py fail. Find the root cause before proposing "
+        "any fix, then fix it and make the whole test suite green. Show the "
+        "verification output.",
+    ),
+    _task(
+        "exception-translation",
+        {
+            "importer.py": (
+                '"""Row importer — with a bug."""\n\n\n'
+                "class Importer:\n"
+                '    """Imports one row at a time.\n\n'
+                "    Contract: malformed rows raise ValueError — never KeyError,\n"
+                "    never a silent failure. Valid rows are recorded in\n"
+                '    `cleaned`."""\n\n'
+                "    def __init__(self) -> None:\n"
+                "        self.cleaned: list[str] = []\n\n"
+                "    def import_row(self, row: dict) -> str:\n"
+                "        try:\n"
+                '            record_id = row["id"]\n'
+                "            if not isinstance(record_id, str) or not record_id:\n"
+                '                raise ValueError(f"malformed id: {record_id!r}")\n'
+                "            self.cleaned.append(record_id)\n"
+                "            return record_id\n"
+                "        except Exception:\n"
+                '            self.cleaned.append("failed")\n'
+                '            return "failed"\n'
+            ),
+            "test_importer.py": (
+                "import pytest\n\n"
+                "from importer import Importer\n\n\n"
+                "def test_missing_id_raises_valueerror() -> None:\n"
+                '    """A row without an id is malformed: ValueError, not KeyError,\n'
+                '    and never a silent return."""\n'
+                "    imp = Importer()\n"
+                "    with pytest.raises(ValueError):\n"
+                '        imp.import_row({"name": "x"})\n'
+                "    assert imp.cleaned == []\n\n\n"
+                "def test_malformed_id_raises_valueerror() -> None:\n"
+                "    imp = Importer()\n"
+                "    with pytest.raises(ValueError):\n"
+                '        imp.import_row({"id": ""})\n'
+                "    assert imp.cleaned == []\n\n\n"
+                "def test_valid_row_imports() -> None:\n"
+                "    imp = Importer()\n"
+                '    assert imp.import_row({"id": "r-1"}) == "r-1"\n'
+                '    assert imp.cleaned == ["r-1"]\n'
+            ),
+        },
+        "The tests in test_importer.py fail. Find the root cause before "
+        "proposing any fix, then fix it and make the whole test suite green. "
+        "Show the verification output.",
+    ),
+    _task(
+        "boundary-window",
+        {
+            "window.py": (
+                '"""Retention window — with a bug."""\n\n\n'
+                "class Retention:\n"
+                '    """Matches event times in [start, end) — start INCLUSIVE,\n'
+                '    end EXCLUSIVE."""\n\n'
+                "    def __init__(self, start: int, end: int) -> None:\n"
+                "        self._start = start\n"
+                "        self._end = end\n\n"
+                "    def contains(self, t: int) -> bool:\n"
+                "        return self._start <= t <= self._end\n\n"
+                "    def events_in(self, events: dict[int, str]) -> list[str]:\n"
+                "        return [v for t, v in sorted(events.items()) if self.contains(t)]\n"
+            ),
+            "test_window.py": (
+                "from window import Retention\n\n\n"
+                "def test_end_boundary_is_exclusive() -> None:\n"
+                "    r = Retention(10, 20)\n"
+                "    assert r.contains(10) is True\n"
+                "    assert r.contains(19) is True\n"
+                "    assert r.contains(20) is False\n\n\n"
+                "def test_events_in_respects_both_boundaries() -> None:\n"
+                "    r = Retention(0, 3)\n"
+                '    events = {3: "b", 0: "a", 2: "c", -1: "d"}\n'
+                '    assert r.events_in(events) == ["a", "c"]\n'
+            ),
+        },
+        "The tests in test_window.py fail. Find the root cause before "
+        "proposing any fix, then fix it and make the whole test suite green. "
+        "Show the verification output.",
+    ),
+    _task(
+        "defensive-copy-registry",
+        {
+            "registry.py": (
+                '"""Tenant registry — with a bug."""\n\n\n'
+                "class Registry:\n"
+                '    """Tracks names per tenant.\n\n'
+                "    `names()` must NEVER expose the internal list — callers\n"
+                '    get their own copy and cannot corrupt the registry."""\n\n'
+                "    def __init__(self) -> None:\n"
+                "        self._by_tenant: dict[str, list[str]] = {}\n\n"
+                "    def add(self, tenant: str, name: str) -> None:\n"
+                "        self._by_tenant.setdefault(tenant, []).append(name)\n\n"
+                "    def names(self, tenant: str) -> list[str]:\n"
+                "        return self._by_tenant.get(tenant, [])\n"
+            ),
+            "test_registry.py": (
+                "from registry import Registry\n\n\n"
+                "def test_names_is_defensive_copy() -> None:\n"
+                "    r = Registry()\n"
+                '    r.add("t1", "a")\n'
+                '    got = r.names("t1")\n'
+                '    got.append("HACKED")\n'
+                '    assert r.names("t1") == ["a"]\n\n\n'
+                "def test_unknown_tenant_is_empty_and_safe() -> None:\n"
+                "    r = Registry()\n"
+                '    assert r.names("nope") == []\n'
+                '    r.names("nope").append("HACKED")\n'
+                '    r.add("nope", "x")\n'
+                '    assert r.names("nope") == ["x"]\n'
+            ),
+        },
+        "The tests in test_registry.py fail. Find the root cause before "
+        "proposing any fix, then fix it and make the whole test suite green. "
+        "Show the verification output.",
+    ),
+]
+
 
 def run(cmd: list[str], cwd: Path, timeout: int) -> tuple[int, str]:
     """Run `cmd` in `cwd`.
@@ -324,14 +520,22 @@ def main() -> int:
     )
     parser.add_argument("--timeout", type=int, default=420)
     parser.add_argument("--only", help="run a single task by name")
+    parser.add_argument(
+        "--level",
+        choices=["smoke", "hard"],
+        default="smoke",
+        help="task set: smoke (5 easy bugs) or hard (§80 value-boundary hunt)",
+    )
     args = parser.parse_args()
+
+    task_set = HARD_TASKS if args.level == "hard" else TASKS
 
     args.workdir.mkdir(parents=True, exist_ok=True)
     REPORT_ROOT.mkdir(parents=True, exist_ok=True)
     ensure_template(args.base_url)
 
     results: list[dict[str, Any]] = []
-    for task in TASKS:
+    for task in task_set:
         if args.only and task["name"] != args.only:
             continue
         name = task["name"]
@@ -362,6 +566,7 @@ def main() -> int:
     report = {
         "generated_at": datetime.now(UTC).isoformat(),
         "model": args.model,
+        "level": args.level,
         "task_count": len(results),
         "summary": {
             "A_acceptance": a_pass,
