@@ -35,6 +35,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,6 +43,9 @@ from typing import Any
 
 import httpx
 from sqlalchemy import create_engine, text
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from horizon_tasks import HORIZON_TASKS  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 PLUGIN_SRC = REPO / "src/aci/adapters/inbound/opencode/plugin/index.ts"
@@ -447,6 +451,323 @@ MULTI_TASKS = [
     ),
 ]
 
+# Long-horizon fixtures (§80 final round): mini-applications (~10 files)
+# where the bug sits DEEP in a layer the prompt never names, so finding it
+# requires reading across modules + the integration tests. Each fixture
+# ships a regression suite that must stay green — the fix must repair the
+# named failure WITHOUT changing any other behavior, so symptom patches
+# that break a neighbor module fail acceptance.
+LONG_TASKS = [
+    _task(
+        "long-order-pipeline",
+        {
+            # --- domain layer ---
+            "domain/models.py": (
+                "from dataclasses import dataclass, field\n\n\n"
+                "@dataclass(frozen=True)\n"
+                "class CartItem:\n"
+                "    sku: str\n"
+                "    qty: int\n"
+                "    unit_price: float\n\n\n"
+                "@dataclass(frozen=True)\n"
+                "class Order:\n"
+                "    order_id: str\n"
+                "    items: tuple[CartItem, ...] = ()\n\n"
+                "    @property\n"
+                "    def subtotal(self) -> float:\n"
+                "        return sum(i.qty * i.unit_price for i in self.items)\n"
+            ),
+            # --- pricing rules (bug lives here, two layers from the API) ---
+            "pricing/rules.py": (
+                "from domain.models import CartItem\n\n\n"
+                'TIER_RATES = {"gold": 0.10, "silver": 0.05, "": 0.0}\n\n\n'
+                "def tier_discount(items: list[CartItem], tier: str) -> float:\n"
+                '    """Total discount for a tier, rounded to cents."""\n'
+                "    rate = TIER_RATES.get(tier, 0.0)\n"
+                "    raw = sum(i.qty * i.unit_price for i in items) * rate\n"
+                "    return round(raw, 2)\n\n\n"
+                "def bulk_discount(items: list[CartItem]) -> float:\n"
+                '    """3% off lines with qty >= 10, rounded to cents."""\n'
+                "    raw = sum(\n"
+                "        i.qty * i.unit_price * 0.03 for i in items if i.qty > 10\n"
+                "    )\n"
+                "    return round(raw, 2)\n"
+            ),
+            # --- service layer composes the rules ---
+            "service/checkout.py": (
+                "from domain.models import CartItem, Order\n"
+                "from pricing.rules import bulk_discount, tier_discount\n\n\n"
+                "def checkout(order: Order, tier: str) -> dict:\n"
+                '    """Price an order: subtotal, then discounts.\n\n'
+                "    Discounts NEVER stack beyond the subtotal and NEVER\n"
+                '    double-count a single line."""\n'
+                "    items = list(order.items)\n"
+                "    subtotal = order.subtotal\n"
+                "    tier = tier_discount(items, tier)\n"
+                "    bulk = bulk_discount(items)\n"
+                "    total = round(subtotal - tier - bulk, 2)\n"
+                "    return {\n"
+                '        "order_id": order.order_id,\n'
+                '        "subtotal": round(subtotal, 2),\n'
+                '        "tier_discount": tier,\n'
+                '        "bulk_discount": bulk,\n'
+                '        "total": total,\n'
+                "    }\n"
+            ),
+            # --- api layer ---
+            "api.py": (
+                "from domain.models import CartItem, Order\n"
+                "from service.checkout import checkout\n\n\n"
+                "def price_cart(order_id: str, lines: list[dict], tier: str) -> dict:\n"
+                "    items = tuple(\n"
+                '        CartItem(sku=l["sku"], qty=l["qty"], unit_price=l["unit_price"])\n'
+                "        for l in lines\n"
+                "    )\n"
+                "    return checkout(Order(order_id=order_id, items=items), tier)\n"
+            ),
+            # --- tests ---
+            "test_pricing.py": (
+                "from api import price_cart\n\n\n"
+                "LINES = [\n"
+                '    {"sku": "a", "qty": 2, "unit_price": 10.0},\n'
+                '    {"sku": "b", "qty": 12, "unit_price": 5.0},\n'
+                "]\n\n\n"
+                "def test_gold_tier_with_bulk_line() -> None:\n"
+                '    """Gold tier: 10% of 80.00 = 8.00; bulk: 3% of 60.00 = 1.80."""\n'
+                '    r = price_cart("o-1", LINES, "gold")\n'
+                '    assert r["subtotal"] == 80.0\n'
+                '    assert r["tier_discount"] == 8.0\n'
+                '    assert r["bulk_discount"] == 1.8\n'
+                '    assert r["total"] == 70.2\n\n\n'
+                "def test_unknown_tier_is_no_discount() -> None:\n"
+                '    r = price_cart("o-2", LINES, "platinum")\n'
+                '    assert r["tier_discount"] == 0.0\n'
+                '    assert r["total"] == 78.2\n\n\n'
+                "def test_regression_no_double_count() -> None:\n"
+                '    """A qty-10 line must be counted ONCE in subtotal and\n'
+                '    once in bulk — never twice anywhere."""\n'
+                '    one_line = [{"sku": "x", "qty": 10, "unit_price": 2.0}]\n'
+                '    r = price_cart("o-3", one_line, "")\n'
+                '    assert r["subtotal"] == 20.0\n'
+                '    assert r["bulk_discount"] == 0.6\n'
+                '    assert r["total"] == 19.4\n'
+            ),
+        },
+        "The tests in test_pricing.py fail. The bug is somewhere in this small "
+        "order-pricing codebase (domain/pricing/service/api layers). Find the "
+        "root cause before proposing any fix, then fix it and make the whole "
+        "test suite green WITHOUT changing any other priced behavior. Show "
+        "the verification output.",
+    ),
+    _task(
+        "long-auth-session",
+        {
+            "store.py": (
+                "class UserStore:\n"
+                "    def __init__(self) -> None:\n"
+                "        self._by_email: dict[str, dict] = {}\n\n"
+                "    def add(self, email: str, pw_hash: str, role: str) -> None:\n"
+                '        self._by_email[email] = {"pw": pw_hash, "role": role}\n\n'
+                "    def find(self, email: str) -> dict | None:\n"
+                "        return self._by_email.get(email)\n"
+            ),
+            "auth/hash.py": (
+                "import hashlib\n\n\n"
+                "def hash_pw(pw: str) -> str:\n"
+                "    return hashlib.sha256(pw.encode()).hexdigest()\n\n\n"
+                "def verify_pw(pw: str, pw_hash: str) -> bool:\n"
+                "    return hash_pw(pw) == pw_hash\n"
+            ),
+            "auth/sessions.py": (
+                "import time\n\n\n"
+                "class SessionManager:\n"
+                '    """Issues opaque tokens. A token belongs to exactly one\n'
+                '    user; revoking a user revokes only that user\'s tokens."""\n\n'
+                "    def __init__(self, ttl_seconds: int = 3600) -> None:\n"
+                "        self._ttl = ttl_seconds\n"
+                "        self._tokens: dict[str, tuple[str, float]] = {}\n\n"
+                "    def issue(self, email: str) -> str:\n"
+                '        token = f"tok-{len(self._tokens)}-{email}"\n'
+                "        self._tokens[token] = (email, time.time() + self._ttl)\n"
+                "        return token\n\n"
+                "    def resolve(self, token: str) -> str | None:\n"
+                "        entry = self._tokens.get(token)\n"
+                "        if entry is None:\n"
+                "            return None\n"
+                "        email, expires = entry\n"
+                "        if time.time() > expires:\n"
+                "            del self._tokens[token]\n"
+                "            return None\n"
+                "        return email\n\n"
+                "    def revoke_user(self, email: str) -> None:\n"
+                "        self._tokens = {\n"
+                "            t: e for t, e in self._tokens.items() if e[0] == email\n"
+                "        }\n"
+            ),
+            "auth/service.py": (
+                "from auth.hash import hash_pw, verify_pw\n"
+                "from auth.sessions import SessionManager\n"
+                "from store import UserStore\n\n\n"
+                "class AuthService:\n"
+                "    def __init__(self) -> None:\n"
+                "        self._users = UserStore()\n"
+                "        self._sessions = SessionManager()\n\n"
+                '    def register(self, email: str, pw: str, role: str = "user") -> None:\n'
+                "        self._users.add(email, hash_pw(pw), role)\n\n"
+                "    def login(self, email: str, pw: str) -> str | None:\n"
+                "        user = self._users.find(email)\n"
+                '        if user is None or not verify_pw(pw, user["pw"]):\n'
+                "            return None\n"
+                "        return self._sessions.issue(email)\n\n"
+                "    def who(self, token: str) -> str | None:\n"
+                "        return self._sessions.resolve(token)\n\n"
+                "    def revoke(self, email: str) -> None:\n"
+                "        self._sessions.revoke_user(email)\n"
+            ),
+            "test_auth.py": (
+                "from auth.service import AuthService\n\n\n"
+                "def _svc() -> AuthService:\n"
+                "    s = AuthService()\n"
+                '    s.register("a@x.io", "secret", role="admin")\n'
+                '    s.register("b@x.io", "secret2", role="user")\n'
+                "    return s\n\n\n"
+                "def test_login_and_who() -> None:\n"
+                "    s = _svc()\n"
+                '    tok = s.login("a@x.io", "secret")\n'
+                "    assert tok is not None\n"
+                '    assert s.who(tok) == "a@x.io"\n\n\n'
+                "def test_wrong_password_rejected() -> None:\n"
+                "    s = _svc()\n"
+                '    assert s.login("a@x.io", "wrong") is None\n\n\n'
+                "def test_revoke_isolated_per_user() -> None:\n"
+                '    """Revoking a@x.io must kill ONLY a\'s tokens — b\'s stay\n'
+                '    alive, and a can log in again afterwards."""\n'
+                "    s = _svc()\n"
+                '    tok_a = s.login("a@x.io", "secret")\n'
+                '    tok_b = s.login("b@x.io", "secret2")\n'
+                '    s.revoke("a@x.io")\n'
+                "    assert s.who(tok_a) is None\n"
+                '    assert s.who(tok_b) == "b@x.io"\n'
+                '    tok_a2 = s.login("a@x.io", "secret")\n'
+                "    assert tok_a2 is not None\n"
+                '    assert s.who(tok_a2) == "a@x.io"\n\n\n'
+                "def test_regression_two_users_two_tokens() -> None:\n"
+                '    """Two users logged in simultaneously: each token resolves\n'
+                '    to its OWN user, never to the other."""\n'
+                "    s = _svc()\n"
+                '    tok_a = s.login("a@x.io", "secret")\n'
+                '    tok_b = s.login("b@x.io", "secret2")\n'
+                '    assert s.who(tok_a) == "a@x.io"\n'
+                '    assert s.who(tok_b) == "b@x.io"\n'
+            ),
+        },
+        "The tests in test_auth.py fail. The bug is somewhere in this small "
+        "auth codebase (store/hashing/sessions/service layers). Find the root "
+        "cause before proposing any fix, then fix it and make the whole test "
+        "suite green WITHOUT weakening any security property. Show the "
+        "verification output.",
+    ),
+    _task(
+        "long-notify-fanout",
+        {
+            "events.py": (
+                "from collections.abc import Callable\n\n\n"
+                "class Broker:\n"
+                '    """Topic broker. A handler failure must not stop other\n'
+                '    handlers OR other topics; failed handlers are collected."""\n\n'
+                "    def __init__(self) -> None:\n"
+                "        self._subs: dict[str, list[Callable[[dict], None]]] = {}\n\n"
+                "    def subscribe(self, topic: str, fn: Callable[[dict], None]) -> None:\n"
+                "        self._subs.setdefault(topic, []).append(fn)\n\n"
+                "    def publish(self, topic: str, payload: dict) -> list[str]:\n"
+                '        """Returns a list of \'topic:handler-index\' failures."""\n'
+                "        failures: list[str] = []\n"
+                "        for fn in self._subs.get(topic, []):\n"
+                "            try:\n"
+                "                fn(payload)\n"
+                "            except Exception:\n"
+                '                failures.append(f"{topic}:{id(fn)}")\n'
+                "        return failures\n"
+            ),
+            "channels.py": (
+                "class ChannelRegistry:\n"
+                '    """Maps channel names to delivery configs. A channel is\n'
+                "    either enabled or disabled — disabled channels are\n"
+                '    skipped entirely."""\n\n'
+                "    def __init__(self) -> None:\n"
+                "        self._cfg: dict[str, dict] = {}\n\n"
+                "    def configure(self, name: str, enabled: bool, sink: str) -> None:\n"
+                '        self._cfg[name] = {"enabled": enabled, "sink": sink}\n\n'
+                "    def enabled(self, name: str) -> bool:\n"
+                "        cfg = self._cfg.get(name)\n"
+                '        return cfg is not None and cfg["enabled"]\n'
+            ),
+            "notify.py": (
+                "from channels import ChannelRegistry\n"
+                "from events import Broker\n\n\n"
+                "class Notifier:\n"
+                '    """Fans out alert payloads to subscribed channels.\n\n'
+                "    Contract: a payload goes ONLY to enabled channels; a\n"
+                "    raising handler is recorded as a failure and must not\n"
+                '    affect any OTHER channel\'s delivery."""\n\n'
+                "    def __init__(self) -> None:\n"
+                "        self.broker = Broker()\n"
+                "        self.channels = ChannelRegistry()\n"
+                "        self.delivered: list[tuple[str, dict]] = []\n\n"
+                "    def send(self, channel: str, payload: dict) -> list[str]:\n"
+                "        return self.broker.publish(channel, payload)\n\n"
+                "    def record(self, channel: str, payload: dict) -> None:\n"
+                "        self.delivered.append((channel, payload))\n"
+            ),
+            "test_notify.py": (
+                "from notify import Notifier\n\n\n"
+                "def test_enabled_channel_receives() -> None:\n"
+                "    n = Notifier()\n"
+                '    n.channels.configure("email", enabled=True, sink="smtp")\n'
+                '    n.broker.subscribe("email", lambda p: n.record("email", p))\n'
+                '    n.send("email", {"alert": "disk"})\n'
+                '    assert n.delivered == [("email", {"alert": "disk"})]\n\n\n'
+                "def test_disabled_channel_skipped() -> None:\n"
+                "    n = Notifier()\n"
+                '    n.channels.configure("sms", enabled=False, sink="twilio")\n'
+                '    n.broker.subscribe("sms", lambda p: n.record("sms", p))\n'
+                '    n.send("sms", {"alert": "disk"})\n'
+                "    assert n.delivered == []\n\n\n"
+                "def test_handler_failure_isolated() -> None:\n"
+                '    """A raising handler on email must NOT block a second,\n'
+                '    healthy email handler from running."""\n'
+                "    n = Notifier()\n"
+                '    n.channels.configure("email", enabled=True, sink="smtp")\n\n'
+                "    def boom(p: dict) -> None:\n"
+                '        raise RuntimeError("sink down")\n\n'
+                '    n.broker.subscribe("email", boom)\n'
+                '    n.broker.subscribe("email", lambda p: n.record("email", p))\n'
+                '    failures = n.send("email", {"alert": "disk"})\n'
+                "    assert len(failures) == 1\n"
+                '    assert n.delivered == [("email", {"alert": "disk"})]\n\n\n'
+                "def test_regression_two_channels_independent() -> None:\n"
+                '    """Two enabled channels: each gets exactly its own\n'
+                '    payload once, in its own topic."""\n'
+                "    n = Notifier()\n"
+                '    n.channels.configure("email", enabled=True, sink="smtp")\n'
+                '    n.channels.configure("slack", enabled=True, sink="webhook")\n'
+                '    n.broker.subscribe("email", lambda p: n.record("email", p))\n'
+                '    n.broker.subscribe("slack", lambda p: n.record("slack", p))\n'
+                '    n.send("email", {"alert": "a"})\n'
+                '    n.send("slack", {"alert": "b"})\n'
+                '    assert n.delivered[0] == ("email", {"alert": "a"})\n'
+                '    assert n.delivered[1] == ("slack", {"alert": "b"})\n'
+                "    assert len(n.delivered) == 2\n"
+            ),
+        },
+        "The tests in test_notify.py fail. The bug is somewhere in this small "
+        "notification codebase (broker/channels/notifier layers). Find the "
+        "root cause before proposing any fix, then fix it and make the whole "
+        "test suite green WITHOUT changing the failure-isolation contract. "
+        "Show the verification output.",
+    ),
+]
+
 # Harder fixtures (§80 value-boundary hunt): families where naked agents
 # commonly fail — aliasing, tuple-ordering, exception translation, boundary
 # semantics, defensive copying. Each pins the OBVIOUS-but-wrong fix out via a
@@ -777,14 +1098,22 @@ def main() -> int:
     parser.add_argument("--only", help="run a single task by name")
     parser.add_argument(
         "--level",
-        choices=["smoke", "hard", "multi"],
+        choices=["smoke", "hard", "multi", "long", "horizon"],
         default="smoke",
         help="task set: smoke (5 easy bugs), hard (§80 value-boundary hunt), "
-        "or multi (cross-module reasoning — the ceiling-breaker round)",
+        "multi (cross-module reasoning), or long (long-horizon mini-apps — "
+        "the §80 final round), or horizon (long-horizon / unfamiliar-codebase "
+        "— symptom-only prompts, 8-10 file packages, pre-verified by "
+        "verify_horizon_fixtures.py)",
     )
     args = parser.parse_args()
 
-    task_set = {"hard": HARD_TASKS, "multi": MULTI_TASKS}.get(args.level, TASKS)
+    task_set = {
+        "hard": HARD_TASKS,
+        "multi": MULTI_TASKS,
+        "long": LONG_TASKS,
+        "horizon": HORIZON_TASKS,
+    }.get(args.level, TASKS)
 
     args.workdir.mkdir(parents=True, exist_ok=True)
     REPORT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -800,7 +1129,9 @@ def main() -> int:
             shutil.rmtree(task_dir)
         task_dir.mkdir(parents=True)
         for rel, content in task["files"].items():
-            (task_dir / rel).write_text(content, encoding="utf-8")
+            target = task_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
         run(["git", "init", "-q"], task_dir, 30)
         run(["git", "add", "-A"], task_dir, 30)
         run(["git", "commit", "-qm", "task fixture"], task_dir, 30)

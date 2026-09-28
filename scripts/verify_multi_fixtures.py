@@ -9,13 +9,14 @@ Usage:
     .venv/bin/python scripts/verify_multi_fixtures.py
 """
 
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from proof_loop import MULTI_TASKS  # noqa: E402
+from proof_loop import LONG_TASKS, MULTI_TASKS  # noqa: E402
 
 PYTEST = str(Path(__file__).resolve().parent.parent / ".venv/bin/python")
 
@@ -51,13 +52,39 @@ FIXES = {
         "    except Exception as exc:",
         "    except NotFound as exc:",
     ),
+    # Long-horizon fixtures: minimal root-cause fixes (inverse of the
+    # deliberately-installed bug in each fixture).
+    "long-order-pipeline": (
+        "pricing/rules.py",
+        "if i.qty > 10",
+        "if i.qty >= 10",
+    ),
+    "long-auth-session": (
+        "auth/sessions.py",
+        "if e[0] == email",
+        "if e[0] != email",
+    ),
+    "long-notify-fanout": (
+        "notify.py",
+        "    def send(self, channel: str, payload: dict) -> list[str]:\n"
+        "        return self.broker.publish(channel, payload)",
+        "    def send(self, channel: str, payload: dict) -> list[str]:\n"
+        "        if not self.channels.enabled(channel):\n"
+        "            return []\n"
+        "        return self.broker.publish(channel, payload)",
+    ),
 }
 
 
 def run_pytest(task_dir: Path) -> tuple[int, str]:
+    # PYTHONDONTWRITEBYTECODE: the buggy-state run would leave __pycache__
+    # behind; a same-size same-mtime-second fix write then reuses the stale
+    # .pyc and the FIXED-state run silently executes the buggy code.
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     proc = subprocess.run(
         [PYTEST, "-m", "pytest", "-q"],
         cwd=task_dir,
+        env=env,
         capture_output=True,
         text=True,
         timeout=120,
@@ -68,7 +95,7 @@ def run_pytest(task_dir: Path) -> tuple[int, str]:
 
 def main() -> int:
     failures: list[str] = []
-    for task in MULTI_TASKS:
+    for task in [*MULTI_TASKS, *LONG_TASKS]:
         name = task["name"]
         fix = FIXES.get(name)
         if fix is None:
@@ -79,7 +106,9 @@ def main() -> int:
             task_dir = Path(tmp) / name
             task_dir.mkdir()
             for rel, content in task["files"].items():
-                (task_dir / rel).write_text(content, encoding="utf-8")
+                target = task_dir / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
 
             code, out = run_pytest(task_dir)
             if code == 0:
