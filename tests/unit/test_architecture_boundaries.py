@@ -47,7 +47,11 @@ def test_registry_separation_version_release_binding() -> None:
 
 def test_plane_separation_no_control_import_in_route_contracts() -> None:
     text = _read(models.__file__ and DOMAIN / "capability" / "models.py")
-    for banned in ("promotion", "benchmark", "quarantine"):
+    # Control-plane CONCERNS must not leak into the capability contracts.
+    # "quarantine" is exempt: it is the §22 ingestion state machine
+    # (IngestionStatus), a domain concept — what must never leak is
+    # control-plane logic (promotion/benchmark), not the vocabulary of trust.
+    for banned in ("promotion", "benchmark"):
         assert banned not in text.lower()
 
 

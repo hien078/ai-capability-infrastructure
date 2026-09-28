@@ -127,12 +127,9 @@ def test_index_projects_only_active_production_skills() -> None:
                 channel="production",
                 status="revoked",
             ),
-            CapabilityRelease(
-                capability_id="cap-raw",
-                version="1.0.0",
-                channel="raw",
-                status="active",
-            ),
+            # cap-quarantined has NO release pointer at all: a quarantined
+            # ingestion (§22) never gains a release channel — it is invisible
+            # to the catalog by construction, not by filtering a "raw" channel.
             # A tool-kind production release is registry content, but not a
             # skill catalog entry: the catalog exposes skills only (§28.2).
             active_production("cap-tool"),
@@ -140,7 +137,7 @@ def test_index_projects_only_active_production_skills() -> None:
         versions={
             ("cap-kept", "1.0.0"): make_version("cap-kept"),
             ("cap-revoked", "1.0.0"): make_version("cap-revoked"),
-            ("cap-raw", "1.0.0"): make_version("cap-raw"),
+            ("cap-quarantined", "1.0.0"): make_version("cap-quarantined"),
             ("cap-tool", "1.0.0"): make_version("cap-tool", kind="tool"),
         },
         artifacts={

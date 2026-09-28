@@ -82,7 +82,7 @@ def test_ingest_happy_path(
     assert result.capability_created is True
     assert result.already_ingested is False
     assert result.file_count == 3
-    assert result.quarantined_channel == "raw"
+    assert result.ingestion_status == "quarantined"
     assert result.transformations == []
 
     # Canonical version: immutable, digest-pinned, spec intact.
@@ -100,10 +100,10 @@ def test_ingest_happy_path(
     assert len(artifact.files) == 3
     assert all(f.sha256 and f.size_bytes >= 0 for f in artifact.files)
 
-    # Quarantine: raw channel pointer, not production.
-    raw = release_repo.get_release(cap, "raw")
-    assert raw is not None and raw.version == "1.2.0" and raw.status == "active"
+    # Quarantine (§22): ingestion state lives on the source record, NOT on a
+    # release channel — a quarantined skill has NO release pointer at all.
     assert release_repo.get_release(cap, "production") is None
+    assert release_repo.get_release(cap, "staging") is None
 
     # Provenance: raw snapshot digest + origin, distinct record from artifact.
     records = source_records.list_source_records(cap)
@@ -274,10 +274,11 @@ def test_reingest_repairs_partial_state_after_crash(
     with pytest.raises(RuntimeError, match="simulated crash"):
         crashed.ingest_local(src, now=NOW)
 
-    # Partial state: version exists, artifact/release/provenance do not.
+    # Partial state: version exists, artifact/provenance do not. No release
+    # pointer exists either — quarantine is an ingestion state (§22), not a
+    # channel, so a crashed ingest leaves no release rows at all.
     assert capability_repo.get_version(cap, "1.2.0") is not None
     assert artifact_store.get_artifact(cap, "1.2.0") is None
-    assert release_repo.get_release(cap, "raw") is None
     assert source_records.list_source_records(cap) == []
 
     # Re-ingesting identical content reports idempotency AND backfills.
@@ -286,29 +287,32 @@ def test_reingest_repairs_partial_state_after_crash(
     assert result.capability_created is False
 
     assert artifact_store.get_artifact(cap, "1.2.0") is not None
-    assert release_repo.get_release(cap, "raw") is not None
     assert len(source_records.list_source_records(cap)) == 1
-    # and the raw pointer still points at this version
-    assert release_repo.get_release(cap, "raw").version == "1.2.0"
+    # The backfilled record carries the ingestion state, quarantined.
+    assert source_records.list_source_records(cap)[0].ingestion_status == "quarantined"
 
 
-def test_reingest_does_not_move_raw_pointer_back(
+def test_reingest_does_not_touch_other_versions_records(
     ingestion: SkillIngestionService,
-    release_repo: SqlAlchemyReleaseRepository,
+    source_records: SqlAlchemySourceRecordRepository,
     tmp_path: Path,
 ) -> None:
-    """Backfill must only create a missing raw pointer, never rewind one that
-    a newer version legitimately moved forward."""
+    """Re-ingesting an OLD version must never disturb the records of a NEWER
+    version that legitimately exists (the §22 successor of the old
+    raw-pointer-rewind test: ingestion state is per-version on the source
+    record, so there is no shared pointer to rewind)."""
     cap = uid("sysdbg")
     src = tmp_path / "skill-src"
     write_skill(src, cap)
     ingestion.ingest_local(src, now=NOW)
     write_skill(src, cap, version="1.3.0")
     ingestion.ingest_local(src, now=NOW)
-    assert release_repo.get_release(cap, "raw").version == "1.3.0"
+    assert {r.version for r in source_records.list_source_records(cap)} == {"1.2.0", "1.3.0"}
 
-    # re-ingest the OLD identical content: pointer must stay at 1.3.0
+    # re-ingest the OLD identical content: the 1.3.0 record is untouched
     write_skill(src, cap, version="1.2.0")
     result = ingestion.ingest_local(src, now=NOW)
     assert result.already_ingested is True
-    assert release_repo.get_release(cap, "raw").version == "1.3.0"
+    records = {r.version: r for r in source_records.list_source_records(cap)}
+    assert set(records) == {"1.2.0", "1.3.0"}
+    assert records["1.3.0"].ingestion_status == "quarantined"

@@ -12,8 +12,17 @@ from aci.domain.taxonomy.models import validate_facets
 
 CapabilityKind = Literal["skill", "resource", "tool", "workflow", "service", "agent"]
 OwnerScope = Literal["global", "organization", "workspace", "private"]
-ReleaseChannel = Literal["raw", "candidate", "canonical", "staging", "production"]
+#: Release channels are DELIVERY states (§21): where a version is exposed.
+#: They are NOT ingestion states — quarantine/trust is tracked separately
+#: in `IngestionStatus` so "raw" can never be conflated with a release channel.
+ReleaseChannel = Literal["staging", "production"]
 ReleaseStatus = Literal["active", "disabled", "deprecated", "revoked"]
+#: Ingestion state machine (§22 lifecycle): trust/processing status of
+#: imported material, independent of any release channel. quarantined =
+#: untrusted snapshot stored, inspectable, never advertised; rejected =
+#: a gate failed permanently; normalized = canonicalization applied;
+#: accepted = ingestion gates passed (eligible for a staging release).
+IngestionStatus = Literal["quarantined", "rejected", "normalized", "accepted"]
 VerdictSource = Literal[
     "agent_self_report",
     "client_report",

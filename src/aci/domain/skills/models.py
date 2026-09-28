@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from aci.domain.capability.models import ReleaseChannel
+from aci.domain.capability.models import IngestionStatus
 
 
 class SkillMetadata(BaseModel):
@@ -28,6 +28,10 @@ class SourceProvenance(BaseModel):
     record_id: str
     capability_id: str
     version: str
+    #: Ingestion state machine (§22): quarantined → normalized → accepted,
+    #: or rejected when a gate fails. Stored on the provenance record —
+    #: ingestion state is NOT a release channel (§21).
+    ingestion_status: IngestionStatus = "quarantined"
     source_type: str = "local-directory"
     source_repository: str | None = None
     source_path: str
@@ -52,6 +56,7 @@ class IngestionResult(BaseModel):
     raw_snapshot_digest: str
     package_digest: str
     file_count: int
-    quarantined_channel: ReleaseChannel = "raw"
+    #: Ingestion state after this run (§22): quarantined until gates pass.
+    ingestion_status: IngestionStatus = "quarantined"
     transformations: list[str] = Field(default_factory=list)
     extra: dict[str, Any] = Field(default_factory=dict)

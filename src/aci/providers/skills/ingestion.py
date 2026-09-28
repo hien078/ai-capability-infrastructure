@@ -4,8 +4,14 @@ Flow per ingest_local():
   1. parse SKILL.md and validate package structure (nothing is persisted on failure),
   2. store every file blob in the content-addressed object store,
   3. create capability + immutable version + artifact,
-  4. point the `raw` release channel at it (quarantine; plan §21),
-  5. append a provenance source record with the raw snapshot digest.
+  4. append a provenance source record with the raw snapshot digest, marked
+     `ingestion_status=quarantined` (§22: ingested ≠ trusted; the snapshot is
+     stored untrusted and inspectable, never advertised to runtime clients),
+  5. canonicalization records its transformations on the same record.
+
+Quarantine is an INGESTION state on the provenance record, not a release
+channel (§21): release channels (staging/production) only come into existence
+when the ingestion gates pass and an explicit promotion moves the pointer.
 
 Raw source and canonical artifact stay distinct records: the source record keeps
 the raw snapshot digest + origin fields, the version keeps the canonical package
@@ -34,8 +40,8 @@ from aci.domain.capability.models import (
     ArtifactFile,
     Capability,
     CapabilityArtifact,
-    CapabilityRelease,
     CapabilityVersion,
+    IngestionStatus,
     SkillSpec,
 )
 from aci.domain.skills.models import IngestionResult, SkillMetadata, SourceProvenance
@@ -115,16 +121,6 @@ class SkillIngestionService:
                         files=files,
                     )
                 )
-            if self._releases.get_release(capability_id, "raw") is None:
-                self._releases.set_release(
-                    CapabilityRelease(
-                        capability_id=capability_id,
-                        version=version,
-                        channel="raw",
-                        status="active",
-                        policy_snapshot_id=None,
-                    )
-                )
             if not any(
                 r.version == version
                 for r in self._source_records.list_source_records(capability_id)
@@ -146,6 +142,15 @@ class SkillIngestionService:
                         ingested_at=ingested_at,
                     )
                 )
+            existing_records = self._source_records.list_source_records(capability_id)
+            existing_status: IngestionStatus = next(
+                (
+                    r.ingestion_status
+                    for r in existing_records
+                    if r.version == version and r.ingestion_status is not None
+                ),
+                "quarantined",
+            )
             return IngestionResult(
                 capability_id=capability_id,
                 version=version,
@@ -154,6 +159,7 @@ class SkillIngestionService:
                 raw_snapshot_digest=f"sha256:{digest}",
                 package_digest=f"sha256:{digest}",
                 file_count=len(files),
+                ingestion_status=existing_status,
                 transformations=transformations,
             )
 
@@ -200,17 +206,9 @@ class SkillIngestionService:
                 files=files,
             )
         )
-        # 5. Quarantine: raw channel pointer marks unreviewed content (§21).
-        self._releases.set_release(
-            CapabilityRelease(
-                capability_id=capability_id,
-                version=version,
-                channel="raw",
-                status="active",
-                policy_snapshot_id=None,
-            )
-        )
-        # 6. Provenance trail (§23).
+        # 5. Provenance trail (§23) — the record itself carries the
+        #    ingestion state (quarantined): stored, inspectable, untrusted,
+        #    and NOT advertised on any release channel until gates pass.
         self._source_records.add_source_record(
             self._source_record(
                 capability_id=capability_id,
@@ -236,6 +234,7 @@ class SkillIngestionService:
             raw_snapshot_digest=f"sha256:{digest}",
             package_digest=f"sha256:{digest}",
             file_count=len(files),
+            ingestion_status="quarantined",
             transformations=transformations,
         )
 

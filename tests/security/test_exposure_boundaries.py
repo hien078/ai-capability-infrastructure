@@ -249,6 +249,7 @@ def test_unknown_license_cannot_promote(
     with pytest.raises(DomainError):
         promotion.promote(cap, "1.0.0", "production", approved_by="attacker", now=NOW)
 
-    # No production release pointer exists — the skill stays in raw quarantine.
+    # No production release pointer exists — the skill stays quarantined
+    # (§22: ingestion state on the source record, not a release channel).
     assert release_repo.get_release(cap, "production") is None
-    assert release_repo.get_release(cap, "raw") is not None
+    assert release_repo.get_release(cap, "staging") is None

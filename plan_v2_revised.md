@@ -472,12 +472,10 @@ approved_by: ...
 policy_snapshot_id: ...
 ```
 
-Possible channels:
+Possible channels (delivery only — trust states live in `IngestionStatus`
+on the source record, §21):
 
 ```text
-raw
-candidate
-canonical
 staging
 production
 ```
@@ -1220,22 +1218,59 @@ The package digest is used for integrity and release pinning.
 
 # 21. Skill Lifecycle
 
-Logical lifecycle:
+The lifecycle is TWO SEPARATE state machines, never one:
 
 ```text
-SOURCE
+INGESTION STATE MACHINE (trust)          RELEASE STATE MACHINE (delivery)
+                                         
+ACQUISITION (manual, §22)               (no release pointer exists)
+  ↓                                        
+SOURCE SNAPSHOT                          STAGING ← explicit promotion
+  ↓                                        ↓
+QUARANTINE (ingestion_status)           PRODUCTION ← explicit promotion
+  ↓                                        ↓
+INGESTION GATES G1–G4                   deprecated / revoked (status flips)
   ↓
-RAW / QUARANTINED
+CANONICALIZATION (normalizer_version)
   ↓
-CANDIDATE
+IMMUTABLE CAPABILITY VERSION
   ↓
-CANONICAL VERSION
+accepted → eligible for a STAGING release
+```
+
+`IngestionStatus` (quarantined / rejected / normalized / accepted) lives on
+the provenance source record. `ReleaseChannel` (staging / production) is a
+delivery pointer. **"Raw" is an ingestion state, not a release channel** —
+a quarantined skill has NO release pointer at all and is therefore invisible
+to every client surface (catalog, routing, MCP) by construction, not by
+filtering.
+
+Full pipeline:
+
+```text
+CAPABILITY GAP
   ↓
-STAGING RELEASE
+ACQUISITION (§22, manual in V1)
   ↓
-BENCHMARK + SECURITY + LICENSE GATES
+SOURCE SNAPSHOT (pinned revision)
   ↓
-PRODUCTION RELEASE
+QUARANTINE (untrusted: stored, hashed, inspectable — never advertised)
+  ↓
+INGESTION GATES: G1 structure · G2 provenance · G3 license policy · G4 security policy
+  ↓
+CANONICALIZATION (deterministic, auditable, normalizer_version recorded)
+  ↓
+IMMUTABLE CAPABILITY VERSION
+  ↓
+STAGING (explicit pointer move)
+  ↓
+PROMOTION GATES: G5 compatibility · G6 benchmark · G7 regression · G8 policy
+  ↓
+PRODUCTION (explicit pointer move)
+  ↓
+DELIVERY (OpenCode catalog / MCP / REST — projections of production only)
+  ↓
+OUTCOME / TELEMETRY
 ```
 
 Do not make folder location the authoritative lifecycle state.
@@ -1247,7 +1282,9 @@ corpus/raw
 corpus/candidate
 ```
 
-may exist for human convenience, but database release records remain authoritative.
+may exist for human convenience, but database records remain authoritative:
+`source_records.ingestion_status` for trust, `capability_releases` for
+delivery.
 
 ---
 
@@ -1274,6 +1311,18 @@ Canonical version
 ```
 
 Avoid collecting thousands of repositories without a capability hypothesis.
+
+## 22.1 V1 acquisition is intentionally manual — and declarative
+
+No crawler, no automatic Internet-wide discovery, no scheduled upstream
+monitoring (§38 watcher is manual-run). WHAT to ingest lives in a
+declarative source registry (`config/sources.yaml`): repo, pinned commit,
+picked skill paths, optional license override. The ingestion engine
+(`scripts/ingest_real_skills.py`) only consumes that file — adding a source
+or a skill never requires editing engine logic. Human review of content
+happens BEFORE ingestion (reading the candidates); the snapshot/quarantine
+step (§21) is unconditional and precedes any trust decision, so "ingested"
+never means "trusted".
 
 ---
 
@@ -1974,33 +2023,34 @@ Avoid storing raw secrets or unnecessary code in telemetry.
 
 # 37. Promotion Pipeline
 
+Two gate sets, never collapsed (§21 state machines):
+
 ```text
 Upstream change / new source
         ↓
-Ingestion quarantine
-        ↓
-Provenance capture
-        ↓
-License policy
-        ↓
-Static/security scan
-        ↓
-Canonicalization
-        ↓
-Canonical immutable version
-        ↓
-Staging release
-        ↓
-Compatibility checks
-        ↓
-Benchmark suite
-        ↓
-Regression comparison
-        ↓
-Review / promotion policy
-        ↓
-Production release
+INGESTION GATES (untrusted → accepted)
+  G1 structure/schema validity   (enforced before persistence)
+  G2 provenance integrity         (source record exists)
+  G3 license policy               (redistributable, §24)
+  G4 security policy             (scan passed, §25)
+        ↓  pass → STAGING (explicit pointer move)
+        ↓  fail → stays QUARANTINED (never any release pointer)
+
+PROMOTION GATES (staging → production)
+  G5 client/runtime compatibility
+  G6 benchmark suite
+  G7 regression comparison
+  G8 review / promotion policy
+        ↓  pass → PRODUCTION (explicit pointer move)
 ```
+
+A security pass is NOT production readiness; a license pass is NOT
+production readiness; schema validity is NOT production readiness. Each
+gate answers its own question only.
+
+Where the benchmark infrastructure is not yet mature enough to gate G6/G7
+automatically, promotion is an explicit MANUAL/DEVELOPMENT decision
+(`approved_by` recorded on the release) — never a faked automated gate.
 
 Never:
 
@@ -2125,7 +2175,7 @@ capability_artifacts
 artifact_files
 
 provenance_events
-source_records
+source_records            -- carries ingestion_status (quarantined/rejected/normalized/accepted, §21)
 license_assessments
 security_assessments
 

@@ -12,6 +12,7 @@ def _record_of(row: SourceRecordRow) -> SourceProvenance:
             "record_id": row.record_id,
             "capability_id": row.capability_id,
             "version": row.version,
+            "ingestion_status": row.ingestion_status,
             "source_type": row.source_type,
             "source_repository": row.source_repository,
             "source_path": row.source_path,
@@ -65,3 +66,23 @@ class SqlAlchemySourceRecordRepository:
                 .all()
             )
             return [_record_of(r) for r in rows]
+
+    def set_ingestion_status(
+        self,
+        capability_id: str,
+        version: str,
+        status: str,
+    ) -> bool:
+        """Flip the ingestion state on every source record of one version
+        (§22). Returns False when no record exists for the version."""
+        with self._sessions() as session, session.begin():
+            rows = (
+                session.query(SourceRecordRow)
+                .filter_by(capability_id=capability_id, version=version)
+                .all()
+            )
+            if not rows:
+                return False
+            for row in rows:
+                row.ingestion_status = status
+        return True

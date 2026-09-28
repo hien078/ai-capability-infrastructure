@@ -3,8 +3,9 @@
 Control plane: changes what may exist in production. Never a synchronous hop in
 route requests (ADR-003). Promotion to `production` requires the full gate set:
 provenance chain, redistributable license, passed security scan. Promotion to
-pre-production channels (candidate/canonical/staging) only requires the version
-to exist. Rollback = promoting an older version; revoke = status flip. Both only
+`staging` only requires the version to exist (ingestion gates are evaluated by
+the ingestion pipeline, §22 — a quarantined/rejected source record blocks
+staging). Rollback = promoting an older version; revoke = status flip. Both only
 move release pointers — immutable versions are never touched (ADR-002).
 """
 
@@ -21,7 +22,7 @@ from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.capability.models import CapabilityRelease, ReleaseChannel
 from aci.domain.provenance.models import PromotionCheck
 
-_PRE_PRODUCTION: frozenset[str] = frozenset({"raw", "candidate", "canonical", "staging"})
+_PRE_PRODUCTION: frozenset[str] = frozenset({"staging"})
 
 
 class PromotionService:
@@ -54,6 +55,24 @@ class PromotionService:
             )
         )
         if channel in _PRE_PRODUCTION:
+            # Staging (§22): ingestion gates G1-G4 are evaluated by the
+            # ingestion pipeline; promotion here only requires the version
+            # to exist and its source record not to be rejected.
+            provenance = [
+                r
+                for r in self._source_records.list_source_records(capability_id)
+                if r.version == version
+            ]
+            checks.append(
+                PromotionCheck(
+                    name="ingestion-not-rejected",
+                    passed=bool(provenance)
+                    and not any(r.ingestion_status == "rejected" for r in provenance),
+                    detail=(
+                        f"{len(provenance)} source record(s)" if provenance else "no source record"
+                    ),
+                )
+            )
             return checks
 
         # Production gates (§37, §24, §52 Phase 4 acceptance).

@@ -110,6 +110,9 @@ class SourceRecordRow(Base):
     record_id: Mapped[str] = mapped_column(Text, primary_key=True)
     capability_id: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Ingestion state machine (§22): quarantined/rejected/normalized/accepted.
+    #: NOT a release channel — trust state lives on the provenance record.
+    ingestion_status: Mapped[str] = mapped_column(Text, nullable=False, default="quarantined")
     source_type: Mapped[str] = mapped_column(Text, nullable=False)
     source_repository: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     source_path: Mapped[str] = mapped_column(Text, nullable=False)

@@ -142,15 +142,15 @@ def test_entries_project_only_active_production_skills() -> None:
             CapabilityRelease(
                 capability_id="cap-revoked", version="1.0.0", channel="production", status="revoked"
             ),
-            CapabilityRelease(
-                capability_id="cap-raw", version="1.0.0", channel="raw", status="active"
-            ),
+            # cap-quarantined has NO release pointer at all: a quarantined
+            # ingestion (§22) never gains a release channel — it is invisible
+            # to every client surface by construction.
             active_production("cap-tool"),
         ],
         versions={
             ("cap-kept", "1.0.0"): make_version("cap-kept"),
             ("cap-revoked", "1.0.0"): make_version("cap-revoked"),
-            ("cap-raw", "1.0.0"): make_version("cap-raw"),
+            ("cap-quarantined", "1.0.0"): make_version("cap-quarantined"),
             ("cap-tool", "1.0.0"): make_version("cap-tool", kind="tool"),
         },
         artifacts={
