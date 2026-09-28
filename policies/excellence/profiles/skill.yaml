@@ -1,0 +1,33 @@
+# Excellence profile: skill (crawl.md §16)
+# Priorities for instruction-bearing capabilities (SKILL.md packages).
+
+type: skill
+constitution_version: "0.1.0"
+
+dimensions:
+  instruction_quality:   { importance: critical }
+  clarity:               { importance: critical }
+  task_improvement:      { importance: critical }
+  token_efficiency:      { importance: high }
+  transferability:       { importance: high }
+  model_robustness:      { importance: high }   # works across models
+  failure_guidance:      { importance: high }    # what to do when it fails
+  composition_quality:   { importance: medium } # composes with other skills
+  novelty:               { importance: medium }
+  popularity:            { importance: very_low }
+
+# §67 ordering for coding-domain skills
+priority_order:
+  - task_success
+  - correctness
+  - reliability
+  - recovery_behavior
+  - verification_quality
+  - security
+  - capability_gain
+  - generalizability
+  - composability
+  - cost_token_efficiency
+  - maintainability
+  - novelty
+  - popularity

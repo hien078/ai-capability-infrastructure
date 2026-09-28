@@ -1,0 +1,28 @@
+# Domain excellence: coding (crawl.md §65 — the initial domain)
+# "Start with software-engineering/coding-agent capabilities" —
+# large OSS supply, executable benchmarks, measurable outcomes.
+
+domain: coding
+constitution_version: "0.1.0"
+
+benchmark_families:
+  - bug_repair
+  - feature_implementation
+  - test_generation
+  - repo_navigation
+  - refactoring
+  - dependency_repair
+
+# §21 coding benchmark dimensions
+benchmark_dimensions:
+  - task_success
+  - correctness
+  - failure_recovery
+  - tool_call_efficiency
+  - token_usage
+  - latency
+  - regression_rate
+  - human_intervention
+
+# §50 counterfactual testing is mandatory for promotion decisions
+counterfactual_required: true

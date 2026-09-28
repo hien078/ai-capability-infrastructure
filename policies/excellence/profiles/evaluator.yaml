@@ -1,0 +1,14 @@
+# Excellence profile: evaluator (crawl.md §16)
+# Evaluators are judged by correlation with REAL task success — never
+# by their own internal consistency alone.
+
+type: evaluator
+constitution_version: "0.1.0"
+
+dimensions:
+  correlation_with_task_success: { importance: critical }
+  false_positive_rate:           { importance: critical }
+  false_negative_rate:           { importance: critical }
+  robustness_against_gaming:     { importance: critical }
+  consistency:                   { importance: high }
+  cost:                          { importance: medium }

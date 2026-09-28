@@ -1,0 +1,40 @@
+# Excellence Constitution v0.1 (crawl.md §17)
+#
+# "There is no context-free universal elite capability." (§14)
+# Excellence is E(c | t, u, e, τ) — capability × task × user × env × time.
+# This constitution VERSIONS the definition: as models, context windows,
+# cost and runtimes evolve, what "excellent" means changes too.
+#
+# Hard gates are deterministic (§10) — an LLM may explain a license but
+# never be the source of legal truth. Dimensions below govern the LLM
+# judge ensemble (§18); importance weights are POLICY, tunable, and
+# versioned with this file.
+
+constitution_version: "0.1.0"
+created_at: "2026-09-29"
+
+# Global hard gates — deterministic, never LLM-judged (§10, §53)
+hard_gates:
+  malicious_behavior: fail          # pattern scanner CRITICAL
+  critical_security_issue: fail     # risk aggregator CRITICAL
+  license_blocker: fail             # §24 unknown/non-redistributable
+  provenance_missing: fail          # §23 no source record, no evaluation
+
+# Global anti-hype rules (§30)
+anti_hype:
+  popularity_is_discovery_signal_only: true   # stars never quality
+  prestige_blind_judge_required: true        # at least one judge sees no repo name
+  claim_types_stored_separately: true        # claimed/observed/verified/production
+  novelty_is_not_usefulness: true            # novel + weak → research-only
+
+# Judge ensemble (§18) — every evaluation must include the skeptic
+judges:
+  required:
+    - architecture
+    - engineering
+    - novelty
+    - capability_gain
+    - critic          # the Skeptical Critic is MANDATORY, never optional
+  optional:
+    - domain
+    - security

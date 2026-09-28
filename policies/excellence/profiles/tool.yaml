@@ -1,0 +1,16 @@
+# Excellence profile: tool (crawl.md §16)
+
+type: tool
+constitution_version: "0.1.0"
+
+dimensions:
+  correctness:       { importance: critical }
+  api_stability:     { importance: critical }
+  reliability:       { importance: critical }
+  latency:           { importance: high }
+  security:          { importance: critical }
+  error_handling:    { importance: high }
+  observability:     { importance: medium }
+  dependency_quality: { importance: high }
+  novelty:           { importance: low }
+  popularity:        { importance: very_low }

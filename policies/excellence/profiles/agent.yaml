@@ -1,0 +1,17 @@
+# Excellence profile: agent (crawl.md §16)
+
+type: agent
+constitution_version: "0.1.0"
+
+dimensions:
+  task_success:      { importance: critical }
+  planning:          { importance: critical }
+  tool_use:          { importance: critical }
+  state_management:  { importance: high }
+  recovery:          { importance: high }
+  termination:       { importance: high }   # knows when to stop
+  cost:              { importance: high }
+  latency:           { importance: medium }
+  robustness:         { importance: high }
+  novelty:           { importance: medium }
+  popularity:        { importance: very_low }
