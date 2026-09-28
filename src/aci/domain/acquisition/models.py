@@ -1,4 +1,4 @@
-"""Acquisition candidate contracts (auto.md §6-7; plan §22).
+"""Acquisition candidate contracts (auto.md §6-7, auto2.md §12; plan §22).
 
 A Candidate is a PROPOSED skill package from a source — the thing being
 CONSIDERED, never a capability. The authoritative Capability Registry only
@@ -10,6 +10,11 @@ canonical capabilities" — two different things, no parallel authority).
 Scout/agent output is a structured proposal (§6): confidence is
 DISCOVERY confidence only — never production quality. Every transition
 is explicit and auditable; failure states record WHY.
+
+auto2.md §12.2 extends the lifecycle with the source-approval step
+(SOURCE_APPROVED — a human approves an UNREVIEWED source before fetch)
+and the refinery stages (INGESTION_SCANNED → REFINERY_READY between
+quarantine and canonicalization), plus REJECTED_DUPLICATE / CANCELLED.
 """
 
 from datetime import datetime
@@ -18,52 +23,83 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 CandidateStatus = Literal[
-    # happy path (§7 candidate lifecycle)
+    # happy path (auto2.md §12.2 candidate lifecycle)
     "proposed",
+    "source_approved",
     "approved_for_fetch",
     "fetched",
     "quarantined",
+    "ingestion_scanned",
+    "refinery_ready",
     "ingestion_passed",
     "canonicalized",
     "staging",
     "promotion_proposed",
     "promoted",
-    # failure states (§7) — record WHY, never silently drop
+    # failure states — record WHY, never silently drop
     "rejected_source",
     "rejected_license",
     "rejected_security",
     "rejected_schema",
+    "rejected_duplicate",
     "rejected_quality",
     "superseded",
+    "cancelled",
 ]
 
-#: Legal transitions (auto.md §7). A candidate never skips quarantine;
-#: promotion only from promotion_proposed (human/policy gate, §24).
+#: Legal transitions (auto2.md §12.2). A candidate never skips quarantine;
+#: promotion only from promotion_proposed (human/policy gate, §24);
+#: KNOWN sources may skip source_approved (auto_fetch policy §4) but
+#: UNREVIEWED sources require it before any fetch.
 _TRANSITIONS: dict[str, frozenset[str]] = {
-    "proposed": frozenset({"approved_for_fetch", "rejected_source", "superseded"}),
-    "approved_for_fetch": frozenset({"fetched", "rejected_source", "superseded"}),
-    "fetched": frozenset({"quarantined", "rejected_schema", "superseded"}),
+    "proposed": frozenset(
+        {"source_approved", "approved_for_fetch", "rejected_source", "superseded", "cancelled"}
+    ),
+    "source_approved": frozenset(
+        {"approved_for_fetch", "rejected_source", "superseded", "cancelled"}
+    ),
+    "approved_for_fetch": frozenset({"fetched", "rejected_source", "superseded", "cancelled"}),
+    "fetched": frozenset({"quarantined", "rejected_schema", "superseded", "cancelled"}),
     "quarantined": frozenset(
         {
-            "ingestion_passed",
+            "ingestion_scanned",
+            "ingestion_passed",  # fast path: no refinery needed (single clean source)
             "rejected_license",
             "rejected_security",
             "rejected_schema",
             "superseded",
+            "cancelled",
         }
     ),
-    "ingestion_passed": frozenset({"canonicalized", "rejected_quality", "superseded"}),
-    "canonicalized": frozenset({"staging", "rejected_quality", "superseded"}),
-    "staging": frozenset({"promotion_proposed", "rejected_quality", "superseded"}),
-    "promotion_proposed": frozenset({"promoted", "rejected_quality", "superseded"}),
+    "ingestion_scanned": frozenset(
+        {
+            "refinery_ready",
+            "ingestion_passed",
+            "rejected_duplicate",
+            "rejected_license",
+            "rejected_security",
+            "rejected_schema",
+            "superseded",
+            "cancelled",
+        }
+    ),
+    "refinery_ready": frozenset(
+        {"ingestion_passed", "rejected_duplicate", "rejected_quality", "superseded", "cancelled"}
+    ),
+    "ingestion_passed": frozenset({"canonicalized", "rejected_quality", "superseded", "cancelled"}),
+    "canonicalized": frozenset({"staging", "rejected_quality", "superseded", "cancelled"}),
+    "staging": frozenset({"promotion_proposed", "rejected_quality", "superseded", "cancelled"}),
+    "promotion_proposed": frozenset({"promoted", "rejected_quality", "superseded", "cancelled"}),
     # terminal states are immutable
     "promoted": frozenset(),
     "rejected_source": frozenset(),
     "rejected_license": frozenset(),
     "rejected_security": frozenset(),
     "rejected_schema": frozenset(),
+    "rejected_duplicate": frozenset(),
     "rejected_quality": frozenset(),
     "superseded": frozenset(),
+    "cancelled": frozenset(),
 }
 
 

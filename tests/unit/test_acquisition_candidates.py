@@ -149,3 +149,79 @@ def test_proposal_bounds_confidence() -> None:
             discovery_confidence=1.5,
             proposed_at=NOW,
         )
+
+
+# ---------------------------------------------------------------------------
+# auto2.md §12.2 extensions: source approval + refinery + new failure states
+# ---------------------------------------------------------------------------
+
+
+def test_unreviewed_source_requires_source_approval() -> None:
+    """auto2 §12.2: an UNREVIEWED source's candidate cannot be fetched
+    without the human source-approval step — proposed → approved_for_fetch
+    is legal for KNOWN sources (auto_fetch policy §4) but the unreviewed
+    path goes proposed → source_approved → approved_for_fetch."""
+    r = _record()
+    # the known-source fast path stays legal
+    fast = advance_candidate(r, "approved_for_fetch", decided_by="policy", decided_at=NOW)
+    assert fast.status == "approved_for_fetch"
+    # the unreviewed path goes through source_approved
+    r2 = advance_candidate(r, "source_approved", decided_by="human:hien", decided_at=NOW)
+    r3 = advance_candidate(r2, "approved_for_fetch", decided_by="policy", decided_at=NOW)
+    assert r3.status == "approved_for_fetch"
+
+
+def test_refinery_stages_between_quarantine_and_ingestion_passed() -> None:
+    """auto2 §12.2: quarantined → ingestion_scanned → refinery_ready →
+    ingestion_passed — the refinery (dedupe/cluster/compare) runs between
+    scanning and acceptance; a duplicate found in the refinery rejects
+    with a reason."""
+    r = _record()
+    for status in (
+        "approved_for_fetch",
+        "fetched",
+        "quarantined",
+    ):
+        r = advance_candidate(r, status, decided_by="pipeline", decided_at=NOW)  # type: ignore[arg-type]
+    r = advance_candidate(r, "ingestion_scanned", decided_by="security-scan", decided_at=NOW)
+    r = advance_candidate(r, "refinery_ready", decided_by="refinery", decided_at=NOW)
+    r = advance_candidate(r, "ingestion_passed", decided_by="refinery", decided_at=NOW)
+    assert r.status == "ingestion_passed"
+
+
+def test_duplicate_rejection_in_refinery() -> None:
+    """auto2 §12.2 REJECTED_DUPLICATE: the refinery's dedupe layer may
+    reject a candidate as a duplicate — with the reason recorded."""
+    r = _record()
+    for status in ("approved_for_fetch", "fetched", "quarantined", "ingestion_scanned"):
+        r = advance_candidate(r, status, decided_by="pipeline", decided_at=NOW)  # type: ignore[arg-type]
+    r = advance_candidate(
+        r,
+        "rejected_duplicate",
+        decided_by="duplicate-detector",
+        decided_at=NOW,
+        rejection_reason="exact content digest matches existing production capability",
+    )
+    assert r.status == "rejected_duplicate"
+    assert r.rejection_reason is not None and "exact content digest" in r.rejection_reason
+
+
+def test_cancelled_is_terminal() -> None:
+    """auto2 §12.2 CANCELLED: a human may cancel a candidate anywhere
+    before terminal; cancelled is itself terminal."""
+    r = _record()
+    r = advance_candidate(r, "cancelled", decided_by="human:hien", decided_at=NOW)
+    assert r.status == "cancelled"
+    with pytest.raises(ValueError, match="terminal state"):
+        advance_candidate(r, "proposed", decided_by="anyone", decided_at=NOW)
+
+
+def test_refinery_cannot_be_skipped_into_canonicalized() -> None:
+    """ingestion_scanned → canonicalized directly is illegal: the refinery
+    decision (refinery_ready or ingestion_passed fast path) must be
+    explicit — no silent skip past dedupe."""
+    r = _record()
+    for status in ("approved_for_fetch", "fetched", "quarantined", "ingestion_scanned"):
+        r = advance_candidate(r, status, decided_by="pipeline", decided_at=NOW)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="illegal transition"):
+        advance_candidate(r, "canonicalized", decided_by="pipeline", decided_at=NOW)
