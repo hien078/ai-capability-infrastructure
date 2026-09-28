@@ -92,13 +92,19 @@ class EmbeddingRetriever:
         self, query: str, eligible: list[EligibleCandidate], *, limit: int = 30
     ) -> RetrievalResult:
         indexed = 0
+        # One bulk lookup for the whole eligible set: a per-candidate query
+        # would be O(catalog) roundtrips per route request (§16, §46).
+        documents = {
+            (d.capability_id, d.version): d
+            for d in self._embeddings.get_indexed_documents(
+                [(c.capability_id, c.version) for c in eligible], self._embedder.model_id
+            )
+        }
         pairs: list[tuple[str, str]] = []
         texts: dict[tuple[str, str], str] = {}
         for candidate in eligible:
             key = (candidate.capability_id, candidate.version)
-            document = self._embeddings.get_indexed_document(
-                candidate.capability_id, candidate.version, self._embedder.model_id
-            )
+            document = documents.get(key)
             if document is None or document.digest != candidate.digest:
                 version = self._capabilities.get_version(key[0], key[1])
                 if version is None:

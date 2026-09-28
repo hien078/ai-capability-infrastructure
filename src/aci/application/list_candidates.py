@@ -42,17 +42,32 @@ class ProductionCandidateLoader:
         *,
         status: ReleaseStatus | None = "active",
     ) -> list[EligibleCandidate]:
-        """Active releases on a channel → annotated candidates. Revoked drop out here."""
+        """Active releases on a channel → annotated candidates. Revoked drop out here.
+
+        Bulk reads: annotating the whole active catalog is a handful of queries,
+        never O(catalog) single-row roundtrips per request (§15, §46).
+        """
+        releases = self._releases.list_channel(channel, status=status)
+        if not releases:
+            return []
+        pairs = [(r.capability_id, r.version) for r in releases]
+        versions = {(v.capability_id, v.version): v for v in self._capabilities.get_versions(pairs)}
+        capabilities = {c.id: c for c in self._capabilities.get_capabilities([p[0] for p in pairs])}
+        securities = {
+            (a.capability_id, a.version): a for a in self._securities.get_assessments(pairs)
+        }
+        licenses = {(a.capability_id, a.version): a for a in self._licenses.get_assessments(pairs)}
+
         out: list[EligibleCandidate] = []
-        for release in self._releases.list_channel(channel, status=status):
-            version = self._capabilities.get_version(release.capability_id, release.version)
+        for release in releases:
+            version = versions.get((release.capability_id, release.version))
             if version is None:
                 continue
-            capability = self._capabilities.get_capability(release.capability_id)
+            capability = capabilities.get(release.capability_id)
             if capability is None:
                 continue
-            security = self._securities.get_assessment(release.capability_id, release.version)
-            license_ = self._licenses.get_assessment(release.capability_id, release.version)
+            security = securities.get((release.capability_id, release.version))
+            license_ = licenses.get((release.capability_id, release.version))
             out.append(
                 EligibleCandidate(
                     capability_id=release.capability_id,

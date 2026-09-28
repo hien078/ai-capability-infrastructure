@@ -94,6 +94,34 @@ class SqlAlchemyEmbeddingRepository:
                 return None
             return _document_of(row, model_id)
 
+    def get_indexed_documents(
+        self, pairs: list[tuple[str, str]], model_id: str
+    ) -> list[TrustedRoutingDocument]:
+        """Bulk read: one query for the whole eligible set.
+
+        The retriever checks every eligible candidate per request, so a
+        per-candidate lookup would be O(catalog) roundtrips per route.
+        """
+        if not pairs:
+            return []
+        with self._sessions() as session:
+            rows = (
+                session.query(EmbeddingDocumentRow)
+                .join(
+                    EmbeddingVectorRow,
+                    EmbeddingVectorRow.document_id == EmbeddingDocumentRow.document_id,
+                )
+                .filter(
+                    EmbeddingDocumentRow.doc_type == "routing",
+                    tuple_(EmbeddingDocumentRow.capability_id, EmbeddingDocumentRow.version).in_(
+                        pairs
+                    ),
+                    EmbeddingVectorRow.model_id == model_id,
+                )
+                .all()
+            )
+            return [_document_of(row, model_id) for row in rows]
+
     def search(
         self,
         query_vector: list[float],

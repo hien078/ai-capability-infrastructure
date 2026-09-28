@@ -1,5 +1,6 @@
 """License + security assessment persistence (Phase 4, plan §§24-25)."""
 
+from sqlalchemy import tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -94,6 +95,26 @@ class SqlAlchemyLicenseAssessmentRepository:
                 return None
             return _license_of(rows[-1])  # latest assessment wins
 
+    def get_assessments(self, pairs: list[tuple[str, str]]) -> list[LicenseAssessment]:
+        """Bulk read with the same latest-wins semantics as get_assessment."""
+        if not pairs:
+            return []
+        with self._sessions() as session:
+            rows = (
+                session.query(LicenseAssessmentRow)
+                .filter(
+                    tuple_(LicenseAssessmentRow.capability_id, LicenseAssessmentRow.version).in_(
+                        pairs
+                    )
+                )
+                .order_by(LicenseAssessmentRow.assessed_at, LicenseAssessmentRow.assessment_id)
+                .all()
+            )
+            latest: dict[tuple[str, str], LicenseAssessmentRow] = {}
+            for row in rows:  # ordered: the last row per pair is the latest
+                latest[(row.capability_id, row.version)] = row
+            return [_license_of(row) for row in latest.values()]
+
 
 class SqlAlchemySecurityAssessmentRepository:
     def __init__(self, sessions: sessionmaker[Session]) -> None:
@@ -143,3 +164,23 @@ class SqlAlchemySecurityAssessmentRepository:
             if not rows:
                 return None
             return _security_of(rows[-1])  # latest scan wins
+
+    def get_assessments(self, pairs: list[tuple[str, str]]) -> list[SecurityAssessment]:
+        """Bulk read with the same latest-wins semantics as get_assessment."""
+        if not pairs:
+            return []
+        with self._sessions() as session:
+            rows = (
+                session.query(SecurityAssessmentRow)
+                .filter(
+                    tuple_(SecurityAssessmentRow.capability_id, SecurityAssessmentRow.version).in_(
+                        pairs
+                    )
+                )
+                .order_by(SecurityAssessmentRow.scanned_at, SecurityAssessmentRow.assessment_id)
+                .all()
+            )
+            latest: dict[tuple[str, str], SecurityAssessmentRow] = {}
+            for row in rows:  # ordered: the last row per pair is the latest
+                latest[(row.capability_id, row.version)] = row
+            return [_security_of(row) for row in latest.values()]

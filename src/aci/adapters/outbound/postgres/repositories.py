@@ -7,6 +7,7 @@ UPDATE on capability_versions as a second line of defense.
 
 from typing import Any
 
+from sqlalchemy import tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -161,6 +162,30 @@ class SqlAlchemyCapabilityRepository:
         with self._sessions() as session:
             row = session.get(CapabilityVersionRow, (capability_id, version))
             return _version_of(row) if row is not None else None
+
+    def get_versions(self, pairs: list[tuple[str, str]]) -> list[CapabilityVersion]:
+        """Bulk read: one query for the whole eligible set (O(1) roundtrips)."""
+        if not pairs:
+            return []
+        with self._sessions() as session:
+            rows = (
+                session.query(CapabilityVersionRow)
+                .filter(
+                    tuple_(CapabilityVersionRow.capability_id, CapabilityVersionRow.version).in_(
+                        pairs
+                    )
+                )
+                .all()
+            )
+            return [_version_of(r) for r in rows]
+
+    def get_capabilities(self, ids: list[str]) -> list[Capability]:
+        """Bulk read of registry identities (scope annotation, §15)."""
+        if not ids:
+            return []
+        with self._sessions() as session:
+            rows = session.query(CapabilityRow).filter(CapabilityRow.id.in_(ids)).all()
+            return [_capability_of(r) for r in rows]
 
     def list_versions(self, capability_id: str) -> list[CapabilityVersion]:
         with self._sessions() as session:

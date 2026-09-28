@@ -153,6 +153,15 @@ class FakeEmbeddings:
             return None
         return self.docs.get((capability_id, version))
 
+    def get_indexed_documents(
+        self, pairs: list[tuple[str, str]], model_id: str
+    ) -> list[TrustedRoutingDocument]:
+        return [
+            doc
+            for (cap, ver), doc in self.docs.items()
+            if (cap, ver, model_id) in self.vectors and (cap, ver) in set(pairs)
+        ]
+
     def search(
         self,
         query_vector: list[float],
