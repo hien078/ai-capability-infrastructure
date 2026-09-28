@@ -14,6 +14,7 @@ import pytest
 from aci.providers.evaluation.repo_understanding import (
     MAX_CONTEXT_FILES,
     ArchitectureAnalyst,
+    CapabilityMiner,
     RepositoryUnderstandingError,
     map_repository,
     select_context,
@@ -71,40 +72,25 @@ def test_context_budget_is_capped(tmp_path: Path) -> None:
     assert len(selected) <= MAX_CONTEXT_FILES
 
 
-def test_analyst_raises_on_unparseable_never_fabricates() -> None:
+def test_analyst_raises_on_unparseable_never_fabricates(monkeypatch: pytest.MonkeyPatch) -> None:
     """§74: an unparseable model output raises — it never becomes a
     fabricated architecture map."""
-
-    class FakeResp:
-        text = "not json at all"
-
-        def post(self, *a, **kw):  # noqa: ANN001
-            return FakeResp()
-
-    analyst = ArchitectureAnalyst.__new__(ArchitectureAnalyst)
-    analyst._base_url = "http://x"
-    analyst._api_key = ""
-    analyst._model = "m"
-    analyst._client = None  # type: ignore[attr-defined]
-    with pytest.raises((RepositoryUnderstandingError, Exception)):
-        # _complete will fail on the fake transport — any failure mode
-        # must surface as an exception, never silent empty output
-        try:
-            analyst.analyze([{"path": "x", "content": "y"}])
-        except RepositoryUnderstandingError:
-            raise
-        except Exception as err:
-            raise RepositoryUnderstandingError("transport failed") from err
+    analyst = ArchitectureAnalyst(base_url="http://unused")
+    monkeypatch.setattr(analyst, "_complete", lambda system, user: "not json at all")
+    with pytest.raises(RepositoryUnderstandingError, match="unparseable"):
+        analyst.analyze([{"path": "x", "content": "y"}])
 
 
-def test_miner_rejects_non_array() -> None:
+def test_miner_rejects_non_array(monkeypatch: pytest.MonkeyPatch) -> None:
     """The miner's contract is a JSON ARRAY of capabilities — an object
     response is a contract violation and must raise."""
-    # simulate the parse path directly with a non-array payload
-    import json as _json
+    miner = CapabilityMiner(base_url="http://unused")
+    monkeypatch.setattr(miner, "_complete", lambda system, user: '{"not": "an array"}')
+    with pytest.raises(RepositoryUnderstandingError, match="non-array"):
+        miner.mine([{"path": "x", "content": "y"}])
 
-    raw = '{"not": "an array"}'
-    with pytest.raises(RepositoryUnderstandingError):
-        data, _ = _json.JSONDecoder().raw_decode(raw)
-        if not isinstance(data, list):
-            raise RepositoryUnderstandingError("miner returned a non-array")
+
+def test_miner_parses_fenced_array(monkeypatch: pytest.MonkeyPatch) -> None:
+    miner = CapabilityMiner(base_url="http://unused")
+    monkeypatch.setattr(miner, "_complete", lambda system, user: '```json\n[{"name": "a"}]\n```')
+    assert miner.mine([{"path": "x", "content": "y"}]) == [{"name": "a"}]
