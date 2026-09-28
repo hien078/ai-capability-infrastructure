@@ -5,13 +5,19 @@ bit, then L2-normalized. Deterministic across processes (never Python's
 randomized ``hash``), fully offline, and good enough for baseline semantic
 retrieval. A real embedding model plugs in behind the same ``Embedder``
 protocol later; its vectors coexist via ``model_id``.
+
+v2 (§75 step 23, benchmark ``smoke-10-clean-catalog``): tokens are folded
+by the shared domain normalizer before hashing — raw tokens could not
+bridge even trivial morphology ("failures" vs "test failure"), capping
+smoke-set recall at tie-luck. The fold is deterministic, so v2 vectors are
+reproducible; the model_id bump lets them coexist with any v1 vectors
+(§46: cache keys carry the model_id).
 """
 
 import hashlib
-import re
 from math import sqrt
 
-_TOKEN = re.compile(r"[a-z0-9]+")
+from aci.domain.routing.text import normalize_tokens
 
 DEFAULT_DIMS = 256
 
@@ -26,7 +32,7 @@ class HashingEmbedder:
 
     @property
     def model_id(self) -> str:
-        return f"hashing-{self._dims}-v1"
+        return f"hashing-{self._dims}-v2"
 
     @property
     def dims(self) -> int:
@@ -37,7 +43,7 @@ class HashingEmbedder:
 
     def _embed_one(self, text: str) -> list[float]:
         vector = [0.0] * self._dims
-        for token in _TOKEN.findall(text.lower()):
+        for token in normalize_tokens(text):
             digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
             index = int.from_bytes(digest[:4], "little") % self._dims
             sign = 1.0 if digest[4] & 1 else -1.0

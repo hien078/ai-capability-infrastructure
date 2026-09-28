@@ -14,9 +14,11 @@ Signals (weights sum to 1.0):
 
 The interface (CapabilityReranker) is swappable: an embedding or LLM
 reranker can replace this without touching the pipeline (§52 acceptance).
-"""
 
-import re
+v2 (§75 step 23): token_overlap folds tokens with the shared domain
+normalizer — the same one the embedder uses — so the signal bridges
+morphology ("tests" vs "test") instead of exact-match only.
+"""
 
 from pydantic import BaseModel
 
@@ -28,11 +30,10 @@ from aci.domain.routing.models import (
     ScoredCandidate,
     TaskDescriptor,
 )
+from aci.domain.routing.text import normalize_tokens
 
 IMPLEMENTATION = "heuristic-reranker"
-VERSION = "1"
-
-_TOKEN = re.compile(r"[a-z0-9]+")
+VERSION = "2"
 
 _TRUST_PRIOR: dict[str, float] = {"verified": 1.0, "standard": 0.6, "untrusted": 0.3}
 
@@ -49,7 +50,7 @@ class HeuristicWeights(BaseModel):
 
 
 def _tokens(text: str) -> set[str]:
-    return set(_TOKEN.findall(text.lower()))
+    return set(normalize_tokens(text))
 
 
 def _clamp(value: float) -> float:

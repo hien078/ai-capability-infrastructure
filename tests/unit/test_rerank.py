@@ -88,7 +88,7 @@ def test_rerank_records_reasons_and_trace() -> None:
         context(),
     )
     assert result.trace.implementation == "heuristic-reranker"
-    assert result.trace.version == "1"
+    assert result.trace.version == "2"
     assert result.trace.input_count == 1
     assert result.trace.output_count == 1
     top = result.ranked[0]

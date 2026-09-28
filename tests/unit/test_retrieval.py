@@ -124,7 +124,7 @@ def test_embedder_similarity_tracks_shared_tokens() -> None:
 
 
 def test_embedder_model_id_encodes_dims() -> None:
-    assert HashingEmbedder(dims=64).model_id == "hashing-64-v1"
+    assert HashingEmbedder(dims=64).model_id == "hashing-64-v2"
     with pytest.raises(ValueError):
         HashingEmbedder(dims=0)
 
@@ -247,7 +247,7 @@ def test_retriever_searches_only_eligible_pairs() -> None:
     result = retriever.retrieve("q", eligible)
     pairs, model_id, limit = embeddings.search_calls[0]
     assert set(pairs) == {("cap-x", "1.0.0")}
-    assert model_id == "hashing-256-v1"
+    assert model_id == "hashing-256-v2"
     assert limit == 30
     assert result.trace.searched_count == 1
 

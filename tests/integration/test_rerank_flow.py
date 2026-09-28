@@ -114,7 +114,7 @@ def test_full_chain_rerank_ranks_relevant_skill_first(
 
     # §52: reranker implementation/version recorded in trace.
     assert result.trace.implementation == "heuristic-reranker"
-    assert result.trace.version == "1"
+    assert result.trace.version == "2"
     assert result.trace.input_count == 3
     assert result.trace.output_count == 3
 
