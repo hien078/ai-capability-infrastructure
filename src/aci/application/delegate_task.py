@@ -156,3 +156,25 @@ class ProfileDrivenAgentRuntime:
             self._tasks.put_message(message)
         for artifact in result.artifacts:
             self._tasks.put_artifact(artifact)
+
+
+class UnconfiguredExecutor:
+    """Default executor when no deployment intelligence is plugged in (§50).
+
+    Fails every task with a clear, caller-visible reason: the A2A wire surface
+    stays real and testable, and plugging a model client (or human operator)
+    into the runtime replaces exactly this object.
+    """
+
+    def execute(
+        self,
+        task: AgentTask,
+        profile: AgentProfile,
+        skills: list[SkillGrant],
+        *,
+        now: datetime,
+    ) -> ExecutorResult:
+        return ExecutorResult(
+            status="failed",
+            detail="no agent executor configured — plug one into the runtime wiring",
+        )

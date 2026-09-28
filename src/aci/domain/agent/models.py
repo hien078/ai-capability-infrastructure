@@ -174,3 +174,8 @@ class ExecutorResult(BaseModel):
     messages: list[TaskMessage] = Field(default_factory=list)
     artifacts: list[TaskArtifact] = Field(default_factory=list)
     detail: str | None = None
+
+
+def is_terminal(status: TaskStatus) -> bool:
+    """True when a task state accepts no further transitions (§30.1)."""
+    return not _TASK_TRANSITIONS[status]

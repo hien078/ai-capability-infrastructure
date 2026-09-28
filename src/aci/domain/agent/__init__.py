@@ -13,6 +13,7 @@ from aci.domain.agent.models import (
     TaskMessage,
     TaskStatus,
     advance_task,
+    is_terminal,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "TaskMessage",
     "TaskStatus",
     "advance_task",
+    "is_terminal",
 ]

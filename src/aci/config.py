@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     #: fastembed model name (only used when embedder="fastembed"). Must
     #: emit EMBEDDING_DIMS (384) — bge-small-en-v1.5 does.
     embedder_model: str = "BAAI/bge-small-en-v1.5"
+    #: Base URL this service is reachable at (A2A Agent Card interface URL,
+    #: V3 §56; deployment overrides via ACI_SERVICE_URL).
+    service_url: str = "http://localhost:8000"
 
 
 settings = Settings()

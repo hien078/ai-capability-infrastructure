@@ -32,12 +32,15 @@ from aci.adapters.outbound.postgres.repositories import (
     SqlAlchemyReleaseRepository,
 )
 from aci.adapters.outbound.postgres.route_runs import SqlAlchemyRouteRunRepository
+from aci.adapters.outbound.postgres.tasks import SqlAlchemyTaskRepository
+from aci.application.delegate_task import ProfileDrivenAgentRuntime, UnconfiguredExecutor
 from aci.application.list_candidates import ProductionCandidateLoader
 from aci.application.report_outcome import ReportOutcomeService
 from aci.application.resolve_capability import ResolveCapabilityService
 from aci.application.route_capabilities import RouteCapabilitiesService
 from aci.application.search_capabilities import SearchCapabilitiesService
 from aci.config import Settings
+from aci.domain.agent.models import AgentProfile
 from aci.evaluation.harness import BenchmarkHarness
 from aci.routing.composer import MinimalBundleComposer
 from aci.routing.dependencies import DefaultDependencyResolver
@@ -116,6 +119,13 @@ class Container:
         self.benchmark_store = benchmark_store
         self.route_runs = route_runs
         self.bundles = bundles
+        # V3 agent platform (§56): delegated-task persistence + the runtime.
+        # Profiles are deployment DATA (§56.1) — empty until configured; the
+        # UnconfiguredExecutor keeps the A2A surface honest until a real
+        # executor (model client / human operator) is plugged in.
+        self.tasks: SqlAlchemyTaskRepository = SqlAlchemyTaskRepository(sessions)
+        self.agent_runtime = ProfileDrivenAgentRuntime(self.tasks, releases, UnconfiguredExecutor())
+        self.agent_profiles: dict[str, AgentProfile] = {}
         # Raw protocol handles, for inbound adapters that project the registry
         # directly (MCP skills extension reads releases/artifacts/objects).
         self.releases = releases

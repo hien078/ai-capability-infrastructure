@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import create_engine, text
 
+from aci.adapters.inbound.a2a.gateway import A2AGateway, create_a2a_router
 from aci.adapters.inbound.opencode import catalog as opencode_catalog
 from aci.adapters.inbound.rest import bundles as rest_bundles
 from aci.adapters.inbound.rest import capabilities as rest_capabilities
@@ -41,6 +42,18 @@ def create_app(container: Container | None = None) -> FastAPI:
     app.include_router(rest_bundles.router)
     app.include_router(rest_outcomes.router)
     app.include_router(opencode_catalog.router)
+    app.include_router(
+        create_a2a_router(
+            A2AGateway(
+                container.agent_runtime,
+                container.tasks,
+                container.releases,
+                container.capabilities,
+                container.agent_profiles,
+                service_url=settings.service_url,
+            )
+        )
+    )
 
     @app.get("/health")
     def health() -> dict[str, str]:
