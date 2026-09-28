@@ -5,11 +5,13 @@ implementations) and composes the application services, which depend on
 protocols only. Nothing here reaches into domain internals beyond models.
 """
 
+import json
 from pathlib import Path
 
 from fastapi import Request
 
 from aci.adapters.inbound.opencode.catalog import CatalogProjection
+from aci.adapters.outbound.model_provider.executor import OpenAICompatExecutor
 from aci.adapters.outbound.model_provider.hashing import HashingEmbedder
 from aci.adapters.outbound.model_provider.semantic import FastEmbedEmbedder
 from aci.adapters.outbound.object_store.fs import FsObjectStore
@@ -35,6 +37,7 @@ from aci.adapters.outbound.postgres.route_runs import SqlAlchemyRouteRunReposito
 from aci.adapters.outbound.postgres.tasks import SqlAlchemyTaskRepository
 from aci.application.delegate_task import ProfileDrivenAgentRuntime, UnconfiguredExecutor
 from aci.application.list_candidates import ProductionCandidateLoader
+from aci.application.protocols import AgentExecutor
 from aci.application.report_outcome import ReportOutcomeService
 from aci.application.resolve_capability import ResolveCapabilityService
 from aci.application.route_capabilities import RouteCapabilitiesService
@@ -61,6 +64,42 @@ def _build_embedder(settings: Settings) -> HashingEmbedder | FastEmbedEmbedder:
     if settings.embedder != "hashing":
         raise ValueError(f"unknown ACI_EMBEDDER {settings.embedder!r} (hashing|fastembed)")
     return HashingEmbedder()
+
+
+def _load_agent_profiles(path: str) -> dict[str, AgentProfile]:
+    """Profiles are deployment DATA (§56.1): a JSON file of AgentProfile records.
+
+    Accepts a bare list or ``{"profiles": [...]}``; every record is validated
+    by the domain model (delegation-only execution mode included). An empty
+    path means no profiles — the A2A surface then answers with clear
+    unknown-profile errors instead of guessing.
+    """
+    if not path:
+        return {}
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    records = raw["profiles"] if isinstance(raw, dict) else raw
+    if not isinstance(records, list):
+        raise ValueError(f"{path}: expected a JSON list of profile records")
+    profiles = [AgentProfile.model_validate(r) for r in records]
+    return {p.profile_id: p for p in profiles}
+
+
+def _build_executor(
+    settings: Settings,
+    capabilities: SqlAlchemyCapabilityRepository,
+    artifacts: SqlAlchemyArtifactStore,
+    objects: FsObjectStore,
+) -> AgentExecutor:
+    """Pick the delegated-task executor (§56.1): a model client, or the honest null."""
+    if settings.agent_model_base_url:
+        return OpenAICompatExecutor(
+            base_url=settings.agent_model_base_url,
+            api_key=settings.agent_model_api_key,
+            capabilities=capabilities,
+            artifacts=artifacts,
+            objects=objects,
+        )
+    return UnconfiguredExecutor()
 
 
 class Container:
@@ -120,12 +159,18 @@ class Container:
         self.route_runs = route_runs
         self.bundles = bundles
         # V3 agent platform (§56): delegated-task persistence + the runtime.
-        # Profiles are deployment DATA (§56.1) — empty until configured; the
-        # UnconfiguredExecutor keeps the A2A surface honest until a real
-        # executor (model client / human operator) is plugged in.
+        # Profiles are deployment DATA (§56.1) loaded from ACI_AGENT_PROFILES;
+        # the executor is a model client when ACI_AGENT_MODEL_BASE_URL is set,
+        # otherwise the UnconfiguredExecutor keeps the A2A surface honest.
         self.tasks: SqlAlchemyTaskRepository = SqlAlchemyTaskRepository(sessions)
-        self.agent_runtime = ProfileDrivenAgentRuntime(self.tasks, releases, UnconfiguredExecutor())
-        self.agent_profiles: dict[str, AgentProfile] = {}
+        self.agent_runtime = ProfileDrivenAgentRuntime(
+            self.tasks,
+            releases,
+            _build_executor(settings, capabilities, artifacts, objects),
+        )
+        self.agent_profiles: dict[str, AgentProfile] = _load_agent_profiles(
+            settings.agent_profiles_path
+        )
         # Raw protocol handles, for inbound adapters that project the registry
         # directly (MCP skills extension reads releases/artifacts/objects).
         self.releases = releases

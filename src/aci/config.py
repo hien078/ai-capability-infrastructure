@@ -20,6 +20,15 @@ class Settings(BaseSettings):
     #: Base URL this service is reachable at (A2A Agent Card interface URL,
     #: V3 §56; deployment overrides via ACI_SERVICE_URL).
     service_url: str = "http://localhost:8000"
+    #: OpenAI-compatible endpoint backing the delegated-task executor (V3
+    #: §56.1). Empty = no executor configured (UnconfiguredExecutor keeps the
+    #: A2A surface honest); set to plug a model client into the runtime.
+    agent_model_base_url: str = ""
+    #: API key for the executor endpoint ("" = no Authorization header).
+    agent_model_api_key: str = ""
+    #: JSON file holding AgentProfile records (deployment DATA, §56.1) — a
+    #: bare list or {"profiles": [...]}. Empty = no profiles configured.
+    agent_profiles_path: str = ""
 
 
 settings = Settings()

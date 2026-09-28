@@ -1,0 +1,19 @@
+{
+  "profiles": [
+    {
+      "profile_id": "aci-coder-default",
+      "version": "1",
+      "model_profile": "OneNexus/glm-5.3",
+      "skill_policy": {
+        "required": ["systematic-debugging", "verification-before-completion"]
+      },
+      "budget": { "max_tokens": 4096, "max_wall_time_seconds": 300 },
+      "execution_policy": {
+        "execution_mode": "delegated_task",
+        "side_effect_class": "read_only",
+        "can_write_repository": false
+      },
+      "created_at": "2026-09-28T00:00:00Z"
+    }
+  ]
+}
