@@ -134,6 +134,37 @@ SOURCES: list[SkillSource] = [
         commit="33375500bcea98d610eb30ce10ac4e59b89c390d",
         skills=("skills/doc-coauthoring",),
     ),
+    # V2 targeted corpus growth (§55, 2026-09-28): the §80 measurement found
+    # the value chain corpus-limited — no debugging/testing-domain skills
+    # beyond the generic discipline set. These two repos fill that gap.
+    # Content security-reviewed before ingestion (no injection, no unsafe
+    # instructions; scripts are inert digest-pinned bytes per §61).
+    SkillSource(
+        repo="https://github.com/mxyhi/ok-skills.git",
+        commit="7de464066579c539f0ec0342abef83e8a1e994c2",
+        # diagnosing-bugs/codebase-design carry per-skill MIT (Matt Pocock);
+        # tdd falls back to the repo-root Apache-2.0.
+        # improve-codebase-architecture is deliberately NOT ingested: it
+        # declares `disable-model-invocation: true` and V1 routing cannot
+        # honor that author intent.
+        skills=(
+            "diagnosing-bugs",
+            "tdd",
+            "codebase-design",
+        ),
+    ),
+    SkillSource(
+        repo="https://github.com/seb1n/awesome-ai-agent-skills.git",
+        commit="75865a5d037a4cdaa7f409a4ec14ab9b0292920b",
+        # MIT (repo root). prompt-injection-defense is included as
+        # platform-domain coverage (§16.1/§17.1 concern).
+        skills=(
+            "code-and-development/debugging",
+            "code-and-development/testing",
+            "code-and-development/refactoring",
+            "agent-security/prompt-injection-defense",
+        ),
+    ),
 ]
 
 SECURITY_SCANNER_VERSION = "manual-review:0.1.0"
