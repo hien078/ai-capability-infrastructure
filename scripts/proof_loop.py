@@ -192,6 +192,261 @@ TASKS = [
     ),
 ]
 
+# Multi-file fixtures (§80 value-boundary hunt, round 3): the two earlier
+# rounds hit a ceiling (A 10/10 = E 10/10) on single-file tasks, so these
+# fixtures move the difficulty axis the plan points at next — cross-module
+# reasoning. The bug lives in the SEAM between modules (shared module state,
+# stage ordering, cache invalidation, exception translation, aliasing across
+# a bus), so a symptom patch in one file cannot pass: the agent must trace a
+# call across 2–3 files to find the root cause. Each fixture also pins the
+# obvious-but-wrong fix out via a second assertion.
+MULTI_TASKS = [
+    _task(
+        "multi-config-precedence",
+        {
+            "defaults.py": ('DEFAULTS = {"retries": 3, "timeout": 30}\n'),
+            "config.py": (
+                "from defaults import DEFAULTS\n\n\n"
+                "def load(overrides: dict) -> dict:\n"
+                '    """Build a config: `overrides` win over DEFAULTS.\n\n'
+                "    DEFAULTS is shared module state — one load() call must\n"
+                '    never be visible to the next."""\n'
+                "    config = DEFAULTS\n"
+                "    config.update(overrides)\n"
+                "    return config\n"
+            ),
+            "app.py": (
+                "from config import load\n\n\n"
+                "def connect(overrides: dict | None = None) -> dict:\n"
+                "    return load(overrides or {})\n"
+            ),
+            "test_config.py": (
+                "from defaults import DEFAULTS\n\n"
+                "from app import connect\n\n\n"
+                "def test_overrides_win_and_defaults_untouched() -> None:\n"
+                '    cfg = connect({"timeout": 5})\n'
+                '    assert cfg["timeout"] == 5\n'
+                '    assert cfg["retries"] == 3\n\n\n'
+                "def test_loads_are_isolated() -> None:\n"
+                '    connect({"retries": 99})\n'
+                "    cfg = connect()\n"
+                '    assert cfg["retries"] == 3, cfg\n'
+                '    assert DEFAULTS == {"retries": 3, "timeout": 30}\n'
+            ),
+        },
+        "The tests in test_config.py fail. Find the root cause before proposing "
+        "any fix, then fix it and make the whole test suite green. Show the "
+        "verification output.",
+    ),
+    _task(
+        "multi-pipeline-ordering",
+        {
+            "parse.py": (
+                "class Record:\n"
+                "    def __init__(self, raw: str) -> None:\n"
+                "        self.raw = raw\n"
+                '        self.valid = raw.strip() != "" and not raw.startswith("#")\n\n\n'
+                "def parse(line: str) -> Record:\n"
+                "    return Record(line)\n"
+            ),
+            "validate.py": (
+                "from parse import Record\n\n\n"
+                "def validate(record: Record) -> bool:\n"
+                '    """True when the record should be KEPT."""\n'
+                "    return record.valid\n"
+            ),
+            "pipeline.py": (
+                "from parse import parse\n"
+                "from validate import validate\n\n\n"
+                "def run(lines: list[str]) -> list[str]:\n"
+                '    """Parse every line, keep only the valid records."""\n'
+                "    records = [parse(line) for line in lines]\n"
+                "    return [r.raw for r in records if not validate(r)]\n"
+            ),
+            "test_pipeline.py": (
+                "from pipeline import run\n\n\n"
+                "def test_valid_lines_are_kept() -> None:\n"
+                '    out = run(["alpha", "beta"])\n'
+                '    assert out == ["alpha", "beta"]\n\n\n'
+                "def test_invalid_lines_are_dropped() -> None:\n"
+                '    out = run(["alpha", "", "  ", "# comment", "beta"])\n'
+                '    assert out == ["alpha", "beta"]\n'
+            ),
+        },
+        "The tests in test_pipeline.py fail. Find the root cause before "
+        "proposing any fix, then fix it and make the whole test suite green. "
+        "Show the verification output.",
+    ),
+    _task(
+        "multi-cache-invalidation",
+        {
+            "store.py": (
+                "class Store:\n"
+                "    def __init__(self) -> None:\n"
+                "        self._data: dict[str, str] = {}\n\n"
+                "    def get(self, key: str) -> str | None:\n"
+                "        return self._data.get(key)\n\n"
+                "    def put(self, key: str, value: str) -> None:\n"
+                "        self._data[key] = value\n"
+            ),
+            "cache.py": (
+                "from store import Store\n\n\n"
+                "class ReadCache:\n"
+                '    """Caches Store reads. A put() through the cache must\n'
+                "    always be visible to the next get() — and repeated reads\n"
+                '    of an unchanged key must be served from the cache."""\n\n'
+                "    def __init__(self, store: Store) -> None:\n"
+                "        self._store = store\n"
+                "        self._cache: dict[str, str | None] = {}\n"
+                "        self.hits = 0\n\n"
+                "    def get(self, key: str) -> str | None:\n"
+                "        if key in self._cache:\n"
+                "            self.hits += 1\n"
+                "            return self._cache[key]\n"
+                "        value = self._store.get(key)\n"
+                "        self._cache[key] = value\n"
+                "        return value\n\n"
+                "    def put(self, key: str, value: str) -> None:\n"
+                "        self._store.put(key, value)\n"
+            ),
+            "service.py": (
+                "from cache import ReadCache\n"
+                "from store import Store\n\n\n"
+                "def make_service() -> ReadCache:\n"
+                "    return ReadCache(Store())\n"
+            ),
+            "test_service.py": (
+                "from service import make_service\n\n\n"
+                "def test_put_is_visible_after_cached_read() -> None:\n"
+                "    svc = make_service()\n"
+                '    svc.put("k", "v1")\n'
+                '    assert svc.get("k") == "v1"\n'
+                '    svc.put("k", "v2")\n'
+                '    assert svc.get("k") == "v2"\n\n\n'
+                "def test_repeated_reads_are_cached() -> None:\n"
+                "    svc = make_service()\n"
+                '    svc.put("k", "v")\n'
+                '    svc.get("k")\n'
+                '    svc.get("k")\n'
+                '    svc.get("k")\n'
+                "    assert svc.hits >= 2, svc.hits\n"
+            ),
+        },
+        "The tests in test_service.py fail. Find the root cause before "
+        "proposing any fix, then fix it and make the whole test suite green. "
+        "Show the verification output.",
+    ),
+    _task(
+        "multi-error-translation",
+        {
+            "repo.py": (
+                "class NotFound(Exception):\n"
+                "    pass\n\n\n"
+                "def fetch(key: str) -> str:\n"
+                '    DATA = {"a": "alpha"}\n'
+                "    if not isinstance(key, str):\n"
+                '        raise TypeError(f"key must be str, got {type(key).__name__}")\n'
+                "    if key not in DATA:\n"
+                "        raise NotFound(key)\n"
+                "    return DATA[key]\n"
+            ),
+            "service.py": (
+                "from repo import NotFound, fetch\n\n\n"
+                "class ServiceError(Exception):\n"
+                "    pass\n\n\n"
+                "def get(key: str) -> str:\n"
+                '    """Contract: a missing key raises ServiceError naming the\n'
+                "    key. Programming errors (TypeError, ...) are NEVER\n"
+                '    translated — they must propagate unchanged."""\n'
+                "    try:\n"
+                "        return fetch(key)\n"
+                "    except Exception as exc:\n"
+                '        raise ServiceError(f"missing: {exc}") from exc\n'
+            ),
+            "api.py": (
+                "from service import ServiceError, get\n\n\n"
+                "def status_for(key: str) -> int:\n"
+                "    try:\n"
+                "        get(key)\n"
+                "        return 200\n"
+                "    except ServiceError:\n"
+                "        return 404\n"
+            ),
+            "test_api.py": (
+                "import pytest\n\n"
+                "from api import status_for\n"
+                "from repo import NotFound\n"
+                "from service import ServiceError, get\n\n\n"
+                "def test_missing_key_is_service_error() -> None:\n"
+                "    with pytest.raises(ServiceError) as exc_info:\n"
+                '        get("nope")\n'
+                '    assert "nope" in str(exc_info.value)\n\n\n'
+                "def test_notfound_never_leaks_past_service() -> None:\n"
+                "    with pytest.raises(ServiceError):\n"
+                '        get("nope")\n\n\n'
+                "def test_programming_errors_propagate() -> None:\n"
+                "    with pytest.raises(TypeError):\n"
+                "        get(None)\n\n\n"
+                "def test_status_codes() -> None:\n"
+                '    assert status_for("a") == 200\n'
+                '    assert status_for("nope") == 404\n'
+            ),
+        },
+        "The tests in test_api.py fail. Find the root cause before proposing "
+        "any fix, then fix it and make the whole test suite green. Show the "
+        "verification output.",
+    ),
+    _task(
+        "multi-event-aliasing",
+        {
+            "events.py": (
+                "def make_event(name: str, payload: dict) -> dict:\n"
+                '    return {"name": name, "payload": payload}\n'
+            ),
+            "bus.py": (
+                "from events import make_event\n\n\n"
+                "class EventBus:\n"
+                '    """Delivers events to subscribers.\n\n'
+                "    A subscriber mutating the event it receives must never\n"
+                "    corrupt the bus's own record of what was emitted, and\n"
+                '    never leak into other subscribers."""\n\n'
+                "    def __init__(self) -> None:\n"
+                "        self._subs: list = []\n"
+                "        self.last_event: dict | None = None\n\n"
+                "    def subscribe(self, fn) -> None:\n"
+                "        self._subs.append(fn)\n\n"
+                "    def emit(self, name: str, payload: dict) -> None:\n"
+                "        event = make_event(name, payload)\n"
+                "        self.last_event = event\n"
+                "        for fn in self._subs:\n"
+                "            fn(event)\n"
+            ),
+            "handlers.py": (
+                "from bus import EventBus\n\n\ndef make_bus() -> EventBus:\n    return EventBus()\n"
+            ),
+            "test_bus.py": (
+                "from handlers import make_bus\n\n\n"
+                "def test_subscriber_mutation_is_isolated() -> None:\n"
+                "    bus = make_bus()\n"
+                "    seen = []\n"
+                '    bus.subscribe(lambda e: e["payload"].update({"hacked": True}))\n'
+                "    bus.subscribe(lambda e: seen.append(e))\n"
+                '    bus.emit("deploy", {"app": "web"})\n'
+                '    assert seen == [{"name": "deploy", "payload": {"app": "web"}}]\n\n\n'
+                "def test_last_event_records_what_was_emitted() -> None:\n"
+                "    bus = make_bus()\n"
+                '    bus.subscribe(lambda e: e["payload"].update({"hacked": True}))\n'
+                '    bus.emit("deploy", {"app": "web"})\n'
+                '    assert bus.last_event["payload"] == {"app": "web"}\n'
+                '    assert bus.last_event["name"] == "deploy"\n'
+            ),
+        },
+        "The tests in test_bus.py fail. Find the root cause before proposing "
+        "any fix, then fix it and make the whole test suite green. Show the "
+        "verification output.",
+    ),
+]
+
 # Harder fixtures (§80 value-boundary hunt): families where naked agents
 # commonly fail — aliasing, tuple-ordering, exception translation, boundary
 # semantics, defensive copying. Each pins the OBVIOUS-but-wrong fix out via a
@@ -461,7 +716,7 @@ def latest_route(bundle_db: str, since: float) -> dict[str, str] | None:
             ),
             {"since": datetime.fromtimestamp(since, tz=UTC)},
         ).fetchone()
-    return {"route_run_id": row[0], "bundle_id": row[1]} if row else None
+    return {"route_run_id": str(row[0]), "bundle_id": str(row[1])} if row else None
 
 
 def report_outcome(base_url: str, ids: dict[str, str], passed: bool) -> str | None:
@@ -522,13 +777,14 @@ def main() -> int:
     parser.add_argument("--only", help="run a single task by name")
     parser.add_argument(
         "--level",
-        choices=["smoke", "hard"],
+        choices=["smoke", "hard", "multi"],
         default="smoke",
-        help="task set: smoke (5 easy bugs) or hard (§80 value-boundary hunt)",
+        help="task set: smoke (5 easy bugs), hard (§80 value-boundary hunt), "
+        "or multi (cross-module reasoning — the ceiling-breaker round)",
     )
     args = parser.parse_args()
 
-    task_set = HARD_TASKS if args.level == "hard" else TASKS
+    task_set = {"hard": HARD_TASKS, "multi": MULTI_TASKS}.get(args.level, TASKS)
 
     args.workdir.mkdir(parents=True, exist_ok=True)
     REPORT_ROOT.mkdir(parents=True, exist_ok=True)
