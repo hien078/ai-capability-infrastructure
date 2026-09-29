@@ -24,6 +24,9 @@
   `011-modular-monolith.md` (plan §2.9).
 - ADR-012 — No automatic production evolution; promotion qua gates →
   `012-no-automatic-production-evolution.md` (plan §§24, 37–38, 58).
+- ADR-013 — Automation đến staging + canary; human giữ production →
+  `013-acquisition-tiers-and-canary.md` (plans auto/auto2/crawl; user decision
+  2026-09-29; refines ADR-012 — bất biến production-via-human giữ nguyên).
 
-Toàn bộ 12 ADR đã Accepted. Mọi ADR có Context/Decision/Consequences/Rejected/Verification
+Toàn bộ 13 ADR đã Accepted. Mọi ADR có Context/Decision/Consequences/Rejected/Verification
 và test tương ứng trong `tests/`.
