@@ -1,5 +1,15 @@
 # crawl.md — Adaptive Acquisition & Excellence Intelligence Plan
 
+> **Status: FROZEN (2026-09-29, user decision — see AGENTS.md "Freeze decision").**
+> This is a north-star document for a target scale (1000+ capabilities, real traffic,
+> multi-source discovery) that the platform has not reached. The acquisition era built
+> from it (auto.md → auto2.md → crawl.md) is frozen: stop building, do not delete.
+> Unfreeze conditions (recorded in AGENTS.md): a task the model fails naked that a
+> skill rescues / real traffic depth / a weaker model than 2026-era flash.
+> Bug-distribution evidence for the freeze: all 6 crawl-era bugs live in the
+> speculative layers (judge/understanding/dedup); the operational parts (gap
+> detector, weekly cycle, capctl) ran clean end-to-end on first try.
+
 **Version:** V1.0  
 **Date:** 2026-09-29  
 **Target:** Capability Platform V2, designed to evolve cleanly into V3
