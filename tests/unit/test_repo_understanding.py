@@ -91,6 +91,22 @@ def test_miner_rejects_non_array(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_miner_parses_fenced_array(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fenced output is unwrapped AND validated through the
+    MinedCapability contract — a schema-violating item raises (§74)."""
     miner = CapabilityMiner(base_url="http://unused")
-    monkeypatch.setattr(miner, "_complete", lambda system, user: '```json\n[{"name": "a"}]\n```')
-    assert miner.mine([{"path": "x", "content": "y"}]) == [{"name": "a"}]
+    fenced = '```json\n[{"name": "a", "type": "skill", "source_refs": ["x"]}]\n```'
+    monkeypatch.setattr(miner, "_complete", lambda system, user: fenced)
+    out = miner.mine([{"path": "x", "content": "y"}])
+    assert len(out) == 1
+    assert out[0]["name"] == "a"
+    assert out[0]["type"] == "skill"
+    assert out[0]["mined_by"] == miner.miner_version
+
+
+def test_miner_rejects_contract_violating_item(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§12.2: an item missing required contract fields (type) raises —
+    it never flows downstream as an unvalidated dict."""
+    miner = CapabilityMiner(base_url="http://unused")
+    monkeypatch.setattr(miner, "_complete", lambda system, user: '[{"name": "a"}]')
+    with pytest.raises(RepositoryUnderstandingError, match="MinedCapability contract"):
+        miner.mine([{"path": "x", "content": "y"}])
