@@ -214,7 +214,21 @@ def apply_ablations(ablations: list[str]) -> None:
         if ab == "progress":
             rc._progress_summary = lambda snapshot: ""  # type: ignore[assignment]
         elif ab == "continue":
+            # The honest no-nudge shape: NO user message after a no-action
+            # turn (exactly arm N's behavior). Patching the constant to ""
+            # alone would append an EMPTY user message — a wire oddity N
+            # never has, which collapses the loop for the wrong reason
+            # (measured: 0.21 tests_pass, 38 model recoveries, runs dying at
+            # turn ~4 — an artifact, not an ablation).
             rc._CONTINUE_PROMPT = ""  # type: ignore[assignment]
+            _orig_append = rc.HarnessKernel._append
+
+            def _append_no_empty_user(
+                self: object, r: object, turn: int, *, assistant: str, user: str | None
+            ) -> None:
+                _orig_append(self, r, turn, assistant=assistant, user=user if user else None)  # type: ignore[arg-type]
+
+            rc.HarnessKernel._append = _append_no_empty_user  # type: ignore[assignment]
 
 
 def _kernel_service(
