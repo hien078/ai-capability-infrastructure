@@ -94,8 +94,14 @@ class FakeCapabilities:
     def get_capability(self, capability_id: str) -> Capability | None:
         return self.caps.get(capability_id)
 
+    def get_capabilities(self, ids: list[str]) -> list[Capability]:
+        return [self.caps[i] for i in ids if i in self.caps]
+
     def get_version(self, capability_id: str, version: str) -> Any:
         return None
+
+    def get_versions(self, pairs: list[tuple[str, str]]) -> list[Any]:
+        return []
 
     def create_capability(self, capability: Capability) -> Capability:
         self.caps[capability.id] = capability

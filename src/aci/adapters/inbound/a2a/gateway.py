@@ -88,13 +88,28 @@ class A2AGateway:
     # -- Agent Card (§8) --------------------------------------------------
 
     def agent_card(self) -> dict[str, object]:
-        """Card skills project kind=agent capabilities with active production releases."""
+        """Card skills project kind=agent capabilities with active production releases.
+
+        Batch reads (one query per kind) — the card is fetched by every
+        A2A client on discovery; the per-release loop was N+1.
+        """
+        releases = self._releases.list_channel("production", status="active")
+        capabilities = {
+            c.id: c
+            for c in self._capabilities.get_capabilities([r.capability_id for r in releases])
+        }
+        versions = {
+            v.capability_id: v
+            for v in self._capabilities.get_versions(
+                [(r.capability_id, r.version) for r in releases]
+            )
+        }
         skills: list[dict[str, object]] = []
-        for release in self._releases.list_channel("production", status="active"):
-            capability = self._capabilities.get_capability(release.capability_id)
+        for release in releases:
+            capability = capabilities.get(release.capability_id)
             if capability is None or capability.kind != "agent":
                 continue
-            version = self._capabilities.get_version(release.capability_id, release.version)
+            version = versions.get(release.capability_id)
             skills.append(
                 {
                     "id": capability.id,

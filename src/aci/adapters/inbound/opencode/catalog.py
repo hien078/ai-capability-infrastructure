@@ -73,12 +73,23 @@ class CatalogProjection:
         self._objects = objects
 
     def index(self) -> dict[str, list[dict[str, Any]]]:
+        releases = self._releases.list_channel("production", status="active")
+        versions = {
+            v.capability_id: v
+            for v in self._capabilities.get_versions(
+                [(r.capability_id, r.version) for r in releases]
+            )
+        }
+        artifacts = {
+            a.capability_id: a
+            for a in self._artifacts.get_artifacts([(r.capability_id, r.version) for r in releases])
+        }
         entries: list[dict[str, Any]] = []
-        for release in self._releases.list_channel("production", status="active"):
-            version = self._capabilities.get_version(release.capability_id, release.version)
+        for release in releases:
+            version = versions.get(release.capability_id)
             if version is None or version.kind != "skill":
                 continue
-            artifact = self._artifacts.get_artifact(release.capability_id, release.version)
+            artifact = artifacts.get(release.capability_id)
             if artifact is None:
                 continue
             entries.append(

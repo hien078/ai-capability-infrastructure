@@ -8,11 +8,14 @@ first, so the honest default surface is: card + clear errors).
 
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from aci.adapters.inbound.rest.wiring import Container
 from aci.config import Settings
 from aci.main import create_app
+
+pytestmark = pytest.mark.integration
 
 
 def test_agent_card_mounted_with_real_container(engine: Any) -> None:  # noqa: ARG001

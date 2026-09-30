@@ -328,3 +328,22 @@ class SqlAlchemyArtifactStore:
         with self._sessions() as session:
             row = session.get(CapabilityArtifactRow, (capability_id, version))
             return _artifact_of(row) if row is not None else None
+
+    def get_artifacts(self, pairs: list[tuple[str, str]]) -> list[CapabilityArtifact]:
+        """Batch read (one query for the whole catalog) — the per-release
+        loop in the catalog surfaces was N+1; this is the 1-query form."""
+        if not pairs:
+            return []
+        with self._sessions() as session:
+            rows = (
+                session.query(CapabilityArtifactRow)
+                .filter(
+                    tuple_(
+                        CapabilityArtifactRow.capability_id,
+                        CapabilityArtifactRow.version,
+                    ).in_(pairs)
+                )
+                .order_by(CapabilityArtifactRow.capability_id)
+                .all()
+            )
+            return [_artifact_of(r) for r in rows]
