@@ -61,3 +61,80 @@ class TestHbenchRunner:
         source = inspect.getsource(run_hbench.run_naive_arm)
         assert "_system_prompt" in source
         assert "task_state_from(contract)" in source
+
+
+class TestMechanismCounts:
+    """The §44 cost columns are counted from the events the kernel ACTUALLY
+    emits — driven through a real HarnessKernel, so an event-name drift
+    (the original `repairs` counter listened for RECOVERY_STARTED, which the
+    kernel never emits, and silently reported 0) breaks here."""
+
+    def _run(self, script: list[object], check_results: list[bool]) -> dict[str, int]:
+        from datetime import UTC, datetime
+
+        from aci.domain.runtime.evidence import CheckResult, ResultContract
+        from aci.domain.runtime.spec import RuntimeSpec
+        from aci.domain.runtime.subtask import SubtaskContract
+        from aci.runtime.context_engine import ContextBudget, ContextEngine
+        from aci.runtime.event_bus import EventBus
+        from aci.runtime.model_gateway import FakeModelGateway
+        from aci.runtime.recovery import RecoveryManager
+        from aci.runtime.run_controller import HarnessKernel
+        from aci.runtime.state_manager import StateManager
+        from aci.runtime.tool_runtime import ToolRegistry, ToolRuntime
+        from aci.runtime.verification import VerificationManager, VerifierCallable
+
+        verdicts = iter(check_results)
+        check = VerifierCallable(
+            "gate", lambda s, c: CheckResult(name="gate", passed=next(verdicts))
+        )
+        bus = EventBus()
+        kernel = HarnessKernel(
+            state=StateManager(),
+            model_gateway=FakeModelGateway(script),  # type: ignore[arg-type]
+            tool_executor=ToolRuntime(ToolRegistry(), dispatcher=object()),  # type: ignore[arg-type]
+            context_engine=ContextEngine(ContextBudget(total_tokens=60_000)),
+            verifier=VerificationManager([check]),
+            recovery=RecoveryManager(),
+            capability_runtime=object(),  # type: ignore[arg-type]
+            event_bus=bus,
+            sleep=lambda _s: None,
+        )
+        contract = SubtaskContract(task_id="hb-1", objective="fix", created_at=datetime.now(UTC))
+        spec = RuntimeSpec(
+            result_contract=ResultContract(contract_id="c", required_fields=["summary"]),
+            created_at=datetime.now(UTC),
+        )
+        kernel.run(contract, spec)
+        return run_hbench.mechanism_counts(bus.history("hb-1"))
+
+    def test_repairs_and_model_recoveries_are_counted_separately(self) -> None:
+        from aci.domain.capability.errors import DomainError, ErrorCode
+        from aci.domain.runtime.actions import FinalCandidate
+
+        def unavailable(_request: object) -> object:
+            raise DomainError(ErrorCode.MODEL_UNAVAILABLE, "503")
+
+        counts = self._run(
+            [unavailable, FinalCandidate(summary="try 1"), FinalCandidate(summary="try 2")],
+            check_results=[False, True],
+        )
+        assert counts == {
+            "verification_rounds": 2,
+            "verification_fails": 1,
+            "repairs": 1,
+            "model_recoveries": 1,
+        }
+
+    def test_terminal_escalation_is_not_a_repair(self) -> None:
+        from aci.domain.runtime.actions import FinalCandidate
+
+        counts = self._run(
+            [FinalCandidate(summary=f"try {i}") for i in range(3)],
+            check_results=[False, False, False],
+        )
+        # 3 failed rounds: the first two became repair turns, the third
+        # escalated (terminal) — it ended the run, it was not a repair.
+        assert counts["verification_fails"] == 3
+        assert counts["repairs"] == 2
+        assert counts["model_recoveries"] == 0

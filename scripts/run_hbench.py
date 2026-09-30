@@ -78,7 +78,7 @@ from aci.domain.runtime.subtask import (  # noqa: E402
 )
 from aci.runtime.context_engine import ContextBudget, ContextEngine  # noqa: E402
 from aci.runtime.event_bus import (  # noqa: E402
-    RECOVERY_STARTED,
+    RECOVERY_ACTION,
     VERIFICATION_COMPLETED,
     VERIFICATION_STARTED,
     EventBus,
@@ -226,14 +226,7 @@ def run_kernel_arm(
         verification_command=VERIFICATION,
     )
     wall = time.monotonic() - started
-    history = bus.history(result.run_id)
-    verification_rounds = sum(1 for e in history if e.event_type == VERIFICATION_STARTED)
-    verification_fails = sum(
-        1
-        for e in history
-        if e.event_type == VERIFICATION_COMPLETED and e.payload.get("verdict") != "PASS"
-    )
-    repairs = sum(1 for e in history if e.event_type == RECOVERY_STARTED)
+    counts = mechanism_counts(bus.history(result.run_id))
     # SAME yardstick as arm N: did the tests pass in the run dir at the end,
     # regardless of whether the model proposed completion? A LIMIT_TURNS run
     # where the fix landed but was never proposed counts here (and NOT in
@@ -263,9 +256,47 @@ def run_kernel_arm(
         # The mechanism's visible cost (§44): how many verification rounds
         # the run needed, how many FAILED (→ repair feedback), how many
         # recovery/repair turns were taken.
-        "verification_rounds": verification_rounds,
-        "verification_fails": verification_fails,
+        **counts,
+    }
+
+
+#: Recovery actions that end the run — not a repair/retry that was taken.
+_TERMINAL_ACTIONS = frozenset({"FAIL", "RETURN_PARTIAL", "ESCALATE"})
+_NO_MECHANISM = {
+    "verification_rounds": 0,
+    "verification_fails": 0,
+    "repairs": 0,
+    "model_recoveries": 0,
+}
+
+
+def mechanism_counts(history: list[Any]) -> dict[str, int]:
+    """§44 — the mechanism's visible cost, from the kernel's own events.
+
+    ``repairs`` = verification failures the kernel turned into a repair
+    turn; ``model_recoveries`` = model-call failures it retried or repaired
+    (transient/rate-limit/malformed). Both come from RECOVERY_ACTION — the
+    event the kernel actually emits — and count only non-terminal actions:
+    an ESCALATE/FAIL ends the run, it is not a repair that was taken.
+    """
+    rounds = fails = repairs = model = 0
+    for event in history:
+        if event.event_type == VERIFICATION_STARTED:
+            rounds += 1
+        elif event.event_type == VERIFICATION_COMPLETED:
+            fails += event.payload.get("verdict") != "PASS"
+        elif event.event_type == RECOVERY_ACTION:
+            if event.payload.get("action") in _TERMINAL_ACTIONS:
+                continue
+            if event.payload.get("failure_class") == "VERIFICATION_FAILED":
+                repairs += 1
+            else:
+                model += 1
+    return {
+        "verification_rounds": rounds,
+        "verification_fails": fails,
         "repairs": repairs,
+        "model_recoveries": model,
     }
 
 
@@ -392,9 +423,7 @@ def run_naive_arm(
         "tests_pass_at_end": accepted,
         "post_hoc_exit": exec_result.exit_code,
         "post_hoc_timed_out": exec_result.timed_out,
-        "verification_rounds": 0,
-        "verification_fails": 0,
-        "repairs": 0,
+        **_NO_MECHANISM,
     }
 
 
@@ -508,9 +537,7 @@ def main(argv: list[str] | None = None) -> int:
                     "turns": 0,
                     "tool_calls": 0,
                     "wall_seconds": 0.0,
-                    "verification_rounds": 0,
-                    "verification_fails": 0,
-                    "repairs": 0,
+                    **_NO_MECHANISM,
                 }
             record["repeat"] = repeat
             results.append(record)
@@ -520,7 +547,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"turns={record['turns']} tools={record['tool_calls']} "
                 f"wall={record['wall_seconds']}s "
                 f"verify={record['verification_rounds']}rounds/"
-                f"{record['verification_fails']}fails/{record['repairs']}repairs",
+                f"{record['verification_fails']}fails/{record['repairs']}repairs/"
+                f"{record['model_recoveries']}model-recoveries",
                 flush=True,
             )
 
@@ -545,6 +573,7 @@ def main(argv: list[str] | None = None) -> int:
             else 0.0,
             "verification_fails_total": sum(r["verification_fails"] for r in rows),
             "repairs_total": sum(r["repairs"] for r in rows),
+            "model_recoveries_total": sum(r["model_recoveries"] for r in rows),
         }
 
     report = {
@@ -580,7 +609,8 @@ def main(argv: list[str] | None = None) -> int:
             f"turns {agg['turns_mean']:.1f}±{agg['turns_stdev']:.1f} "
             f"wall {agg['wall_mean']:.0f}±{agg['wall_stdev']:.0f}s "
             f"verify_rounds {agg['verification_rounds_mean']:.1f} "
-            f"(fails {agg['verification_fails_total']}, repairs {agg['repairs_total']})"
+            f"(fails {agg['verification_fails_total']}, repairs {agg['repairs_total']}, "
+            f"model recoveries {agg['model_recoveries_total']})"
         )
     return 0
 
