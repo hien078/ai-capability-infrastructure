@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import Engine
 
 from aci.adapters.inbound.rest.wiring import Container
 from aci.config import Settings
@@ -31,7 +32,9 @@ def uid(prefix: str) -> str:
 
 
 @pytest.fixture()
-def client(tmp_path: Path) -> TestClient:
+def client(tmp_path: Path, engine: Engine) -> TestClient:
+    # Depends on the conftest ``engine`` fixture so this suite SKIPS
+    # (never errors) when PostgreSQL is down — the console reads the real DB.
     settings = Settings(database_url=DB_URL, object_store_root=str(tmp_path / "objects"))
     return TestClient(create_app(Container(settings)))
 
