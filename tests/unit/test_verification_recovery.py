@@ -24,6 +24,8 @@ from aci.runtime.checkpoints import (
     CheckpointStore,
 )
 from aci.runtime.recovery import (
+    RECOVERY_ACTIONS,
+    RecoveryAction,
     RecoveryManager,
     idempotency_allows_retry,
     stop_reason_for_failure,
@@ -162,6 +164,56 @@ class TestRecoveryManager:
         assert idempotency_allows_retry("IDEMPOTENT_WITH_KEY")
         assert not idempotency_allows_retry("NON_IDEMPOTENT")
         assert not idempotency_allows_retry("UNKNOWN")
+
+    def test_retry_same_never_issued_for_non_idempotent_tool(self) -> None:
+        """§12.6 wired into the matrix: a RETRY_SAME default becomes REPLAN
+        when the failed tool is not declared idempotent."""
+        rm = RecoveryManager()
+        timeout = self._failure(FailureClass.TOOL_TIMEOUT)
+        assert rm.decide(timeout, idempotency="IDEMPOTENT").action == "RETRY_SAME"
+        assert rm.decide(timeout, idempotency="IDEMPOTENT_WITH_KEY").action == "RETRY_SAME"
+        assert RecoveryManager().decide(timeout, idempotency="NON_IDEMPOTENT").action == "REPLAN"
+        assert RecoveryManager().decide(timeout, idempotency="UNKNOWN").action == "REPLAN"
+        # A non-retry default is unaffected by the idempotency class.
+        malformed = self._failure(FailureClass.MODEL_MALFORMED_OUTPUT)
+        assert RecoveryManager().decide(malformed, idempotency="UNKNOWN").action == "REPAIR_OUTPUT"
+
+    def test_every_failure_class_has_a_default_action_and_stop_reason(self) -> None:
+        for cls in FailureClass:
+            action = RecoveryManager().decide(self._failure(cls))
+            assert action.action in RECOVERY_ACTIONS, cls
+            assert isinstance(stop_reason_for_failure(self._failure(cls)), StopReason), cls
+        assert (
+            stop_reason_for_failure(self._failure(FailureClass.CANCELLED)) is StopReason.CANCELLED
+        )
+        assert stop_reason_for_failure(self._failure(FailureClass.FATAL)) is StopReason.FATAL_ERROR
+
+    def test_recovery_actions_are_frozen_and_validated(self) -> None:
+        """The default matrix is shared by every manager: a decision handed
+        out must not be a mutable alias into it."""
+        action = RecoveryManager().decide(self._failure(FailureClass.TRANSIENT_TOOL))
+        with pytest.raises(AttributeError):
+            action.action = "FAIL"  # type: ignore[misc]
+        assert RecoveryManager().decide(self._failure(FailureClass.TRANSIENT_TOOL)).action == (
+            "RETRY_SAME"
+        )
+        with pytest.raises(ValueError, match="unknown recovery action"):
+            RecoveryAction("SHRUG", "nope")
+        assert RecoveryAction("ESCALATE", "x").is_terminal
+        assert not RecoveryAction("REPLAN", "x").is_terminal
+
+    def test_escalation_and_total_budget_interplay(self) -> None:
+        rm = RecoveryManager(max_attempts_total=3, max_same_failure_retries=1)
+        first = rm.decide(self._failure(FailureClass.TRANSIENT_MODEL))
+        assert first.action == "RETRY_BACKOFF"
+        assert rm.decide(self._failure(FailureClass.TRANSIENT_MODEL)).action == "ESCALATE"
+        assert rm.decide(self._failure(FailureClass.TRANSIENT_TOOL)).action == "RETRY_SAME"
+        assert rm.decide(self._failure(FailureClass.TOOL_TIMEOUT)).action == "FAIL"
+        assert rm.attempts == 4
+
+    def test_custom_matrix_override(self) -> None:
+        rm = RecoveryManager({FailureClass.TRANSIENT_TOOL: RecoveryAction("FAIL", "strict")})
+        assert rm.decide(self._failure(FailureClass.TRANSIENT_TOOL)).action == "FAIL"
 
 
 class TestCheckpoints:

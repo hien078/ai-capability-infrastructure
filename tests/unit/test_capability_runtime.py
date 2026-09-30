@@ -107,6 +107,26 @@ class TestCapabilityRuntime:
         activation, _ = cr.activate(cr.search(_request())[0], run_id="run-1")
         assert activation.version == "1.0.0"  # pinned, never silently upgraded
 
+    def test_cache_hit_is_digest_verified_too(self) -> None:
+        """A pinned version has one digest: a later selection claiming another
+        digest for the same (id, version) must not be served from cache."""
+        cr, aci = self._runtime()
+        good = cr.search(_request())[0]
+        cr.activate(good, run_id="run-1")
+        resolves_before = len(aci.search_calls)
+        with pytest.raises(CapabilitySearchError, match="digest mismatch"):
+            cr.activate(FakeSelection("cap-x", "1.0.0", "deadbeef"), run_id="run-1")
+        assert len(aci.search_calls) == resolves_before
+        # The genuine selection still activates (cache intact, idempotent).
+        activation, _ = cr.activate(good, run_id="run-1")
+        assert activation.digest == good.digest
+
+    def test_handle_request_matches_kernel_contract(self) -> None:
+        cr, _ = self._runtime()
+        activations = cr.handle_request(_request(), _snapshot())
+        assert [a.capability_id for a in activations] == ["cap-x"]
+        assert all(isinstance(a, CapabilityActivation) for a in activations)
+
     def test_refresh_budget_bounded(self) -> None:
         cr, _ = self._runtime()
         cr.handle_request(_request(), _snapshot())

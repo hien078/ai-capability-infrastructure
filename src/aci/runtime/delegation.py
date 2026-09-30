@@ -1,7 +1,8 @@
 """DelegationManager (harness.md §15): controlled task decomposition.
 
 OFF by default (§0.3). Child authority ⊆ parent (INV-02), child budget carved
-from parent reserve (INV-03), child context projected — never cloned (§15.3).
+from what the parent has LEFT in every dimension (INV-03), child context
+projected — never cloned (§15.3).
 """
 
 from datetime import UTC, datetime
@@ -11,6 +12,10 @@ from aci.domain.runtime.actions import DelegationRequest
 from aci.domain.runtime.authority import GrantEnvelope, intersect_grants
 from aci.domain.runtime.state import BudgetLedger, RuntimeStateSnapshot
 from aci.domain.runtime.subtask import SubtaskContract
+
+#: Fraction of the parent's cost ceiling a child may spend (§15.5 conservative).
+CHILD_COST_SHARE = 0.3
+DEFAULT_CHILD_TOOL_CALLS = 20
 
 
 class DelegationDisabled(Exception):
@@ -70,29 +75,7 @@ class DelegationManager:
             raise DelegationBudgetError(
                 f"max children {self._max_children} reached for {parent.run.run_id}"
             )
-        remaining_tokens = (
-            parent.budget.max_total_tokens
-            - parent.budget.consumed_input_tokens
-            - parent.budget.consumed_output_tokens
-            - parent.budget.reserved_tokens
-        )
-        if remaining_tokens < self._reserve:
-            raise DelegationBudgetError(
-                f"remaining budget {remaining_tokens} below child reserve {self._reserve}"
-            )
-        requested = request.requested_budget_tokens or self._reserve
-        carved = min(requested, remaining_tokens)
-        child_budget = BudgetLedger(
-            max_turns=parent.budget.max_turns,
-            max_total_tokens=carved,
-            max_output_tokens=min(parent.budget.max_output_tokens, carved),
-            max_tool_calls=min(
-                request.requested_budget_tool_calls or 20, parent.budget.max_tool_calls
-            ),
-            max_wall_time_seconds=parent.budget.max_wall_time_seconds,
-            max_cost_usd=round(parent.budget.max_cost_usd * 0.3, 6),
-            max_recoveries=parent.budget.max_recoveries,
-        )
+        child_budget = self._carve_budget(parent.budget, request)
         grants = intersect_grants(parent.grants, child_grants)  # INV-02: never wider
         contract = SubtaskContract(
             task_id=f"{parent.run.run_id}-child-{len(children) + 1}",
@@ -105,6 +88,44 @@ class DelegationManager:
         )
         children.append(contract.task_id)
         return contract, grants, child_budget
+
+    def _carve_budget(self, parent: BudgetLedger, request: DelegationRequest) -> BudgetLedger:
+        """INV-03: every child limit is at most what the parent has left."""
+        remaining_tokens = (
+            parent.max_total_tokens
+            - parent.consumed_input_tokens
+            - parent.consumed_output_tokens
+            - parent.reserved_tokens
+        )
+        if remaining_tokens < self._reserve:
+            raise DelegationBudgetError(
+                f"remaining budget {remaining_tokens} below child reserve {self._reserve}"
+            )
+        remaining = {
+            "turns": parent.max_turns - parent.consumed_turns,
+            "output tokens": parent.max_output_tokens - parent.consumed_output_tokens,
+            "tool calls": parent.max_tool_calls - parent.consumed_tool_calls,
+            "wall time": int(parent.max_wall_time_seconds - parent.consumed_wall_time_seconds),
+        }
+        for name, left in remaining.items():
+            if left < 1:
+                raise DelegationBudgetError(f"parent has no remaining {name} to delegate")
+        carved = min(request.requested_budget_tokens or self._reserve, remaining_tokens)
+        remaining_cost = parent.max_cost_usd - parent.consumed_cost_usd - parent.reserved_cost_usd
+        return BudgetLedger(
+            max_turns=remaining["turns"],
+            max_total_tokens=carved,
+            max_output_tokens=min(remaining["output tokens"], carved),
+            max_tool_calls=min(
+                request.requested_budget_tool_calls or DEFAULT_CHILD_TOOL_CALLS,
+                remaining["tool calls"],
+            ),
+            max_wall_time_seconds=remaining["wall time"],
+            max_cost_usd=round(
+                max(min(parent.max_cost_usd * CHILD_COST_SHARE, remaining_cost), 0.0), 6
+            ),
+            max_recoveries=max(parent.max_recoveries - parent.consumed_recoveries, 0),
+        )
 
     def record_child_result(self, parent_run_id: str, child_task_id: str) -> None:
         """§15.4 — child results merge as external structured observations;

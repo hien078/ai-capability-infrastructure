@@ -2,15 +2,24 @@
 
 Profiles are DATA, not independent frameworks (§19A). All profiles share the
 same HarnessKernel while specializing their loop family, policies, verifiers,
-and risk boundaries (§38 R0–R4).
+and risk boundaries (§38 R0–R4). Every verifier check is grounded in evidence
+the tool path OBSERVED, never in the model's own report (INV-08, §19.4).
 """
 
 import posixpath
+import re
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
-from aci.domain.runtime.evidence import CandidateResult, CheckResult, ResultContract
+from aci.domain.runtime.evidence import (
+    CandidateResult,
+    CheckResult,
+    EvidenceItem,
+    EvidenceKind,
+    ResultContract,
+)
 from aci.domain.runtime.spec import (
     AgentProfileId,
     DelegationPolicy,
@@ -22,6 +31,18 @@ from aci.domain.runtime.spec import (
 )
 from aci.domain.runtime.state import BudgetLedger, RuntimeStateSnapshot
 from aci.runtime.verification import VerifierCallable
+
+Check = Callable[[RuntimeStateSnapshot, CandidateResult], CheckResult]
+
+_CLAIMS_FORMAT = (
+    'Start every "claims" entry with the workspace-relative file it rests on, as '
+    '"path[:line[-line]]: text" (e.g. "src/app.py:42: loop bound is off by one"); '
+    "claims are checked against the files you actually read or changed."
+)
+_ARTIFACTS_FORMAT = (
+    'List every file you produced in "artifacts" as "path" or "path: note"; '
+    "artifacts are checked against the files you actually wrote."
+)
 
 
 class ProfileDefinition(BaseModel):
@@ -65,13 +86,19 @@ PROFILES: dict[AgentProfileId, ProfileDefinition] = {
         loop_policy=LoopPolicy(),
         planning_policy=PlanningPolicy(mode="adaptive"),
         default_result_contract=ResultContract(
-            contract_id="debugger-default-v1",
-            required_fields=["summary", "claims"],
+            contract_id="debugger-default-v2",
+            required_fields=["summary", "claims", "changes"],
         ),
         risk_level=2,
-        instructions=(
-            "Find root cause, prove it, repair it, and demonstrate regression removal. "
-            "Follow the hypothesis loop: reproduce -> localize -> hypothesize -> repair -> verify."
+        instructions=" ".join(
+            (
+                "Find root cause, prove it, repair it, and demonstrate regression removal.",
+                "Follow the hypothesis loop: reproduce -> localize -> hypothesize -> repair "
+                "-> verify.",
+                _CLAIMS_FORMAT,
+                'List the fix in "changes". After your last edit, run the regression check: '
+                "a command must exit 0 after your final write.",
+            )
         ),
     ),
     AgentProfileId.RESEARCHER: ProfileDefinition(
@@ -85,9 +112,12 @@ PROFILES: dict[AgentProfileId, ProfileDefinition] = {
             required_fields=["summary", "claims"],
         ),
         risk_level=0,
-        instructions=(
-            "Produce evidence-grounded research with source traceability. "
-            "Surface contradictions and provide citations. Read-only authority by default."
+        instructions=" ".join(
+            (
+                "Produce evidence-grounded research with source traceability. "
+                "Surface contradictions. Read-only authority by default.",
+                _CLAIMS_FORMAT,
+            )
         ),
     ),
     AgentProfileId.REVIEWER: ProfileDefinition(
@@ -101,9 +131,12 @@ PROFILES: dict[AgentProfileId, ProfileDefinition] = {
             required_fields=["summary", "claims"],
         ),
         risk_level=0,
-        instructions=(
-            "Assess changes and produce evidence-backed, deduplicated, risk-ranked findings. "
-            "Read-only authority by default."
+        instructions=" ".join(
+            (
+                "Assess changes and produce evidence-backed, deduplicated, risk-ranked "
+                "findings, one claim per finding. Read-only authority by default.",
+                _CLAIMS_FORMAT,
+            )
         ),
     ),
     AgentProfileId.TESTER: ProfileDefinition(
@@ -117,9 +150,13 @@ PROFILES: dict[AgentProfileId, ProfileDefinition] = {
             required_fields=["summary", "artifacts"],
         ),
         risk_level=1,
-        instructions=(
-            "Validate behavior against acceptance criteria using assertion-driven testing "
-            "and execution evidence."
+        instructions=" ".join(
+            (
+                "Validate behavior against acceptance criteria using assertion-driven testing "
+                "and execution evidence.",
+                _ARTIFACTS_FORMAT,
+                "Run the tests after your last edit; a failing run is evidence, a timeout is not.",
+            )
         ),
     ),
     AgentProfileId.DEVOPS_SRE: ProfileDefinition(
@@ -133,9 +170,12 @@ PROFILES: dict[AgentProfileId, ProfileDefinition] = {
             required_fields=["summary", "claims"],
         ),
         risk_level=3,
-        instructions=(
-            "Diagnose infrastructure/runtime incidents and safely propose or perform "
-            "remediation with health checks."
+        instructions=" ".join(
+            (
+                "Diagnose infrastructure/runtime incidents and safely propose or perform "
+                "remediation with health checks.",
+                _CLAIMS_FORMAT,
+            )
         ),
     ),
     AgentProfileId.DATA_ANALYST: ProfileDefinition(
@@ -149,9 +189,12 @@ PROFILES: dict[AgentProfileId, ProfileDefinition] = {
             required_fields=["summary", "artifacts"],
         ),
         risk_level=1,
-        instructions=(
-            "Perform reproducible data analysis with query execution, schema validation, "
-            "and lineage verification."
+        instructions=" ".join(
+            (
+                "Perform reproducible data analysis with query execution, schema validation, "
+                "and lineage verification. Write results to files.",
+                _ARTIFACTS_FORMAT,
+            )
         ),
     ),
     AgentProfileId.ARCHITECT: ProfileDefinition(
@@ -165,9 +208,12 @@ PROFILES: dict[AgentProfileId, ProfileDefinition] = {
             required_fields=["summary", "artifacts"],
         ),
         risk_level=0,
-        instructions=(
-            "Produce architecture decisions and migration plans. Read-only default: "
-            "generate ADRs, do not apply code changes."
+        instructions=" ".join(
+            (
+                "Produce architecture decisions and migration plans. Write each ADR or plan "
+                "as a file; do not apply code changes.",
+                _ARTIFACTS_FORMAT,
+            )
         ),
     ),
     AgentProfileId.SECURITY_ANALYST: ProfileDefinition(
@@ -181,9 +227,12 @@ PROFILES: dict[AgentProfileId, ProfileDefinition] = {
             required_fields=["summary", "claims"],
         ),
         risk_level=4,
-        instructions=(
-            "Conduct defensive, scope-enforced security analysis with strict boundary checks. "
-            "Rely on deterministic evidence."
+        instructions=" ".join(
+            (
+                "Conduct defensive, scope-enforced security analysis with strict boundary "
+                "checks. Rely on deterministic evidence.",
+                _CLAIMS_FORMAT,
+            )
         ),
     ),
 }
@@ -198,21 +247,94 @@ def _as_profile_id(profile: AgentProfileId | str) -> AgentProfileId:
         raise KeyError(f"unknown profile id: {profile}") from exc
 
 
-def _claimed_path(claim: str) -> str:
-    """``"src/app.py: fix off-by-one"`` → ``"src/app.py"`` (the action protocol format)."""
-    return posixpath.normpath(claim.split(":", 1)[0].strip())
+_MAX_LISTED = 5
+_MAX_QUOTED = 100
+_LINE_SUFFIX = re.compile(r"(?P<path>.+?)(?::\d+(?:-\d+)?)?")
+_EXIT_CODE = re.compile(r"-?[0-9]+")
+_CITE_HINT = 'cite a file you read or changed as "path[:line]: text"'
 
 
-def _claimed_changes_observed(
+def _norm(path: str) -> str:
+    return posixpath.normpath(path.strip())
+
+
+def _claimed_path(entry: str) -> str:
+    """``"src/app.py: fix off-by-one"`` → ``"src/app.py"`` (changes/artifacts format)."""
+    return _norm(entry.split(":", 1)[0])
+
+
+def _cited_path(claim: str) -> str | None:
+    """``"src/app.py:42: text"`` → ``"src/app.py"``; None when the claim cites nothing."""
+    head, sep, _ = claim.strip().partition(": ")
+    match = _LINE_SUFFIX.fullmatch(head.strip())
+    if not sep or match is None:
+        return None
+    return _norm(match.group("path"))
+
+
+def _quote(text: str) -> str:
+    text = text.strip()
+    return f'"{text[:_MAX_QUOTED]}..."' if len(text) > _MAX_QUOTED else f'"{text}"'
+
+
+def _bounded(entries: Sequence[str]) -> str:
+    shown = "; ".join(entries[:_MAX_LISTED])
+    extra = len(entries) - _MAX_LISTED
+    return f"{shown} (+{extra} more)" if extra > 0 else shown
+
+
+def _first_word(text: str) -> str:
+    words = text.split(maxsplit=1)
+    return words[0] if words else ""
+
+
+def _is_file_event(item: EvidenceItem, verb: str) -> bool:
+    """FILE_STATE evidence ``file://<path>`` whose summary verb is read/listed/written."""
+    return (
+        item.kind == EvidenceKind.FILE_STATE
+        and item.ref.startswith("file://")
+        and _first_word(item.summary) == verb
+    )
+
+
+def _file_path(item: EvidenceItem) -> str:
+    return _norm(item.ref.removeprefix("file://"))
+
+
+def _files(snapshot: RuntimeStateSnapshot, verb: str) -> set[str]:
+    return {_file_path(i) for i in snapshot.observed_evidence if _is_file_event(i, verb)}
+
+
+def _changed_files(snapshot: RuntimeStateSnapshot) -> set[str]:
+    """§41.2 confirmed file side effects (``file:<path>``)."""
+    return {
+        _norm(r.removeprefix("file:")) for r in snapshot.changed_resources if r.startswith("file:")
+    }
+
+
+def _exit_status(item: EvidenceItem) -> str:
+    """``"exit=0 pytest -q"`` → ``"0"``; ``"exit=timeout …"`` → ``"timeout"``."""
+    word = _first_word(item.summary)
+    return word.removeprefix("exit=") if word.startswith("exit=") else ""
+
+
+def summary_present(snapshot: RuntimeStateSnapshot, candidate: CandidateResult) -> CheckResult:
+    """§24 — the candidate carries a non-empty summary."""
+    return CheckResult(
+        name="summary_present",
+        passed=bool(candidate.summary),
+        detail="" if candidate.summary else "summary is missing",
+    )
+
+
+def claimed_changes_observed(
     snapshot: RuntimeStateSnapshot, candidate: CandidateResult
 ) -> CheckResult:
     """INV-08 / §19.4 "changed files exist": every claimed change must match a
     file effect the tool path CONFIRMED — the model's report alone is never
     evidence."""
     name = "claimed_changes_observed"
-    observed = {
-        r.removeprefix("file:") for r in snapshot.changed_resources if r.startswith("file:")
-    }
+    observed = _changed_files(snapshot)
     if not observed:
         return CheckResult(name=name, passed=False, detail="no file change was observed")
     if not candidate.changes:
@@ -220,153 +342,132 @@ def _claimed_changes_observed(
     unobserved = [c for c in candidate.changes if _claimed_path(c) not in observed]
     if unobserved:
         return CheckResult(
-            name=name,
-            passed=False,
-            detail=f"claimed but not observed: {', '.join(unobserved[:5])}",
+            name=name, passed=False, detail=f"claimed but not observed: {_bounded(unobserved)}"
         )
     return CheckResult(name=name, passed=True)
 
 
+def claims_grounded(snapshot: RuntimeStateSnapshot, candidate: CandidateResult) -> CheckResult:
+    """INV-08 / §19.4: every claim cites a file this run actually READ or CHANGED;
+    a listed directory entry is not a source."""
+    name = "claims_grounded"
+    if not candidate.claims:
+        return CheckResult(name=name, passed=False, detail=f"no claims; {_CITE_HINT}")
+    sources = _files(snapshot, "read") | _changed_files(snapshot)
+    listed = _files(snapshot, "listed")
+    ungrounded: list[str] = []
+    for claim in candidate.claims:
+        path = _cited_path(claim)
+        if path is None:
+            ungrounded.append(f"{_quote(claim)} cites no source")
+        elif path in listed and path not in sources:
+            ungrounded.append(f"{_quote(claim)} cites {path}, which was only listed, never read")
+        elif path not in sources:
+            ungrounded.append(f"{_quote(claim)} cites {path}, which was never read or changed")
+    if ungrounded:
+        return CheckResult(
+            name=name,
+            passed=False,
+            detail=(
+                f"{len(ungrounded)}/{len(candidate.claims)} claims ungrounded: "
+                f"{_bounded(ungrounded)}; {_CITE_HINT}"
+            ),
+        )
+    return CheckResult(name=name, passed=True)
+
+
+def artifacts_observed(snapshot: RuntimeStateSnapshot, candidate: CandidateResult) -> CheckResult:
+    """§19.4: every listed artifact is a file this run was observed to produce."""
+    name = "artifacts_observed"
+    if not candidate.artifacts:
+        return CheckResult(
+            name=name, passed=False, detail='no artifacts; list each file you wrote as "path"'
+        )
+    changed = _changed_files(snapshot)
+    missing = [a for a in candidate.artifacts if _claimed_path(a) not in changed]
+    if missing:
+        return CheckResult(
+            name=name,
+            passed=False,
+            detail=f"artifacts not written by this run: {_bounded(missing)}",
+        )
+    return CheckResult(name=name, passed=True)
+
+
+def _command_check(
+    name: str, snapshot: RuntimeStateSnapshot, *, accept: Callable[[str], bool], wanted: str
+) -> CheckResult:
+    """Pass iff a COMMAND_OUTPUT after the last observed write has an accepted exit status."""
+    evidence = snapshot.observed_evidence
+    writes = [i for i, item in enumerate(evidence) if _is_file_event(item, "written")]
+    start = writes[-1] + 1 if writes else 0
+    commands = [e for e in evidence[start:] if e.kind == EvidenceKind.COMMAND_OUTPUT]
+    scope = (
+        f"after the last write to {_file_path(evidence[writes[-1]])}" if writes else "in this run"
+    )
+    if not commands:
+        return CheckResult(name=name, passed=False, detail=f"no command ran {scope}")
+    if any(accept(_exit_status(c)) for c in commands):
+        return CheckResult(name=name, passed=True)
+    last = _quote(commands[-1].summary)
+    return CheckResult(name=name, passed=False, detail=f"no command {wanted} {scope}; last: {last}")
+
+
+def command_passed_after_last_change(
+    snapshot: RuntimeStateSnapshot, candidate: CandidateResult
+) -> CheckResult:
+    """§19.4 regression evidence: some command exited 0 after the final observed write."""
+    return _command_check(
+        "command_passed_after_last_change",
+        snapshot,
+        accept=lambda status: status == "0",
+        wanted="exited 0",
+    )
+
+
+def command_run_after_last_change(
+    snapshot: RuntimeStateSnapshot, candidate: CandidateResult
+) -> CheckResult:
+    """§19.4 execution evidence: some command ran to an exit code (pass or fail, not a
+    timeout) after the final observed write."""
+    return _command_check(
+        "command_run_after_last_change",
+        snapshot,
+        accept=lambda status: _EXIT_CODE.fullmatch(status) is not None,
+        wanted="finished with an exit code",
+    )
+
+
+_CHECKS: dict[str, Check] = {
+    "summary_present": summary_present,
+    "claimed_changes_observed": claimed_changes_observed,
+    "claims_grounded": claims_grounded,
+    "artifacts_observed": artifacts_observed,
+    "command_passed_after_last_change": command_passed_after_last_change,
+    "command_run_after_last_change": command_run_after_last_change,
+}
+
+_PROFILE_CHECKS: dict[AgentProfileId, tuple[str, ...]] = {
+    AgentProfileId.CODER: ("claimed_changes_observed", "summary_present"),
+    AgentProfileId.DEBUGGER: (
+        "claims_grounded",
+        "claimed_changes_observed",
+        "command_passed_after_last_change",
+    ),
+    AgentProfileId.TESTER: ("artifacts_observed", "command_run_after_last_change"),
+    AgentProfileId.RESEARCHER: ("claims_grounded", "summary_present"),
+    AgentProfileId.REVIEWER: ("claims_grounded", "summary_present"),
+    AgentProfileId.SECURITY_ANALYST: ("claims_grounded",),
+    AgentProfileId.ARCHITECT: ("artifacts_observed",),
+    AgentProfileId.DATA_ANALYST: ("artifacts_observed",),
+    AgentProfileId.DEVOPS_SRE: ("claims_grounded",),
+}
+
+
 def verifier_checks(profile: AgentProfileId | str) -> list[VerifierCallable]:
-    """§37 verification profiles: return deterministic checks mapped to profile goals."""
+    """§37 verification profiles: deterministic checks grounded in observed evidence."""
     pid = _as_profile_id(profile)
-    if pid is AgentProfileId.CODER:
-        return [
-            VerifierCallable("claimed_changes_observed", _claimed_changes_observed),
-            VerifierCallable(
-                "summary_present",
-                lambda s, c: CheckResult(
-                    name="summary_present",
-                    passed=bool(c.summary),
-                    mandatory=True,
-                    detail="" if c.summary else "summary is missing",
-                ),
-            ),
-        ]
-    if pid is AgentProfileId.DEBUGGER:
-        return [
-            VerifierCallable(
-                "root_cause_stated",
-                lambda s, c: CheckResult(
-                    name="root_cause_stated",
-                    passed=bool(c.claims),
-                    mandatory=True,
-                    detail="" if c.claims else "root cause claim is missing",
-                ),
-            ),
-            VerifierCallable(
-                "regression_evidence",
-                lambda s, c: CheckResult(
-                    name="regression_evidence",
-                    passed=bool(c.artifacts),
-                    mandatory=True,
-                    detail="" if c.artifacts else "regression evidence artifact missing",
-                ),
-            ),
-        ]
-    if pid is AgentProfileId.RESEARCHER:
-        return [
-            VerifierCallable(
-                "evidence_present",
-                lambda s, c: CheckResult(
-                    name="evidence_present",
-                    passed=bool(c.artifacts or c.claims),
-                    mandatory=True,
-                    detail="" if (c.artifacts or c.claims) else "research evidence/claims missing",
-                ),
-            ),
-            VerifierCallable(
-                "summary_present",
-                lambda s, c: CheckResult(
-                    name="summary_present",
-                    passed=bool(c.summary),
-                    mandatory=True,
-                    detail="" if c.summary else "summary is missing",
-                ),
-            ),
-        ]
-    if pid is AgentProfileId.REVIEWER:
-        return [
-            VerifierCallable(
-                "findings_present",
-                lambda s, c: CheckResult(
-                    name="findings_present",
-                    passed=bool(c.claims),
-                    mandatory=True,
-                    detail="" if c.claims else "review findings claims missing",
-                ),
-            ),
-            VerifierCallable(
-                "summary_present",
-                lambda s, c: CheckResult(
-                    name="summary_present",
-                    passed=bool(c.summary),
-                    mandatory=True,
-                    detail="" if c.summary else "summary is missing",
-                ),
-            ),
-        ]
-    if pid is AgentProfileId.TESTER:
-        return [
-            VerifierCallable(
-                "test_evidence_present",
-                lambda s, c: CheckResult(
-                    name="test_evidence_present",
-                    passed=bool(c.artifacts),
-                    mandatory=True,
-                    detail="" if c.artifacts else "test report artifacts missing",
-                ),
-            )
-        ]
-    if pid is AgentProfileId.DEVOPS_SRE:
-        return [
-            VerifierCallable(
-                "remediation_stated",
-                lambda s, c: CheckResult(
-                    name="remediation_stated",
-                    passed=bool(c.claims),
-                    mandatory=True,
-                    detail="" if c.claims else "remediation action claim missing",
-                ),
-            )
-        ]
-    if pid is AgentProfileId.DATA_ANALYST:
-        return [
-            VerifierCallable(
-                "analysis_artifacts_present",
-                lambda s, c: CheckResult(
-                    name="analysis_artifacts_present",
-                    passed=bool(c.artifacts),
-                    mandatory=True,
-                    detail="" if c.artifacts else "data artifacts missing",
-                ),
-            )
-        ]
-    if pid is AgentProfileId.ARCHITECT:
-        return [
-            VerifierCallable(
-                "design_artifacts_present",
-                lambda s, c: CheckResult(
-                    name="design_artifacts_present",
-                    passed=bool(c.artifacts),
-                    mandatory=True,
-                    detail="" if c.artifacts else "architecture design artifacts missing",
-                ),
-            )
-        ]
-    if pid is AgentProfileId.SECURITY_ANALYST:
-        return [
-            VerifierCallable(
-                "security_findings_present",
-                lambda s, c: CheckResult(
-                    name="security_findings_present",
-                    passed=bool(c.claims),
-                    mandatory=True,
-                    detail="" if c.claims else "security finding claims missing",
-                ),
-            )
-        ]
-    raise KeyError(f"unknown profile: {profile}")
+    return [VerifierCallable(name, _CHECKS[name]) for name in _PROFILE_CHECKS[pid]]
 
 
 def risk_level(profile: AgentProfileId | str) -> int:

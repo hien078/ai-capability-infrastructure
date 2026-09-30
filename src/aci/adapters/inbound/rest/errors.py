@@ -28,6 +28,7 @@ _STATUS: dict[ErrorCode, int] = {
     ErrorCode.ROUTE_RUN_NOT_FOUND: 404,
     ErrorCode.BUNDLE_NOT_FOUND: 404,
     ErrorCode.OUTCOME_NOT_FOUND: 404,
+    ErrorCode.WORKSPACE_NOT_FOUND: 404,
 }
 
 

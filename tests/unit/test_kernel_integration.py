@@ -16,6 +16,7 @@ from aci.domain.runtime.subtask import SubtaskContract
 from aci.domain.runtime.tools import SideEffectReport, ToolSpec
 from aci.runtime.context_engine import ContextBudget, ContextEngine
 from aci.runtime.guardrails import GuardrailManager, PathTraversalGuard, ShellInjectionGuard
+from aci.runtime.model_gateway import ModelRequest, ModelResponse, ModelUsage
 from aci.runtime.protocols import ToolDispatchResult
 from aci.runtime.recovery import RecoveryManager
 from aci.runtime.run_controller import HarnessKernel
@@ -28,10 +29,12 @@ from aci.runtime.workspace import WorkspaceManager
 class ScriptedModel:
     def __init__(self, actions: list[object]) -> None:
         self._actions = list(actions)
+        self.requests: list[ModelRequest] = []
 
-    def invoke(self, request: object) -> object:
-        from aci.runtime.model_gateway import ModelResponse, ModelUsage
-
+    def invoke(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
+        if not self._actions:
+            raise AssertionError("ScriptedModel exhausted: the kernel asked for more turns")
         return ModelResponse(
             action=self._actions.pop(0),
             usage=ModelUsage(input_tokens=100, output_tokens=50, latency_ms=10),
@@ -183,7 +186,9 @@ class TestKernelToolPathIntegration:
         assert result.usage.tool_calls == 1
 
     def test_verification_failure_never_succeeds(self, tmp_path: Path) -> None:
-        model = ScriptedModel([FinalCandidate(summary="trust me")])
+        """INV-08 over the real tool path: each rejected candidate comes back
+        to the model as a repair turn; the repeated failure ends FAILED."""
+        model = ScriptedModel([FinalCandidate(summary="trust me") for _ in range(3)])
         failing = VerifierCallable(
             "tests", lambda s, c: CheckResult(name="tests", passed=False, detail="0 run")
         )
@@ -191,3 +196,12 @@ class TestKernelToolPathIntegration:
         result = kernel.run(_contract(), _spec())
         assert result.status is RunStatus.FAILED
         assert result.stop_reason is StopReason.VERIFICATION_FAILED
+        assert len(model.requests) == 3
+        for request in model.requests[1:]:
+            feedback = [
+                m
+                for m in request.messages
+                if m.role == "user" and "Verification FAILED" in m.content
+            ]
+            assert feedback
+            assert "check 'tests' failed: 0 run" in feedback[-1].content

@@ -13,6 +13,7 @@ from aci.domain.runtime.authority import (
     NetworkScope,
     ProcessScope,
 )
+from aci.domain.runtime.evidence import EvidenceItem, EvidenceKind
 from aci.domain.runtime.state import (
     BudgetLedger,
     GrantEnvelope,
@@ -76,10 +77,12 @@ class FakeDispatcher:
         output: str = "ok",
         exc: Exception | None = None,
         side_effects: SideEffectReport | None = None,
+        evidence: list[EvidenceItem] | None = None,
     ) -> None:
         self.output = output
         self.exc = exc
         self.side_effects = side_effects or SideEffectReport()
+        self.evidence = evidence or []
         self.calls: list[tuple[ToolSpec, dict[str, Any]]] = []
 
     def dispatch(
@@ -88,7 +91,12 @@ class FakeDispatcher:
         self.calls.append((tool, args))
         if self.exc is not None:
             raise self.exc
-        return ToolDispatchResult(output=self.output, side_effects=self.side_effects, duration_ms=5)
+        return ToolDispatchResult(
+            output=self.output,
+            side_effects=self.side_effects,
+            duration_ms=5,
+            evidence=self.evidence,
+        )
 
 
 class FakeGuardrails:
@@ -302,6 +310,29 @@ def test_side_effect_report_passthrough() -> None:
     obs = rt.execute(call(), snapshot=snapshot(), envelope=envelope())
     assert obs.side_effects == effects
     assert obs.duration_ms == 5
+
+
+def test_dispatch_evidence_reaches_success_observation_only() -> None:
+    """§12.1 step 11 — evidence rides the success observation (and survives
+    redaction); a post-guard BLOCK drops it with the output."""
+    item = EvidenceItem(kind=EvidenceKind.FILE_STATE, ref="file://a.py", summary="read")
+    ok = runtime(FakeDispatcher(evidence=[item])).execute(
+        call(), snapshot=snapshot(), envelope=envelope()
+    )
+    assert ok.evidence == [item]
+    redacted = runtime(
+        FakeDispatcher(evidence=[item]), guardrails=FakeGuardrails(redacted="R")
+    ).execute(call(), snapshot=snapshot(), envelope=envelope())
+    assert redacted.evidence == [item]
+    blocked = runtime(
+        FakeDispatcher(evidence=[item]), guardrails=FakeGuardrails(post_allowed=False)
+    ).execute(call(), snapshot=snapshot(), envelope=envelope())
+    assert blocked.status == "blocked"
+    assert blocked.evidence == []
+    failed = runtime(FakeDispatcher(exc=RuntimeError("boom"), evidence=[item])).execute(
+        call(), snapshot=snapshot(), envelope=envelope()
+    )
+    assert failed.evidence == []
 
 
 def test_post_guardrail_redaction_applied() -> None:

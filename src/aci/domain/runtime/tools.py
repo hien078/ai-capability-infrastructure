@@ -9,6 +9,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from aci.domain.runtime.evidence import EvidenceItem
+
 SideEffectClass = Literal[
     "PURE", "READ_ONLY", "LOCAL_MUTATION", "EXTERNAL_MUTATION", "DESTRUCTIVE", "PRIVILEGED"
 ]
@@ -107,5 +109,8 @@ class ToolObservation(BaseModel):
     inline_output: str = ""
     artifact_ref: str | None = None
     side_effects: SideEffectReport = Field(default_factory=SideEffectReport)
+    #: §12.1 step 11 — what the call demonstrably observed (file read,
+    #: command exit status); the verifier grounds claims in these (INV-08).
+    evidence: list[EvidenceItem] = Field(default_factory=list)
     error_class: str | None = None
     duration_ms: int = Field(default=0, ge=0)

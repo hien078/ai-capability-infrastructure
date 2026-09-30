@@ -56,10 +56,25 @@ class TestPlanningStrategy:
         assert done[0].status == "done"
         assert done[0].evidence_refs == ["artifact://t/1"]
         assert done[1].status == "pending"
+        again = PlanningStrategy.mark_done(done, "plan-1", evidence_ref="artifact://t/2")
+        assert again[0].evidence_refs == ["artifact://t/1", "artifact://t/2"]
 
     def test_should_replan_only_on_material_triggers(self) -> None:
         strategy = PlanningStrategy(PlanningPolicy())
         snap = _snapshot([])
         assert strategy.should_replan(snap, trigger="verification_failure")
         assert strategy.should_replan(snap, trigger="capability_change")
+        assert strategy.should_replan(snap, trigger="major_new_evidence")
         assert not strategy.should_replan(snap, trigger="new_turn")
+
+    def test_replans_bounded_by_policy(self) -> None:
+        """§6.4/§18.4: max_replans is a hard bound, whatever the trigger."""
+        strategy = PlanningStrategy(PlanningPolicy(max_replans=2))
+        snap = _snapshot([])
+        assert strategy.should_replan(snap, trigger="verification_failure", replans=1)
+        assert not strategy.should_replan(snap, trigger="verification_failure", replans=2)
+        assert not strategy.should_replan(snap, trigger="capability_change", replans=5)
+        never = PlanningStrategy(PlanningPolicy(max_replans=0))
+        assert not never.should_replan(snap, trigger="verification_failure")
+        none_mode = PlanningStrategy(PlanningPolicy(mode="none"))
+        assert not none_mode.should_replan(snap, trigger="verification_failure")

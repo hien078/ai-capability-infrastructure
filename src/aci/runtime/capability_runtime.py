@@ -88,14 +88,14 @@ class CapabilityRuntime:
         context (§26.3 supply-chain rules)."""
         key = (selection.capability_id, selection.version)
         if key not in self._cache:
-            payload, digest = self._aci.resolve(*key)
-            if digest != selection.digest:
-                raise CapabilitySearchError(
-                    f"digest mismatch for {selection.capability_id}@{selection.version}: "
-                    f"expected {selection.digest}, got {digest}"
-                )
-            self._cache[key] = (payload, digest)
+            self._cache[key] = self._aci.resolve(*key)
         payload, digest = self._cache[key]
+        if digest != selection.digest:
+            # A pinned version has ONE digest: a cache hit is verified too.
+            raise CapabilitySearchError(
+                f"digest mismatch for {selection.capability_id}@{selection.version}: "
+                f"expected {selection.digest}, got {digest}"
+            )
         activation = CapabilityActivation(
             capability_id=selection.capability_id,
             version=selection.version,

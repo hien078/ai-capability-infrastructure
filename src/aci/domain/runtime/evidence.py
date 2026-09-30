@@ -58,6 +58,8 @@ class CheckResult(BaseModel):
     passed: bool
     mandatory: bool = True
     detail: str = ""
+    #: Evidence the check itself produced (e.g. a verifier-run test result).
+    evidence: list[EvidenceItem] = Field(default_factory=list)
 
 
 class VerificationResult(BaseModel):

@@ -1,5 +1,6 @@
 """Runtime config. Env-loaded; no secrets in repo."""
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +34,26 @@ class Settings(BaseSettings):
     #: JSON file holding AgentProfile records (deployment DATA, §56.1) — a
     #: bare list or {"profiles": [...]}. Empty = no profiles configured.
     agent_profiles_path: str = ""
+    #: Directory whose immediate subdirectories are the workspace SOURCES a
+    #: client may name in POST /v1/agent-runs (harness.md §16). Empty = no
+    #: workspace tools: runs get no filesystem or process authority.
+    agent_workspace_root: str = ""
+    #: Per-run working copies: a run works in <agent_runs_root>/<run_id>, the
+    #: source directory is never touched.
+    agent_runs_root: str = "data/agent-runs"
+    #: Server CEILING (§13.4, INV-02) of command prefixes the model's
+    #: run_command tool and the client's verification_command may execute,
+    #: e.g. ["python -m pytest"]; a request may only narrow it. Empty
+    #: (default) = no run_command tool and no verification command.
+    #: WARNING: a non-empty ceiling runs workspace code — including files the
+    #: model just wrote — as the server user WITHOUT a sandbox (LocalWorkspace,
+    #: §16.4). Enable only on a host you would let the model own. Env value is
+    #: JSON: ACI_AGENT_PROCESS_PREFIXES='["python -m pytest"]'.
+    agent_process_prefixes: list[str] = Field(default_factory=list)
+    #: Timeout for one model-issued run_command (seconds).
+    agent_command_timeout_seconds: float = 120.0
+    #: Timeout for the client's verification_command (seconds).
+    agent_verification_timeout_seconds: float = 300.0
 
 
 settings = Settings()

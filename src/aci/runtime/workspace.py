@@ -5,14 +5,57 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.authority import ExecutionEnvelope
 from aci.runtime.protocols import ProcessResult
+
+#: Tool caches and VCS metadata: never workspace state, never a side effect.
+NOISE_DIRS: frozenset[str] = frozenset(
+    {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".git"}
+)
+
+
+def command_within_prefixes(command: Sequence[str], prefixes: Sequence[str]) -> bool:
+    """Token-aware, fail-closed process scope (§13.4): argv must start with the
+    whitespace-split tokens of an allowed prefix. `pytest` never admits
+    `pytest-evil`, an empty prefix admits nothing, and no prefixes deny all."""
+    if not command:
+        return False
+    for prefix in prefixes:
+        tokens = prefix.split()
+        if not tokens:
+            continue
+        if list(command[: len(tokens)]) == tokens or command[0] == prefix.strip():
+            return True
+    return False
+
+
+def _process_env(home: Path) -> dict[str, str]:
+    """§16.4 — a minimal allowlisted environment: the server's env (API keys,
+    DB URLs) never reaches workspace processes. Relative PATH entries are
+    dropped so a model-written file in the cwd can never shadow a command."""
+    entries = [os.path.dirname(sys.executable)]
+    entries += os.environ.get("PATH", os.defpath).split(os.pathsep)
+    path = os.pathsep.join(dict.fromkeys(e for e in entries if os.path.isabs(e)))
+    env = {
+        "PATH": path,
+        "HOME": str(home),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONUNBUFFERED": "1",
+    }
+    tz = os.environ.get("TZ")
+    if tz:
+        env["TZ"] = tz
+    return env
 
 
 def _kill_process_group(proc: subprocess.Popen[bytes]) -> None:
@@ -57,28 +100,38 @@ class _RootedWorkspace:
         return candidate
 
     def read_file(self, path: str) -> str:
-        return self._validate(path).read_text(encoding="utf-8")
+        # Bytes-exact (no newline translation): an edit round-trips CRLF files
+        # and the content hash matches the on-disk hash from `_scan`.
+        return self._validate(path).read_bytes().decode("utf-8")
 
     def write_file(self, path: str, content: str) -> None:
         target = self._validate(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        target.write_text(content, encoding="utf-8", newline="")
 
     def list_dir(self, path: str) -> list[str]:
-        return sorted(p.name for p in self._validate(path).iterdir())
+        """Sorted entry names; directories carry a trailing `/`."""
+        return sorted(p.name + ("/" if p.is_dir() else "") for p in self._validate(path).iterdir())
 
     def _scan(self) -> dict[str, str]:
-        """Walk the tree collecting {relpath: sha256}; symlink-escaping entries are skipped."""
+        """Walk the tree collecting {posix relpath: sha256} of regular files.
+        Symlink-escaping entries, special files (a FIFO would block the read)
+        and NOISE_DIRS are skipped."""
         mapping: dict[str, str] = {}
-        for dirpath, _dirnames, filenames in os.walk(self._root, followlinks=False):
+        for dirpath, dirnames, filenames in os.walk(self._root, followlinks=False):
+            dirnames[:] = [d for d in dirnames if d not in NOISE_DIRS]
             for name in filenames:
                 abs_path = Path(dirpath) / name
                 real = Path(os.path.realpath(abs_path))
                 if real != self._root_real and self._root_real not in real.parents:
                     continue
-                mapping[str(abs_path.relative_to(self._root))] = hashlib.sha256(
-                    abs_path.read_bytes()
-                ).hexdigest()
+                if not real.is_file():
+                    continue
+                try:
+                    digest = hashlib.sha256(real.read_bytes()).hexdigest()
+                except OSError:
+                    continue
+                mapping[abs_path.relative_to(self._root).as_posix()] = digest
         return mapping
 
     def snapshot(self) -> str:
@@ -126,6 +179,8 @@ class LocalWorkspace(_RootedWorkspace):
         proc = subprocess.Popen(
             command,
             cwd=self._root,
+            env=_process_env(self._root_real),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -213,25 +268,37 @@ class WorkspaceManager:
         self._envelopes[workspace_id] = envelope
         return workspace_id
 
+    def root(self, workspace_id: str) -> Path:
+        return self._get(workspace_id).root
+
     def _get(self, workspace_id: str) -> _RootedWorkspace:
         workspace = self._workspaces.get(workspace_id)
         if workspace is None:
             raise DomainError(ErrorCode.WORKSPACE_NOT_FOUND, f"unknown workspace: {workspace_id!r}")
         return workspace
 
-    def _check_envelope(self, workspace_id: str, path: str, mode: str) -> None:
-        """Re-check a workspace-relative path against envelope scopes before any fs touch."""
+    def _live_envelope(self, workspace_id: str) -> ExecutionEnvelope | None:
         envelope = self._envelopes[workspace_id]
+        if envelope is not None and envelope.expires_at is not None:
+            if envelope.expires_at <= datetime.now(UTC):
+                raise DomainError(
+                    ErrorCode.AUTHORITY_EXPIRED, f"envelope expired for {workspace_id}"
+                )
+        return envelope
+
+    def _check_envelope(self, workspace_id: str, path: str, mode: str) -> None:
+        """Re-check a workspace-relative path against envelope scopes before any fs touch.
+
+        Relative scope prefixes resolve against the workspace root (`.` is the
+        whole root); absolute prefixes are taken as-is."""
+        envelope = self._live_envelope(workspace_id)
         if envelope is None:
             return
-        if envelope.expires_at is not None and envelope.expires_at <= datetime.now(UTC):
-            raise DomainError(ErrorCode.AUTHORITY_EXPIRED, f"envelope expired for {workspace_id}")
-        workspace = self._workspaces[workspace_id]
-        assert workspace is not None
-        abs_path = Path(os.path.realpath(workspace.root / path))
+        root = self._workspaces[workspace_id].root
+        abs_path = Path(os.path.realpath(root / path))
         scopes = envelope.filesystem.read if mode == "read" else envelope.filesystem.write
         for prefix in scopes:
-            prefix_real = Path(os.path.realpath(prefix))
+            prefix_real = Path(os.path.realpath(prefix if os.path.isabs(prefix) else root / prefix))
             if abs_path == prefix_real or prefix_real in abs_path.parents:
                 return
         raise DomainError(
@@ -255,19 +322,16 @@ class WorkspaceManager:
         return self._get(workspace_id).list_dir(path)
 
     def execute(self, workspace_id: str, command: list[str], timeout_ms: int) -> ProcessResult:
+        """A bound envelope is fail-closed: no allowed prefixes means no processes."""
         workspace = self._get(workspace_id)
-        envelope = self._envelopes[workspace_id]
-        if envelope is not None and envelope.process.allowed_prefixes:
-            allowed = any(
-                command and command[0].startswith(prefix)
-                for prefix in envelope.process.allowed_prefixes
+        envelope = self._live_envelope(workspace_id)
+        if envelope is not None and not command_within_prefixes(
+            command, envelope.process.allowed_prefixes
+        ):
+            raise DomainError(
+                ErrorCode.PERMISSION_DENIED,
+                f"command {command[:3]!r} is outside envelope process scopes for {workspace_id}",
             )
-            if not allowed:
-                raise DomainError(
-                    ErrorCode.PERMISSION_DENIED,
-                    f"command {command[:1]!r} is outside envelope process scopes "
-                    f"for {workspace_id}",
-                )
         return workspace.execute(command, timeout_ms)
 
     def terminate(self, workspace_id: str) -> None:
@@ -279,5 +343,15 @@ class WorkspaceManager:
     def diff(self, workspace_id: str, snapshot_id: str) -> str:
         return self._get(workspace_id).diff(snapshot_id)
 
+    def file_hashes(self, workspace_id: str) -> dict[str, str]:
+        """{posix relpath: sha256} of every workspace file — the side-effect baseline."""
+        return self._get(workspace_id)._scan()
 
-__all__ = ["LocalWorkspace", "SandboxWorkspace", "WorkspaceManager"]
+
+__all__ = [
+    "NOISE_DIRS",
+    "LocalWorkspace",
+    "SandboxWorkspace",
+    "WorkspaceManager",
+    "command_within_prefixes",
+]

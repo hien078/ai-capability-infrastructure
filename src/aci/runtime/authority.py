@@ -25,6 +25,10 @@ from aci.domain.runtime.authority import (
     GrantEnvelope,
     NetworkScope,
     ProcessScope,
+    has_traversal,
+    narrow_grants,
+    path_within_scopes,
+    prefix_within_prefixes,
 )
 from aci.domain.runtime.tools import SideEffectClass, ToolSpec
 
@@ -56,32 +60,27 @@ def _is_expired(expires_at: datetime | None, now: datetime) -> bool:
     return now >= exp
 
 
-def _has_traversal(path: str) -> bool:
-    return ".." in path.split("/")
+_has_traversal = has_traversal
+_within_scope = path_within_scopes
+_prefix_allowed = prefix_within_prefixes
 
 
-def _within_scope(path: str, scopes: Sequence[str]) -> bool:
-    """Segment-aware prefix match: `/repo/src` is within `/repo`, `/repoother` is not."""
-    for scope in scopes:
-        trimmed = scope.rstrip("/")
-        if trimmed in ("", "/"):
-            return True
-        if path == trimmed or path.startswith(trimmed + "/"):
-            return True
-    return False
-
-
-def _prefix_allowed(prefix: str, allowed: Sequence[str]) -> bool:
-    """`git status` matches allowed prefix `git` (token-wise extension)."""
-    for candidate in allowed:
-        trimmed = candidate.rstrip()
-        if prefix == trimmed or prefix.startswith(trimmed + " "):
-            return True
-    return False
+def _is_empty(requirement: AuthorityRequirement) -> bool:
+    return not (
+        requirement.filesystem_read
+        or requirement.filesystem_write
+        or requirement.network_hosts
+        or requirement.process_prefixes
+        or requirement.secret_refs
+    )
 
 
 class PolicyEvaluator:
-    """Evaluates an AuthorityRequirement against grants + policy (§13.3, §58)."""
+    """Evaluates an AuthorityRequirement against grants + policy (§13.3, §58).
+
+    Scope checks run first, so anything outside the policy ceiling is DENY
+    regardless of side-effect class (INV-02); an approval class then forces
+    REQUIRE_APPROVAL even for fully granted operations."""
 
     def evaluate(
         self,
@@ -95,71 +94,16 @@ class PolicyEvaluator:
                 kind=AuthorityDecisionKind.DENY,
                 reason=f"side-effect class {side_effect_class} is denied by policy",
             )
+        delta = self._delta(requirement, grants, policy.ceiling)
+        if isinstance(delta, str):
+            return AuthorityDecision(kind=AuthorityDecisionKind.DENY, reason=delta)
         if side_effect_class is not None and side_effect_class in policy.approval_classes:
             return AuthorityDecision(
                 kind=AuthorityDecisionKind.REQUIRE_APPROVAL,
                 reason=f"side-effect class {side_effect_class} requires approval",
                 requested_delta=requirement,
             )
-
-        delta = AuthorityRequirement()
-        for path in requirement.filesystem_read:
-            decision = self._check_path(
-                path, grants.filesystem.read, policy.ceiling.filesystem.read
-            )
-            if decision == "DENY":
-                return AuthorityDecision(
-                    kind=AuthorityDecisionKind.DENY, reason=f"read path {path!r} denied by policy"
-                )
-            if decision == "CEILING":
-                delta.filesystem_read.append(path)
-        for path in requirement.filesystem_write:
-            decision = self._check_path(
-                path, grants.filesystem.write, policy.ceiling.filesystem.write
-            )
-            if decision == "DENY":
-                return AuthorityDecision(
-                    kind=AuthorityDecisionKind.DENY, reason=f"write path {path!r} denied by policy"
-                )
-            if decision == "CEILING":
-                delta.filesystem_write.append(path)
-        for host in requirement.network_hosts:
-            if grants.network.enabled and host in grants.network.allowed_hosts:
-                continue
-            if policy.ceiling.network.enabled and host in policy.ceiling.network.allowed_hosts:
-                delta.network_hosts.append(host)
-            else:
-                return AuthorityDecision(
-                    kind=AuthorityDecisionKind.DENY,
-                    reason=f"network host {host!r} denied by policy",
-                )
-        for prefix in requirement.process_prefixes:
-            if _prefix_allowed(prefix, grants.process.allowed_prefixes):
-                continue
-            if _prefix_allowed(prefix, policy.ceiling.process.allowed_prefixes):
-                delta.process_prefixes.append(prefix)
-            else:
-                return AuthorityDecision(
-                    kind=AuthorityDecisionKind.DENY,
-                    reason=f"process prefix {prefix!r} denied by policy",
-                )
-        for ref in requirement.secret_refs:
-            if ref in grants.secrets_allowed_refs:
-                continue
-            if ref in policy.ceiling.secrets_allowed_refs:
-                delta.secret_refs.append(ref)
-            else:
-                return AuthorityDecision(
-                    kind=AuthorityDecisionKind.DENY, reason=f"secret ref {ref!r} denied by policy"
-                )
-
-        if (
-            delta.filesystem_read
-            or delta.filesystem_write
-            or delta.network_hosts
-            or delta.process_prefixes
-            or delta.secret_refs
-        ):
+        if not _is_empty(delta):
             return AuthorityDecision(
                 kind=policy.default,
                 reason="requirement exceeds current grants but is within policy",
@@ -167,13 +111,54 @@ class PolicyEvaluator:
             )
         return AuthorityDecision(kind=AuthorityDecisionKind.ALLOW, reason="within current grants")
 
+    def _delta(
+        self, requirement: AuthorityRequirement, grants: GrantEnvelope, ceiling: GrantEnvelope
+    ) -> AuthorityRequirement | str:
+        """The part of ``requirement`` beyond current grants but within the
+        ceiling, or the denial reason for the first item outside the ceiling."""
+        delta = AuthorityRequirement()
+        for path in requirement.filesystem_read:
+            decision = self._check_path(path, grants.filesystem.read, ceiling.filesystem.read)
+            if decision == "DENY":
+                return f"read path {path!r} denied by policy"
+            if decision == "CEILING":
+                delta.filesystem_read.append(path)
+        for path in requirement.filesystem_write:
+            decision = self._check_path(path, grants.filesystem.write, ceiling.filesystem.write)
+            if decision == "DENY":
+                return f"write path {path!r} denied by policy"
+            if decision == "CEILING":
+                delta.filesystem_write.append(path)
+        for host in requirement.network_hosts:
+            if grants.network.enabled and host in grants.network.allowed_hosts:
+                continue
+            if ceiling.network.enabled and host in ceiling.network.allowed_hosts:
+                delta.network_hosts.append(host)
+            else:
+                return f"network host {host!r} denied by policy"
+        for prefix in requirement.process_prefixes:
+            if prefix_within_prefixes(prefix, grants.process.allowed_prefixes):
+                continue
+            if prefix_within_prefixes(prefix, ceiling.process.allowed_prefixes):
+                delta.process_prefixes.append(prefix)
+            else:
+                return f"process prefix {prefix!r} denied by policy"
+        for ref in requirement.secret_refs:
+            if ref in grants.secrets_allowed_refs:
+                continue
+            if ref in ceiling.secrets_allowed_refs:
+                delta.secret_refs.append(ref)
+            else:
+                return f"secret ref {ref!r} denied by policy"
+        return delta
+
     @staticmethod
     def _check_path(path: str, granted: Sequence[str], ceiling: Sequence[str]) -> str:
-        if _has_traversal(path):
+        if has_traversal(path):
             return "DENY"
-        if _within_scope(path, granted):
+        if path_within_scopes(path, granted):
             return "GRANTED"
-        if _within_scope(path, ceiling):
+        if path_within_scopes(path, ceiling):
             return "CEILING"
         return "DENY"
 
@@ -224,7 +209,7 @@ def _strings(
 
 
 def _norm_path(path: str) -> str:
-    return path if _has_traversal(path) else posixpath.normpath(path)
+    return path if has_traversal(path) else posixpath.normpath(path)
 
 
 def _union(base: GrantEnvelope, delta: AuthorityRequirement) -> GrantEnvelope:
@@ -248,36 +233,8 @@ def _union(base: GrantEnvelope, delta: AuthorityRequirement) -> GrantEnvelope:
 
 
 def _clip_to_ceiling(grants: GrantEnvelope, ceiling: GrantEnvelope) -> GrantEnvelope:
-    """INV-02: extended grants never exceed policy maximums.
-
-    Filesystem scopes are prefix-scoped (a path under a ceiling scope is
-    within the ceiling); hosts/prefixes/secret refs are exact-match.
-    """
-    return GrantEnvelope(
-        filesystem=FilesystemScope(
-            read=[p for p in grants.filesystem.read if _within_scope(p, ceiling.filesystem.read)],
-            write=[
-                p for p in grants.filesystem.write if _within_scope(p, ceiling.filesystem.write)
-            ],
-        ),
-        network=NetworkScope(
-            enabled=grants.network.enabled and ceiling.network.enabled,
-            allowed_hosts=[
-                h for h in grants.network.allowed_hosts if h in ceiling.network.allowed_hosts
-            ],
-        ),
-        process=ProcessScope(
-            allowed_prefixes=[
-                p
-                for p in grants.process.allowed_prefixes
-                if _prefix_allowed(p, ceiling.process.allowed_prefixes)
-            ],
-        ),
-        secrets_allowed_refs=[
-            s for s in grants.secrets_allowed_refs if s in ceiling.secrets_allowed_refs
-        ],
-        expires_at=grants.expires_at,
-    )
+    """INV-02: extended grants never exceed policy maximums — in scope or in time."""
+    return narrow_grants(grants, ceiling)
 
 
 class GrantLedger:
@@ -310,6 +267,8 @@ class GrantLedger:
         self._requests[request.approval_id] = request
 
     def apply_approval(self, decision: ApprovalDecision, request: ApprovalRequest) -> GrantEnvelope:
+        """§27.4: the approval binds to the REGISTERED request (run, operation
+        hash, delta, workspace, expiry) — only that delta is ever applied."""
         stored = self._requests.get(request.approval_id)
         if stored is None:
             raise DomainError(
@@ -326,6 +285,11 @@ class GrantLedger:
                 ErrorCode.APPROVAL_REJECTED,
                 "operation changed since approval was requested (§27.4)",
             )
+        if request != stored:
+            raise DomainError(
+                ErrorCode.APPROVAL_REJECTED,
+                "approval request does not match the registered request (§27.4)",
+            )
         if request.approval_id in self._applied:
             raise DomainError(
                 ErrorCode.APPROVAL_REPLAY_INVALID,
@@ -335,12 +299,12 @@ class GrantLedger:
             raise DomainError(
                 ErrorCode.APPROVAL_REJECTED, f"approval {request.approval_id} was not granted"
             )
-        if _is_expired(request.expires_at, _now()) or _is_expired(stored.expires_at, _now()):
+        if _is_expired(stored.expires_at, _now()):
             raise DomainError(
                 ErrorCode.AUTHORITY_EXPIRED,
                 f"approval {request.approval_id} expired before it was applied",
             )
-        extended = _union(self._grants, request.requested_delta)
+        extended = _union(self._grants, stored.requested_delta)
         # INV-02: the extended grant never exceeds policy maximums.
         self._grants = _clip_to_ceiling(extended, self._policy.ceiling)
         self._applied.add(request.approval_id)
@@ -407,11 +371,13 @@ class AuthorityManager:
         requirement: AuthorityRequirement,
         reason: str,
         operation_hash: str,
+        workspace_id: str = "",
     ) -> ApprovalRequest:
         request = ApprovalRequest(
             approval_id=uuid.uuid4().hex,
             run_id=run_id,
             operation_hash=operation_hash,
+            workspace_id=workspace_id,
             reason=reason,
             requested_delta=requirement,
             expires_at=_now() + self._approval_ttl,
@@ -445,7 +411,10 @@ class ApprovalCoordinator:
         self._pending: dict[str, ApprovalRequest] = {}
 
     def register(self, request: ApprovalRequest) -> None:
+        """Track the request here AND in the ledger, so ``apply`` reaches the
+        ledger's own binding checks with the same registered object."""
         self._pending[request.approval_id] = request
+        self._ledger.register_request(request)
 
     def pending_for_run(self, run_id: str) -> list[ApprovalRequest]:
         return [r for r in self._pending.values() if r.run_id == run_id]
@@ -476,8 +445,7 @@ class ApprovalCoordinator:
                 ErrorCode.APPROVAL_REPLAY_INVALID,
                 "workspace changed since approval was requested",
             )
-        current = now or datetime.now(UTC)
-        if request.expires_at is not None and current >= request.expires_at:
+        if _is_expired(request.expires_at, now or _now()):
             raise DomainError(ErrorCode.AUTHORITY_EXPIRED, "approval expired")
         grants = self._ledger.apply_approval(decision, request)
         self._pending.pop(decision.approval_id, None)

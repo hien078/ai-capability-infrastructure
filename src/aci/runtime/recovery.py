@@ -1,45 +1,45 @@
 """RecoveryManager (harness.md §18): failure-classified, bounded recovery.
 
-No blind retry of uncertain non-idempotent effects (§18.3); recovery itself
-consumes budget (§18.4) — the caller enforces max_recoveries.
+No blind retry of uncertain non-idempotent effects (§18.3, §12.6); recovery
+itself consumes budget (§18.4) — the caller enforces max_recoveries.
 """
+
+from dataclasses import dataclass
 
 from aci.domain.runtime.failures import FailureClass, FailureEnvelope
 from aci.domain.runtime.stop_reason import StopReason
 from aci.domain.runtime.tools import IdempotencyClass
 
+RECOVERY_ACTIONS = frozenset(
+    {
+        "RETRY_SAME",
+        "RETRY_BACKOFF",
+        "REPAIR_INPUT",
+        "REPAIR_OUTPUT",
+        "REPLAN",
+        "COMPACT_CONTEXT",
+        "REQUEST_APPROVAL",
+        "REQUEST_ALTERNATE_CAPABILITY",
+        "SWITCH_MODEL",
+        "RESTORE_CHECKPOINT",
+        "RETURN_PARTIAL",
+        "ESCALATE",
+        "FAIL",
+    }
+)
 
+
+@dataclass(frozen=True, slots=True)
 class RecoveryAction:
-    """§18.2 recovery actions as frozen data."""
+    """§18.2 recovery actions as frozen data — shared matrix entries can
+    never be mutated through a returned decision."""
 
-    _VALID = frozenset(
-        {
-            "RETRY_SAME",
-            "RETRY_BACKOFF",
-            "REPAIR_INPUT",
-            "REPAIR_OUTPUT",
-            "REPLAN",
-            "COMPACT_CONTEXT",
-            "REQUEST_APPROVAL",
-            "REQUEST_ALTERNATE_CAPABILITY",
-            "SWITCH_MODEL",
-            "RESTORE_CHECKPOINT",
-            "RETURN_PARTIAL",
-            "ESCALATE",
-            "FAIL",
-        }
-    )
+    action: str
+    reason: str
 
-    __slots__ = ("action", "reason")
-
-    def __init__(self, action: str, reason: str) -> None:
-        if action not in self._VALID:
-            raise ValueError(f"unknown recovery action: {action}")
-        self.action = action
-        self.reason = reason
-
-    def __repr__(self) -> str:  # pragma: no cover
-        return f"RecoveryAction({self.action})"
+    def __post_init__(self) -> None:
+        if self.action not in RECOVERY_ACTIONS:
+            raise ValueError(f"unknown recovery action: {self.action}")
 
     @property
     def is_terminal(self) -> bool:
@@ -85,6 +85,33 @@ _DEFAULT_MATRIX: dict[FailureClass, RecoveryAction] = {
     FailureClass.FATAL: RecoveryAction("FAIL", "preserve diagnostic state"),
 }
 
+# §7.5 stop reason for a failure class that ends the run.
+_STOP_REASONS: dict[FailureClass, StopReason] = {
+    FailureClass.VERIFICATION_FAILED: StopReason.VERIFICATION_FAILED,
+    FailureClass.RESULT_CONTRACT_FAILED: StopReason.VERIFICATION_FAILED,
+    FailureClass.AUTHORITY_BLOCKED: StopReason.AUTHORITY_DENIED,
+    FailureClass.APPROVAL_REJECTED: StopReason.AUTHORITY_DENIED,
+    FailureClass.CAPABILITY_NOT_FOUND: StopReason.CAPABILITY_UNAVAILABLE,
+    FailureClass.CAPABILITY_LOAD_FAILED: StopReason.CAPABILITY_UNAVAILABLE,
+    FailureClass.CAPABILITY_INSUFFICIENT: StopReason.CAPABILITY_UNAVAILABLE,
+    FailureClass.CAPABILITY_CONFLICT: StopReason.CAPABILITY_UNAVAILABLE,
+    FailureClass.WORKSPACE_UNAVAILABLE: StopReason.WORKSPACE_FAILURE,
+    FailureClass.SANDBOX_DENIED: StopReason.WORKSPACE_FAILURE,
+    FailureClass.TRANSIENT_MODEL: StopReason.MODEL_FAILURE,
+    FailureClass.RATE_LIMITED: StopReason.MODEL_FAILURE,
+    FailureClass.MODEL_MALFORMED_OUTPUT: StopReason.MODEL_FAILURE,
+    FailureClass.TOOL_TIMEOUT: StopReason.TOOL_FAILURE,
+    FailureClass.TOOL_EXECUTION_FAILED: StopReason.TOOL_FAILURE,
+    FailureClass.TRANSIENT_TOOL: StopReason.TOOL_FAILURE,
+    FailureClass.TOOL_INVALID_ARGUMENT: StopReason.TOOL_FAILURE,
+    FailureClass.TOOL_SIDE_EFFECT_UNCERTAIN: StopReason.TOOL_FAILURE,
+    FailureClass.CONTEXT_OVERFLOW: StopReason.FATAL_ERROR,
+    FailureClass.CONTEXT_CORRUPTION: StopReason.FATAL_ERROR,
+    FailureClass.BUDGET_EXHAUSTED: StopReason.LIMIT_COST,
+    FailureClass.CANCELLED: StopReason.CANCELLED,
+    FailureClass.FATAL: StopReason.FATAL_ERROR,
+}
+
 
 class RecoveryManager:
     """Classify → look up policy → bound attempts. The caller (RunController)
@@ -105,8 +132,13 @@ class RecoveryManager:
         self._attempts = 0
         self._per_class: dict[FailureClass, int] = {}
 
-    def decide(self, failure: FailureEnvelope) -> RecoveryAction:
-        """Terminal when the recovery budget is spent (no infinite loops)."""
+    def decide(
+        self, failure: FailureEnvelope, *, idempotency: IdempotencyClass | None = None
+    ) -> RecoveryAction:
+        """Terminal when the recovery budget is spent (no infinite loops).
+        ``idempotency`` is the failed tool's class when known: RETRY_SAME is
+        never issued for a call that may have had a side effect or that is
+        not declared idempotent (§12.6, §18.3)."""
         self._attempts += 1
         self._per_class[failure.failure_class] = self._per_class.get(failure.failure_class, 0) + 1
         if self._attempts > self._max_attempts:
@@ -114,8 +146,11 @@ class RecoveryManager:
         if self._per_class[failure.failure_class] > self._max_same:
             return RecoveryAction("ESCALATE", f"{failure.failure_class} repeated")
         action = self._matrix[failure.failure_class]
-        if failure.side_effect_state == "possible" and action.action == "RETRY_SAME":
-            return RecoveryAction("REPLAN", "possible side effect — no blind retry")
+        if action.action == "RETRY_SAME":
+            if failure.side_effect_state == "possible":
+                return RecoveryAction("REPLAN", "possible side effect — no blind retry")
+            if idempotency is not None and not idempotency_allows_retry(idempotency):
+                return RecoveryAction("REPLAN", f"{idempotency} tool — no blind retry")
         return action
 
     @property
@@ -125,32 +160,7 @@ class RecoveryManager:
 
 def stop_reason_for_failure(failure: FailureEnvelope) -> StopReason:
     """Map a terminal failure to its §7.5 stop reason."""
-    mapping: dict[FailureClass, StopReason] = {
-        FailureClass.VERIFICATION_FAILED: StopReason.VERIFICATION_FAILED,
-        FailureClass.RESULT_CONTRACT_FAILED: StopReason.VERIFICATION_FAILED,
-        FailureClass.AUTHORITY_BLOCKED: StopReason.AUTHORITY_DENIED,
-        FailureClass.APPROVAL_REJECTED: StopReason.AUTHORITY_DENIED,
-        FailureClass.CAPABILITY_NOT_FOUND: StopReason.CAPABILITY_UNAVAILABLE,
-        FailureClass.CAPABILITY_LOAD_FAILED: StopReason.CAPABILITY_UNAVAILABLE,
-        FailureClass.CAPABILITY_INSUFFICIENT: StopReason.CAPABILITY_UNAVAILABLE,
-        FailureClass.CAPABILITY_CONFLICT: StopReason.CAPABILITY_UNAVAILABLE,
-        FailureClass.WORKSPACE_UNAVAILABLE: StopReason.WORKSPACE_FAILURE,
-        FailureClass.SANDBOX_DENIED: StopReason.WORKSPACE_FAILURE,
-        FailureClass.TRANSIENT_MODEL: StopReason.MODEL_FAILURE,
-        FailureClass.RATE_LIMITED: StopReason.MODEL_FAILURE,
-        FailureClass.MODEL_MALFORMED_OUTPUT: StopReason.MODEL_FAILURE,
-        FailureClass.TOOL_TIMEOUT: StopReason.TOOL_FAILURE,
-        FailureClass.TOOL_EXECUTION_FAILED: StopReason.TOOL_FAILURE,
-        FailureClass.TRANSIENT_TOOL: StopReason.TOOL_FAILURE,
-        FailureClass.TOOL_INVALID_ARGUMENT: StopReason.TOOL_FAILURE,
-        FailureClass.TOOL_SIDE_EFFECT_UNCERTAIN: StopReason.TOOL_FAILURE,
-        FailureClass.CONTEXT_OVERFLOW: StopReason.FATAL_ERROR,
-        FailureClass.CONTEXT_CORRUPTION: StopReason.FATAL_ERROR,
-        FailureClass.BUDGET_EXHAUSTED: StopReason.LIMIT_COST,
-        FailureClass.CANCELLED: StopReason.CANCELLED,
-        FailureClass.FATAL: StopReason.FATAL_ERROR,
-    }
-    return mapping[failure.failure_class]
+    return _STOP_REASONS[failure.failure_class]
 
 
 def idempotency_allows_retry(cls: IdempotencyClass) -> bool:

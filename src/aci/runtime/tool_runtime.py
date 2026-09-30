@@ -229,6 +229,7 @@ class ToolRuntime:
             inline_output=inline,
             artifact_ref=artifact_ref,
             side_effects=dispatch.side_effects,
+            evidence=dispatch.evidence,
             duration_ms=dispatch.duration_ms,
         )
         redacted, blocked = self._post_guard(tool, args, observation)

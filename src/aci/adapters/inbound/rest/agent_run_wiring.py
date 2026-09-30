@@ -1,5 +1,6 @@
 """HarnessKernel REST wiring (ADR-014): factories the AgentRunService composes
-one kernel per run from. The model gateway is a real provider client when
+one kernel per run from, plus the workspace settings (§16) it provisions
+per-run working copies with. The model gateway is a real provider client when
 ACI_AGENT_MODEL_BASE_URL is set; otherwise the run fails caller-visibly —
 the same honest-null rule as the A2A executor (§56.1)."""
 
@@ -25,8 +26,8 @@ class _UnconfiguredGateway:
 
 
 class _NullDispatcher:
-    """The REST agent-run floor has no workspace yet (H4 is a later phase);
-    a tool call fails closed rather than pretending to execute."""
+    """The no-workspace path (request without `workspace`): a tool call fails
+    closed rather than pretending to execute."""
 
     def dispatch(
         self, tool: ToolSpec, args: dict[str, Any], envelope: ExecutionEnvelope
@@ -71,4 +72,9 @@ def build_agent_run_service(settings: Settings) -> AgentRunService:
         tool_executor_factory=_ToolFactory(),
         capability_runtime_factory=_CapabilityFactory(),
         context_engine_factory=_ContextFactory(),
+        workspace_root=settings.agent_workspace_root or None,
+        runs_root=settings.agent_runs_root,
+        process_prefixes=settings.agent_process_prefixes,
+        command_timeout_seconds=settings.agent_command_timeout_seconds,
+        verification_timeout_seconds=settings.agent_verification_timeout_seconds,
     )

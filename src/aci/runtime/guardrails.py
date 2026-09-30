@@ -2,9 +2,11 @@
 
 Guardrails validate tool inputs and outputs (INV-06: no side effect before
 guardrail); they never grant authority. All checks are deterministic and run
-in registration order — first BLOCK wins (§25).
+in registration order — first BLOCK wins (§25); TRANSFORM results chain so
+the final redacted output reaches ToolRuntime; WARN is reported, not dropped.
 """
 
+import json
 import re
 from collections.abc import Sequence
 from typing import Any, Literal, Protocol
@@ -53,12 +55,9 @@ def _warn(name: str, reason: str) -> GuardrailResult:
     return GuardrailResult(status="WARN", guardrail=name, reason=reason)
 
 
-def _walk(value: Any) -> Any:
-    yield value
-
-
 def _string_values(args: dict[str, Any], field_names: tuple[str, ...]) -> list[tuple[str, str]]:
-    """Yield (field_name, string_value) for the given arg fields (recursing into lists/dicts)."""
+    """(field_name, string) for every value under a matching key at ANY depth
+    of the args tree (lists and dicts included) — nesting never hides a field."""
     out: list[tuple[str, str]] = []
 
     def _collect(field: str, value: Any) -> None:
@@ -71,23 +70,39 @@ def _string_values(args: dict[str, Any], field_names: tuple[str, ...]) -> list[t
             for item in value.values():
                 _collect(field, item)
 
-    for field in field_names:
-        if field in args:
-            _collect(field, args[field])
+    def _walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in field_names:
+                    _collect(key, item)
+                else:
+                    _walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                _walk(item)
+
+    _walk(args)
     return out
 
 
 class ShellInjectionGuard:
-    """Pre-tool: shell metacharacter patterns in command-like fields → BLOCK."""
+    """Pre-tool: shell metacharacter patterns in command-like fields → BLOCK.
+
+    Applied to shell strings and argv lists alike: substitution, chaining into
+    a privileged/destructive command, and piping into a shell are suspicious
+    regardless of how the tool executes (§14.4)."""
 
     name = "shell_injection"
 
     FIELD_NAMES = ("command", "cmd", "script", "shell", "bash", "sh", "argv")
     PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-        ("command substitution $( )", re.compile(r"\$\(\s")),
+        ("command substitution $( )", re.compile(r"\$\(")),
         ("backtick substitution", re.compile(r"`[^`]*`")),
-        ("chained destructive command (; rm -rf)", re.compile(r";\s*rm\s+-rf")),
-        ("pipe to sudo", re.compile(r"\|\s*sudo\b")),
+        (
+            "chained privileged/destructive command",
+            re.compile(r"(?:[;&|]|\n)\s*(?:sudo|doas|mkfs|shred|rm\s+-{1,2}\w*[rf]\w*)\b"),
+        ),
+        ("pipe to shell", re.compile(r"\|\s*(?:sudo|doas|sh|bash|zsh|dash|ksh)\b")),
     )
 
     def check(self, tool: ToolSpec, args: dict[str, Any]) -> GuardrailResult:
@@ -99,7 +114,8 @@ class ShellInjectionGuard:
 
 
 class PathTraversalGuard:
-    """Pre-tool: `..` segments or absolute paths outside envelope scope → BLOCK."""
+    """Pre-tool: `..` segments → BLOCK; absolute paths → BLOCK unless they lie
+    under an explicitly allowed prefix (tool paths are workspace-relative)."""
 
     name = "path_traversal"
 
@@ -114,7 +130,7 @@ class PathTraversalGuard:
         "destination",
     )
 
-    def __init__(self, allowed_prefixes: tuple[str, ...] = ("/workspace",)) -> None:
+    def __init__(self, allowed_prefixes: tuple[str, ...] = ()) -> None:
         self._allowed_prefixes = allowed_prefixes
 
     def check(self, tool: ToolSpec, args: dict[str, Any]) -> GuardrailResult:
@@ -135,32 +151,91 @@ class PathTraversalGuard:
 
 
 class SecretLeakGuard:
-    """Post-tool: secret patterns in inline_output → BLOCK (output must not reach context)."""
+    """Post-tool: secret patterns in the observation → BLOCK (default), or in
+    ``redact`` mode → TRANSFORM with every match replaced in ``inline_output``.
+    A private key block is never redactable (the header is only its first
+    line) and always blocks; a secret in the summary always blocks."""
 
     name = "secret_leak"
 
-    PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-        ("AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
-        ("private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
-        ("api token (sk-)", re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")),
-        ("token assignment", re.compile(r"\btoken\s*=\s*[^\s]{16,}")),
+    PATTERNS: tuple[tuple[str, re.Pattern[str], bool], ...] = (
+        ("AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b"), True),
+        ("private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), False),
+        ("api token (sk-)", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), True),
+        ("github token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"), True),
+        ("slack token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), True),
+        ("bearer token", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}"), True),
+        (
+            "credential assignment",
+            re.compile(
+                r"\b(?:token|api[_-]?key|secret|password)\s*[=:]\s*['\"]?[A-Za-z0-9_+/=-]{16,}",
+                re.IGNORECASE,
+            ),
+            True,
+        ),
     )
+
+    def __init__(self, mode: Literal["block", "redact"] = "block") -> None:
+        self._mode = mode
 
     def check(
         self, tool: ToolSpec, args: dict[str, Any], observation: ToolObservation
     ) -> GuardrailResult:
-        for label, pattern in self.PATTERNS:
-            if pattern.search(_observation_text(observation)):
+        if self._mode == "block":
+            text = _observation_text(observation)
+            for label, pattern, _ in self.PATTERNS:
+                if pattern.search(text):
+                    return _block(self.name, f"secret pattern ({label}) in tool output")
+            return _pass(self.name)
+        for label, pattern, _ in self.PATTERNS:
+            if pattern.search(observation.summary):
+                return _block(self.name, f"secret pattern ({label}) in tool summary")
+        redacted = observation.inline_output
+        labels: list[str] = []
+        for label, pattern, redactable in self.PATTERNS:
+            if not pattern.search(redacted):
+                continue
+            if not redactable:
                 return _block(self.name, f"secret pattern ({label}) in tool output")
-        return _pass(self.name)
+            redacted = pattern.sub(f"[REDACTED:{label}]", redacted)
+            labels.append(label)
+        if not labels:
+            return _pass(self.name)
+        return GuardrailResult(
+            status="TRANSFORM",
+            guardrail=self.name,
+            reason=f"redacted secret pattern(s): {', '.join(labels)}",
+            transformed_value={"redacted_output": redacted},
+        )
 
 
 def _observation_text(observation: ToolObservation) -> str:
     return observation.inline_output + "\n" + observation.summary
 
 
+_JSON_TYPES: dict[str, tuple[type, ...]] = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "array": (list,),
+    "object": (dict,),
+    "null": (type(None),),
+}
+
+
+def _json_type_matches(expected: Any, value: Any) -> bool:
+    if not isinstance(expected, str) or expected not in _JSON_TYPES:
+        return True
+    if isinstance(value, bool) and expected in ("integer", "number"):
+        return False
+    return isinstance(value, _JSON_TYPES[expected])
+
+
 class OutputSchemaGuard:
-    """Post-tool: minimal shape check against tool.output_schema → WARN on mismatch."""
+    """Post-tool: when the tool declares an object ``output_schema``, the
+    inline output must parse as a JSON object with the required keys and the
+    declared property types → WARN on mismatch (observational, never grants)."""
 
     name = "output_schema"
 
@@ -170,24 +245,34 @@ class OutputSchemaGuard:
         schema = tool.output_schema
         if not schema or schema.get("type") != "object":
             return _pass(self.name)
-        properties = schema.get("properties")
-        if not isinstance(properties, dict):
-            return _pass(self.name)
-        required: list[Any] = schema.get("required", [])
+        try:
+            data = json.loads(observation.inline_output)
+        except ValueError:
+            return _warn(self.name, "output is not valid JSON but the tool declares an object")
+        if not isinstance(data, dict):
+            return _warn(self.name, "output is not a JSON object")
+        required = schema.get("required", [])
         if not isinstance(required, list):
             required = []
-        # The observation's inline output is a string; a structured tool is
-        # expected to surface its JSON in summary. Minimal check: required
-        # keys must appear in the inline output text.
-        text = observation.inline_output
-        missing = [key for key in required if str(key) not in text]
+        missing = [str(key) for key in required if key not in data]
         if missing:
             return _warn(self.name, f"output missing required keys: {', '.join(missing)}")
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for key, prop in properties.items():
+                if key in data and isinstance(prop, dict):
+                    if not _json_type_matches(prop.get("type"), data[key]):
+                        return _warn(
+                            self.name,
+                            f"output key {key!r} is not of type {prop.get('type')!r}",
+                        )
         return _pass(self.name)
 
 
 class GuardrailManager:
-    """Runs an ordered list of guardrails; first BLOCK wins (§14, §25)."""
+    """Runs an ordered list of guardrails; first BLOCK wins (§14, §25).
+    Otherwise the result is the chained TRANSFORM (post-tool), else the first
+    WARN, else PASS."""
 
     def __init__(
         self,
@@ -204,20 +289,44 @@ class GuardrailManager:
         self._post.append(guardrail)
 
     def check_pre_tool(self, tool: ToolSpec, args: dict[str, Any]) -> GuardrailResult:
+        warned: GuardrailResult | None = None
         for guardrail in self._pre:
             result = guardrail.check(tool, args)
             if result.status == "BLOCK":
                 return result
-        return GuardrailResult(status="PASS", guardrail="pre_tool")
+            if result.status != "PASS" and warned is None:
+                warned = result
+        return warned or GuardrailResult(status="PASS", guardrail="pre_tool")
 
     def check_post_tool(
         self, tool: ToolSpec, args: dict[str, Any], observation: ToolObservation
     ) -> GuardrailResult:
+        current = observation
+        transformers: list[str] = []
+        reasons: list[str] = []
+        warned: GuardrailResult | None = None
         for guardrail in self._post:
-            result = guardrail.check(tool, args, observation)
+            result = guardrail.check(tool, args, current)
             if result.status == "BLOCK":
                 return result
-        return GuardrailResult(status="PASS", guardrail="post_tool")
+            if result.status == "TRANSFORM":
+                value = result.transformed_value or {}
+                if "redacted_output" in value:
+                    current = current.model_copy(
+                        update={"inline_output": str(value["redacted_output"])}
+                    )
+                    transformers.append(result.guardrail or guardrail.name)
+                    reasons.append(result.reason)
+            elif result.status == "WARN" and warned is None:
+                warned = result
+        if transformers:
+            return GuardrailResult(
+                status="TRANSFORM",
+                guardrail=",".join(transformers),
+                reason="; ".join(r for r in reasons if r),
+                transformed_value={"redacted_output": current.inline_output},
+            )
+        return warned or GuardrailResult(status="PASS", guardrail="post_tool")
 
 
 class InputGuardrail(Protocol):

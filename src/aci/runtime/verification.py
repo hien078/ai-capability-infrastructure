@@ -63,13 +63,9 @@ class VerificationManager:
             # The VerifierCallable owns the mandatory flag; a check fn that
             # sets it differently would silently change verdict semantics.
             if result.mandatory != check.mandatory:
-                result = CheckResult(
-                    name=result.name,
-                    passed=result.passed,
-                    mandatory=check.mandatory,
-                    detail=result.detail,
-                )
+                result = result.model_copy(update={"mandatory": check.mandatory})
             checks.append(result)
+            evidence_items.extend(result.evidence)
             if result.passed:
                 continue
             if check.mandatory:
@@ -81,10 +77,15 @@ class VerificationManager:
             verdict = "FAIL"
         if verdict == "PASS" and any((not c.passed) and c.mandatory for c in checks):
             verdict = "FAIL"
+        # §19.5: the bundle carries what the checks produced plus the run's
+        # observed effects (writes, command exits) — reads stay internal.
+        evidence_items.extend(
+            e for e in snapshot.observed_evidence if e.summary not in ("read", "listed")
+        )
         return VerificationResult(
             verdict=verdict,  # type: ignore[arg-type]
             checks=checks,
-            evidence=EvidenceBundle(items=evidence_items),
+            evidence=EvidenceBundle(items=_dedupe(evidence_items)),
             repair_hints=[f"check '{c.name}' failed: {c.detail}" for c in checks if not c.passed],
         )
 
@@ -113,3 +114,14 @@ def _validate_contract(candidate: CandidateResult, contract: ResultContract) -> 
             )
         )
     return results
+
+
+def _dedupe(items: list[EvidenceItem]) -> list[EvidenceItem]:
+    seen: set[tuple[str, str, str | None, str]] = set()
+    out: list[EvidenceItem] = []
+    for item in items:
+        key = (item.kind.value, item.ref, item.sha256, item.summary)
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out

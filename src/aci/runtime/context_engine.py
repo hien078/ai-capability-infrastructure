@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from aci.domain.runtime.state import RuntimeStateSnapshot
+from aci.domain.runtime.state import RuntimeStateSnapshot, TranscriptEntry
 from aci.domain.runtime.tools import OutputPolicy, ToolObservation, ToolSpec
 from aci.runtime.protocols import CompactionSummarizer
 
@@ -42,6 +42,38 @@ _ACTIVE_PLAN_STATUSES = ("pending", "running", "blocked")
 def estimate_tokens(text: str) -> int:
     """Rough token estimate: ~4 chars per token, never zero for non-empty text."""
     return max(1, len(text) // 4)
+
+
+def entry_tokens(entry: TranscriptEntry) -> int:
+    calls = sum(estimate_tokens(c.tool_id + str(c.arguments)) for c in entry.tool_calls)
+    return estimate_tokens(entry.content) + calls
+
+
+def select_transcript(
+    entries: list[TranscriptEntry], token_budget: int
+) -> tuple[list[TranscriptEntry], int]:
+    """§9.4/§9.7 applied to the conversation (INV-09): keep the NEWEST turn
+    groups that fit ``token_budget``; return (kept entries in order, dropped
+    group count). A group is one non-tool entry plus the tool results that
+    follow it — an assistant tool request never loses its results (the
+    provider wire rejects orphaned tool messages). The newest group is always
+    kept: it holds the observations the next action depends on."""
+    groups: list[list[TranscriptEntry]] = []
+    for entry in entries:
+        if entry.role == "tool" and groups:
+            groups[-1].append(entry)
+        else:
+            groups.append([entry])
+    kept: list[list[TranscriptEntry]] = []
+    used = 0
+    for group in reversed(groups):
+        cost = sum(entry_tokens(e) for e in group)
+        if kept and used + cost > token_budget:
+            break
+        kept.append(group)
+        used += cost
+    kept.reverse()
+    return [e for group in kept for e in group], len(groups) - len(kept)
 
 
 class ContextItem(BaseModel):

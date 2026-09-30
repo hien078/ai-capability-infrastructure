@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -17,7 +20,12 @@ from aci.domain.runtime.authority import (
     NetworkScope,
     ProcessScope,
 )
-from aci.runtime.workspace import LocalWorkspace, SandboxWorkspace, WorkspaceManager
+from aci.runtime.workspace import (
+    LocalWorkspace,
+    SandboxWorkspace,
+    WorkspaceManager,
+    command_within_prefixes,
+)
 
 
 def _envelope(root: Path, read: list[str], write: list[str]) -> ExecutionEnvelope:
@@ -199,3 +207,217 @@ def test_manager_snapshot_diff_passthrough(tmp_path: Path) -> None:
     snap = mgr.snapshot(ws_id)
     mgr.write_file(ws_id, "x.txt", "v2")
     assert "~ x.txt" in mgr.diff(ws_id, snap)
+
+
+# -- §16.4 process environment: the server env never reaches workspace processes --
+
+_ALLOWED_ENV = {
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "PYTHONDONTWRITEBYTECODE",
+    "PYTHONUNBUFFERED",
+    "TZ",
+}
+
+
+def _child_env(ws: LocalWorkspace) -> dict[str, str]:
+    result = ws.execute(
+        [sys.executable, "-c", "import json, os; print(json.dumps(dict(os.environ)))"],
+        timeout_ms=10_000,
+    )
+    assert result.exit_code == 0, result.stderr
+    env: dict[str, str] = json.loads(result.stdout)
+    return env
+
+
+def test_execute_does_not_inherit_server_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ACI_AGENT_MODEL_API_KEY", "sk-sentinel-must-not-leak")
+    monkeypatch.setenv("TZ", "UTC")
+    ws = LocalWorkspace(tmp_path / "root")
+    env = _child_env(ws)
+    assert "ACI_AGENT_MODEL_API_KEY" not in env
+    assert "sk-sentinel-must-not-leak" not in json.dumps(env)
+    assert set(env) <= _ALLOWED_ENV
+    assert env["HOME"] == os.path.realpath(tmp_path / "root")
+    assert env["LANG"] == env["LC_ALL"] == "C.UTF-8"
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert env["TZ"] == "UTC"
+
+
+def test_execute_path_prefers_the_server_interpreter_and_drops_relative_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", os.pathsep.join([".", "", "rel/bin", "/usr/bin"]))
+    ws = LocalWorkspace(tmp_path / "root")
+    entries = _child_env(ws)["PATH"].split(os.pathsep)
+    assert entries[0] == os.path.dirname(sys.executable)
+    assert all(os.path.isabs(e) for e in entries)
+    assert "/usr/bin" in entries
+    name = os.path.basename(sys.executable)
+    result = ws.execute([name, "-c", "import sys; print(sys.executable)"], timeout_ms=10_000)
+    assert result.stdout.strip() == sys.executable
+
+
+def test_execute_stdin_is_closed(tmp_path: Path) -> None:
+    ws = LocalWorkspace(tmp_path / "root")
+    result = ws.execute(
+        [sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))"], timeout_ms=10_000
+    )
+    assert result.stdout.strip() == "''"
+
+
+# -- relative envelope scopes resolve against the workspace root ---------------
+
+
+def test_dot_scope_is_the_whole_workspace_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    mgr = WorkspaceManager()
+    ws_id = mgr.create_local(root, envelope=_envelope(root, read=["."], write=["."]))
+    mgr.write_file(ws_id, "a.txt", "top")
+    mgr.write_file(ws_id, "deep/nested/b.txt", "deep")
+    assert mgr.read_file(ws_id, "deep/nested/b.txt") == "deep"
+    assert mgr.list_dir(ws_id, ".") == ["a.txt", "deep/"]
+
+
+def test_relative_scope_resolves_against_root_not_server_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    cwd = tmp_path / "server_cwd"
+    (cwd / "src").mkdir(parents=True)
+    monkeypatch.chdir(cwd)
+    mgr = WorkspaceManager()
+    ws_id = mgr.create_local(root, envelope=_envelope(root, read=["src"], write=["src"]))
+    mgr.write_file(ws_id, "src/pkg/mod.py", "x = 1\n")
+    assert mgr.read_file(ws_id, "src/pkg/mod.py") == "x = 1\n"
+    for denied in ("other/mod.py", "srcx/mod.py", "mod.py"):
+        with pytest.raises(DomainError) as exc:
+            mgr.write_file(ws_id, denied, "nope")
+        assert exc.value.code == ErrorCode.PERMISSION_DENIED
+    assert not (cwd / "src" / "pkg").exists()
+
+
+# -- token-aware, fail-closed process scopes -----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("argv", "prefixes", "allowed"),
+    [
+        (["python", "-m", "pytest", "-q"], ["python -m pytest"], True),
+        (["python", "-m", "pytest"], ["python -m pytest"], True),
+        (["python", "-c", "import os"], ["python -m pytest"], False),
+        (["python"], ["python -m pytest"], False),
+        (["pytest", "-q"], ["pytest"], True),
+        (["pytest-evil"], ["pytest"], False),
+        (["pytestx", "-q"], ["pytest"], False),
+        (["pytest"], [], False),
+        (["pytest"], [""], False),
+        (["pytest"], ["   "], False),
+        ([], ["pytest"], False),
+        (["ruff", "check"], ["pytest", "ruff check"], True),
+    ],
+)
+def test_command_within_prefixes_is_token_aware(
+    argv: list[str], prefixes: list[str], allowed: bool
+) -> None:
+    assert command_within_prefixes(argv, prefixes) is allowed
+
+
+def test_command_within_prefixes_accepts_absolute_interpreter_prefix() -> None:
+    assert command_within_prefixes([sys.executable, "-c", "pass"], [sys.executable])
+    assert not command_within_prefixes([sys.executable + "x", "-c", "pass"], [sys.executable])
+
+
+def _process_envelope(root: Path, prefixes: list[str]) -> ExecutionEnvelope:
+    return ExecutionEnvelope(
+        run_id="run-1",
+        workspace_id="ws-x",
+        filesystem=FilesystemScope(read=["."], write=["."]),
+        network=NetworkScope(),
+        process=ProcessScope(allowed_prefixes=prefixes),
+    )
+
+
+def test_bound_envelope_without_prefixes_denies_every_command(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    mgr = WorkspaceManager()
+    ws_id = mgr.create_local(root, envelope=_process_envelope(root, []))
+    with pytest.raises(DomainError) as exc:
+        mgr.execute(ws_id, [sys.executable, "-c", "open('ran', 'w')"], timeout_ms=10_000)
+    assert exc.value.code == ErrorCode.PERMISSION_DENIED
+    assert not (root / "ran").exists()
+
+
+def test_bound_envelope_prefix_is_token_aware(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    mgr = WorkspaceManager()
+    prefix = f"{sys.executable} -m json.tool"
+    ws_id = mgr.create_local(root, envelope=_process_envelope(root, [prefix]))
+    (root / "d.json").write_text('{"a": 1}')
+    ok = mgr.execute(ws_id, [sys.executable, "-m", "json.tool", "d.json"], timeout_ms=10_000)
+    assert ok.exit_code == 0
+    with pytest.raises(DomainError) as exc:
+        mgr.execute(ws_id, [sys.executable, "-c", "open('ran', 'w')"], timeout_ms=10_000)
+    assert exc.value.code == ErrorCode.PERMISSION_DENIED
+    assert not (root / "ran").exists()
+
+
+def test_expired_envelope_denies_execute(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    mgr = WorkspaceManager()
+    expired = _process_envelope(root, [sys.executable]).model_copy(
+        update={"expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+    ws_id = mgr.create_local(root, envelope=expired)
+    with pytest.raises(DomainError) as exc:
+        mgr.execute(ws_id, [sys.executable, "-c", "pass"], timeout_ms=10_000)
+    assert exc.value.code == ErrorCode.AUTHORITY_EXPIRED
+
+
+# -- file_hashes: the side-effect baseline --------------------------------------
+
+
+def test_file_hashes_skips_noise_dirs_and_uses_posix_paths(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    mgr = WorkspaceManager()
+    ws_id = mgr.create_local(root)
+    mgr.write_file(ws_id, "src/pkg/mod.py", "x = 1\n")
+    for noise in (
+        "__pycache__/m.pyc",
+        "src/__pycache__/m.pyc",
+        ".pytest_cache/v",
+        ".mypy_cache/x",
+        ".ruff_cache/x",
+        ".git/HEAD",
+    ):
+        mgr.write_file(ws_id, noise, "noise")
+    hashes = mgr.file_hashes(ws_id)
+    assert set(hashes) == {"src/pkg/mod.py"}
+    assert hashes["src/pkg/mod.py"] == hashlib.sha256(b"x = 1\n").hexdigest()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs POSIX FIFOs")
+def test_file_hashes_skips_special_files(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    mgr = WorkspaceManager()
+    ws_id = mgr.create_local(root)
+    mgr.write_file(ws_id, "a.txt", "a")
+    os.mkfifo(root / "pipe")
+    assert set(mgr.file_hashes(ws_id)) == {"a.txt"}
+
+
+def test_read_file_is_bytes_exact(tmp_path: Path) -> None:
+    ws = LocalWorkspace(tmp_path / "root")
+    (tmp_path / "root" / "crlf.txt").write_bytes(b"one\r\ntwo\r\n")
+    assert ws.read_file("crlf.txt") == "one\r\ntwo\r\n"
+    ws.write_file("crlf.txt", "one\r\nTWO\r\n")
+    assert (tmp_path / "root" / "crlf.txt").read_bytes() == b"one\r\nTWO\r\n"

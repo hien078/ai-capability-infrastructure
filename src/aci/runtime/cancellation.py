@@ -6,6 +6,9 @@ lets the kernel record a CANCELLED stop instead of a crash.
 """
 
 import threading
+from typing import Any
+
+from pydantic_core import CoreSchema, core_schema
 
 
 class RunCancelled(Exception):
@@ -38,8 +41,8 @@ class CancelToken:
         if self._event.is_set():
             raise RunCancelled(self._run_id)
 
-    def __get_pydantic_core_schema__(self, handler: object) -> object:
-        """Allow CancelToken as a pydantic field type (is-instance schema)."""
-        from pydantic_core import core_schema
-
-        return core_schema.is_instance_schema(cls=CancelToken)
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source: Any, handler: Any) -> CoreSchema:
+        """Allow CancelToken as a pydantic field type (is-instance schema);
+        a live token is never serialized (INV-13)."""
+        return core_schema.is_instance_schema(cls=cls)

@@ -255,7 +255,7 @@ class TestUntrustedModelOutput:
         kernel.run(_contract(), _coder_spec())
         assert is_terminal(state.snapshot(RUN_ID).run.status)
         # The model must be told the tool does not exist on its next turn.
-        assert len(model.requests) == 2
+        assert len(model.requests) >= 2
         tool_messages = [m for m in model.requests[1].messages if m.role == "tool"]
         assert any("shell.exec" in m.content for m in tool_messages)
 

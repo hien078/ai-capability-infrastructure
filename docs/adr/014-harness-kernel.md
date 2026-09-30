@@ -51,10 +51,55 @@ capability plane giữ phần "WHAT" (§0.1).
   schema thật thay đổi (§54.3).
 - Benchmark arena (H-bench) là gate cho mọi harness mechanism change (§Benchmark freeze).
 
+## Amendment 2026-09-30 — run-path hardening (sau đánh giá độc lập)
+
+Đánh giá trên đường chạy tích hợp (không phải từng manager) cho thấy 8 invariant
+bị vi phạm: verifier chỉ đọc self-report của model, không có authority preflight,
+ledger không đếm turn/tool call, tool id lạ làm crash run, history nằm ngoài
+StateManager, RecoveryManager quyết định rồi bị bỏ qua, CAS chỉ danh nghĩa. Các
+quyết định bổ sung (mỗi mục có test trong `tests/security/test_harness_invariants.py`
+hoặc test đơn vị tương ứng):
+
+7. **Authority preflight là bước bắt buộc của ToolRuntime (§58).** `ToolSpec.
+   authority_requirements` có kiểu `ToolAuthority` (tham số nào là đường dẫn đọc/ghi,
+   lệnh, host); `derive_requirement()` sinh `AuthorityRequirement` cho từng call và
+   `PolicyEvaluator` so với grant của envelope. Tool có side effect mà không khai báo →
+   DENY (fail closed). Mọi lỗi (tool lạ, envelope hết hạn, từ chối) là observation cho
+   model, không bao giờ là exception thoát khỏi `run()`.
+8. **Bằng chứng do harness quan sát là nguồn duy nhất của verification (INV-08).**
+   Tool path ghi `changed_resources` + `observed_evidence` (đọc file, ghi file, exit
+   code lệnh) vào StateManager; verifier của cả 9 profile chỉ pass khi claim/artifact/
+   change của model khớp bằng chứng đó (`claims_grounded`, `artifacts_observed`,
+   `claimed_changes_observed`, `command_passed_after_last_change`). Client có thể
+   đưa `verification_command`; verifier tự chạy lệnh đó trong workspace và exit code
+   quyết định — model không bao giờ tự tuyên bố "tests pass".
+9. **Transcript là state (INV-01/13).** `RuntimeStateSnapshot.transcript` giữ hội thoại;
+   kernel lắp lại mọi request từ state trong ngân sách context (`select_transcript`
+   giữ nguyên nhóm assistant-tool-call + kết quả, cắt nhóm cũ nhất; tóm tắt tiến độ do
+   harness quan sát được ghim ở system). Checkpoint vì thế chứa đủ để resume.
+10. **Recovery được áp dụng thật (§18).** MODEL_UNAVAILABLE/RATE_LIMITED → retry có
+    backoff; MALFORMED → repair turn; verification FAIL → RECOVERING → model nhận
+    repair hints và thử lại (tối đa theo `max_same_failure_retries`); lỗi lập trình/
+    cấu hình → FATAL, không loop. Mọi exception bất ngờ kết thúc run ở FAILED/
+    FATAL_ERROR, chỉ lộ tên loại lỗi.
+11. **CAS thật:** mọi mutator của StateManager tăng version; commit của một tool batch
+    dùng version chụp TRƯỚC khi chạy tool — writer xen vào → `StateCommitConflict`,
+    không bao giờ ghi đè im lặng.
+12. **REST có workspace thật nhưng server giữ trần authority (INV-02).** Client chỉ
+    được gọi tên workspace dưới `ACI_AGENT_WORKSPACE_ROOT`; mỗi run làm việc trên bản
+    copy riêng dưới `ACI_AGENT_RUNS_ROOT`; `ACI_AGENT_PROCESS_PREFIXES` là trần lệnh
+    cho cả model lẫn verifier (rỗng = không có `run_command`). Process con nhận env
+    tối thiểu (không bao giờ thấy API key của server). **Không có sandbox**: bật
+    process prefixes nghĩa là code trong workspace chạy dưới user của server —
+    SandboxWorkspace vẫn là non-goal v2 (mục 6).
+
 ## Verification
 
+- `tests/security/test_harness_invariants.py` — INV-04/06/07/08 + §7.6 trên đường
+  chạy tích hợp (mỗi test từng là strict xfail cho tới khi bản sửa hạ cánh).
 - `tests/unit/test_run_controller.py` — deterministic simulation: tool → verify →
-  success; verification failure chặn success; turn limit; cancellation.
+  success; verification failure → repair turn → FAILED sau khi hết recovery; turn
+  limit; cancellation; transcript/context budget; recovery matrix; CAS conflict.
 - `tests/unit/test_state_manager.py` — CAS conflict, illegal transition, terminal immutable.
 - `tests/unit/test_delegation.py` — child grant intersection, budget carve, depth limit.
 - `tests/unit/test_capability_runtime.py` — digest mismatch không bao giờ load.

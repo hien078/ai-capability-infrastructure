@@ -12,6 +12,7 @@ from aci.domain.runtime.authority import (
     ExecutionEnvelope,
     GrantEnvelope,
 )
+from aci.domain.runtime.evidence import EvidenceItem
 from aci.domain.runtime.tools import SideEffectClass, SideEffectReport, ToolObservation, ToolSpec
 from aci.runtime.guardrails import GuardrailResult
 
@@ -58,6 +59,9 @@ class ToolDispatchResult(BaseModel):
     output: str = ""
     side_effects: SideEffectReport = Field(default_factory=SideEffectReport)
     duration_ms: int = Field(default=0, ge=0)
+    #: What the dispatch demonstrably observed (§12.1 step 11); copied onto
+    #: the success observation only.
+    evidence: list[EvidenceItem] = Field(default_factory=list)
 
 
 class PreToolGuardrails(Protocol):

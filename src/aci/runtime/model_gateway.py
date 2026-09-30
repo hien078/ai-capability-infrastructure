@@ -5,9 +5,10 @@ usage is normalized per turn (§26); provider SDK objects never leak (§20.1).
 """
 
 import json
+import re
 import time
-from collections.abc import Callable
-from typing import Any, Literal
+from collections.abc import Callable, Iterator, Mapping
+from typing import Any, Literal, NoReturn
 
 import httpx
 from pydantic import BaseModel, Field
@@ -36,6 +37,9 @@ class ModelMessage(BaseModel):
     content: str
     #: OpenAI wire format: a role="tool" message binds to its call by id.
     tool_call_id: str | None = None
+    #: Assistant turns that requested tools; a following role="tool"
+    #: message is only accepted by strict endpoints if these are replayed.
+    tool_calls: list[ToolCall] = Field(default_factory=list)
 
 
 class ModelRequest(BaseModel):
@@ -95,6 +99,83 @@ def _strip_code_fence(text: str) -> str:
     if lines[-1].strip().startswith("```"):
         return "\n".join(lines[1:-1]).strip()
     return "\n".join(lines[1:]).strip()
+
+
+def _json_fence_blocks(lines: list[str]) -> list[str]:
+    """Bodies of ```json (or untagged) fenced blocks, in order; scanned by
+    line so an unrelated fence cannot misalign the pairing."""
+    blocks: list[str] = []
+    tag: str | None = None
+    body: list[str] = []
+    for line in lines:
+        marker = line.strip()
+        if not marker.startswith("```"):
+            if tag is not None:
+                body.append(line)
+            continue
+        if tag is None:
+            tag = marker[3:].strip().lower()
+            body = []
+        else:
+            if tag in ("", "json"):
+                blocks.append("\n".join(body).strip())
+            tag = None
+    return blocks
+
+
+def _action_text_candidates(raw_text: str) -> Iterator[str]:
+    """Where a JSON action may sit in model text, most specific first: the
+    whole reply, the final line (the protocol asks for it there), the last
+    fenced json block, then the tail from a line opening a ``{``."""
+    text = raw_text.strip()
+    yield _strip_code_fence(text)
+    lines = text.splitlines()
+    non_empty = [line.strip() for line in lines if line.strip()]
+    if non_empty:
+        yield non_empty[-1]
+    fences = _json_fence_blocks(lines)
+    if fences:
+        yield fences[-1]
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].lstrip().startswith("{"):
+            yield "\n".join(lines[index:]).strip()
+
+
+def _typed_json_object(candidate: str) -> dict[str, Any] | None:
+    """Only a JSON object carrying a ``type`` key counts as an action."""
+    if not (candidate.startswith("{") and candidate.endswith("}")):
+        return None
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(payload, dict) and "type" in payload:
+        return payload
+    return None
+
+
+_WIRE_NAME_INVALID = re.compile(r"[^a-zA-Z0-9_-]")
+_WIRE_NAME_MAX = 64
+
+
+def _wire_name(tool_id: str) -> str:
+    """OpenAI function names must match ``^[a-zA-Z0-9_-]{1,64}$``."""
+    return _WIRE_NAME_INVALID.sub("_", tool_id)[:_WIRE_NAME_MAX]
+
+
+def _wire_name_map(tools: list[ToolSpec]) -> dict[str, str]:
+    """Per-request wire name -> tool_id; a sanitization collision is a
+    configuration error (the model could not address both tools)."""
+    mapping: dict[str, str] = {}
+    for tool in tools:
+        wire = _wire_name(tool.tool_id)
+        existing = mapping.setdefault(wire, tool.tool_id)
+        if existing != tool.tool_id:
+            raise DomainError(
+                ErrorCode.MODEL_FAILURE,
+                f"tool ids {existing!r} and {tool.tool_id!r} collide on wire name {wire!r}",
+            )
+    return mapping
 
 
 Transport = Callable[..., FakeResponse]
@@ -218,39 +299,22 @@ class OpenAICompatGateway:
     def invoke(self, request: ModelRequest) -> ModelResponse:
         if request.cancellation_token is not None:
             request.cancellation_token.raise_if_cancelled()
+        wire_to_tool = _wire_name_map(request.tools)
         body = self._build_body(request)
-        headers = {"Authorization": f"Bearer {self._api_key}"}
-        url = f"{self._base_url}/chat/completions"
         started = time.monotonic()
-        if self._transport is not None:
-            status_code, text = self._status_and_text(
-                self._transport(url, headers=headers, json=body)
-            )
-        else:
-            with httpx.Client() as client:
-                http_response = client.post(
-                    url, json=body, headers=headers, timeout=self._request_timeout_seconds
-                )
-            status_code, text = http_response.status_code, http_response.text
+        status_code, text = self._post(body)
         latency_ms = int((time.monotonic() - started) * 1000)
-        if status_code == 429:
-            raise DomainError(ErrorCode.RATE_LIMITED, "model endpoint rate limited (429)")
-        if status_code == 401:
-            raise DomainError(
-                ErrorCode.AUTHENTICATION_REQUIRED, "model endpoint rejected credentials (401)"
-            )
         if status_code != 200:
-            raise DomainError(
-                ErrorCode.MODEL_FAILURE,
-                f"model endpoint returned {status_code}: {text[:300]}",
-            )
+            self._raise_for_status(status_code, text)
         data = self._parse_body(text)
         message, usage = self._extract_message(data)
         content = message.get("content")
         raw_text = content if isinstance(content, str) else ""
-        tool_calls: list[Any] = message.get("tool_calls") or []
+        tool_calls = message.get("tool_calls") or []
+        if not isinstance(tool_calls, list):
+            raise DomainError(ErrorCode.MODEL_MALFORMED_OUTPUT, "tool_calls is not a list")
         if tool_calls:
-            action = self._action_from_tool_calls(tool_calls)
+            action = self._action_from_tool_calls(tool_calls, wire_to_tool)
         else:
             action = self._action_from_text(raw_text)
         return ModelResponse(
@@ -259,9 +323,48 @@ class OpenAICompatGateway:
             usage=self._usage(request, latency_ms, usage),
         )
 
-    @staticmethod
-    def _status_and_text(response: FakeResponse) -> tuple[int, str]:
-        return response.status_code, response.text
+    def _post(self, body: dict[str, Any]) -> tuple[int, str]:
+        """One HTTP round trip; transport failures are transient (retryable)
+        and never leak provider/httpx exceptions (§20.1)."""
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        url = f"{self._base_url}/chat/completions"
+        try:
+            if self._transport is not None:
+                response = self._transport(url, headers=headers, json=body)
+                return response.status_code, response.text
+            with httpx.Client() as client:
+                http_response = client.post(
+                    url, json=body, headers=headers, timeout=self._request_timeout_seconds
+                )
+            return http_response.status_code, http_response.text
+        except (httpx.InvalidURL, httpx.UnsupportedProtocol) as exc:
+            raise DomainError(ErrorCode.MODEL_FAILURE, "model endpoint URL is invalid") from exc
+        except (httpx.HTTPError, TimeoutError, OSError) as exc:
+            raise DomainError(
+                ErrorCode.MODEL_UNAVAILABLE,
+                f"model endpoint unreachable ({type(exc).__name__})",
+            ) from exc
+
+    def _raise_for_status(self, status_code: int, text: str) -> NoReturn:
+        """429 rate limit, 401/403 credentials, 5xx transient (retryable),
+        anything else a non-retryable model failure."""
+        if status_code == 429:
+            raise DomainError(ErrorCode.RATE_LIMITED, "model endpoint rate limited (429)")
+        if status_code in (401, 403):
+            raise DomainError(
+                ErrorCode.AUTHENTICATION_REQUIRED,
+                f"model endpoint rejected credentials ({status_code})",
+            )
+        excerpt = text[:200]
+        if self._api_key:
+            excerpt = excerpt.replace(self._api_key, "***")
+        if 500 <= status_code < 600:
+            raise DomainError(
+                ErrorCode.MODEL_UNAVAILABLE, f"model endpoint returned {status_code}: {excerpt}"
+            )
+        raise DomainError(
+            ErrorCode.MODEL_FAILURE, f"model endpoint returned {status_code}: {excerpt}"
+        )
 
     def _build_body(self, request: ModelRequest) -> dict[str, Any]:
         system_parts = [m.content for m in request.messages if m.role == "system"]
@@ -272,6 +375,18 @@ class OpenAICompatGateway:
             entry: dict[str, Any] = {"role": m.role, "content": m.content}
             if m.role == "tool" and m.tool_call_id:
                 entry["tool_call_id"] = m.tool_call_id
+            if m.role == "assistant" and m.tool_calls:
+                entry["tool_calls"] = [
+                    {
+                        "id": call.call_id,
+                        "type": "function",
+                        "function": {
+                            "name": _wire_name(call.tool_id),
+                            "arguments": json.dumps(call.arguments),
+                        },
+                    }
+                    for call in m.tool_calls
+                ]
             messages.append(entry)
         if system_parts:
             messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
@@ -287,9 +402,9 @@ class OpenAICompatGateway:
                 {
                     "type": "function",
                     "function": {
-                        "name": t.tool_id,
+                        "name": _wire_name(t.tool_id),
                         "description": t.description,
-                        "parameters": t.input_schema,
+                        "parameters": t.input_schema or {"type": "object", "properties": {}},
                     },
                 }
                 for t in request.tools
@@ -336,9 +451,13 @@ class OpenAICompatGateway:
         return message, usage if isinstance(usage, dict) else None
 
     @staticmethod
-    def _action_from_tool_calls(tool_calls: list[Any]) -> ModelAction:
+    def _action_from_tool_calls(
+        tool_calls: list[Any], wire_to_tool: Mapping[str, str]
+    ) -> ModelAction:
+        """Wire names map back to real tool_ids; an unknown name passes
+        through so ToolRuntime reports TOOL_NOT_FOUND to the model."""
         calls: list[ToolCall] = []
-        for tc in tool_calls:
+        for index, tc in enumerate(tool_calls):
             if not isinstance(tc, dict):
                 raise DomainError(
                     ErrorCode.MODEL_MALFORMED_OUTPUT, "tool_call entry is not an object"
@@ -348,8 +467,10 @@ class OpenAICompatGateway:
                 raise DomainError(
                     ErrorCode.MODEL_MALFORMED_OUTPUT, "tool_call function is not an object"
                 )
-            arguments = function.get("arguments", "{}")
-            if isinstance(arguments, str):
+            arguments = function.get("arguments")
+            if arguments is None:
+                arguments = {}
+            elif isinstance(arguments, str):
                 try:
                     arguments = json.loads(arguments) if arguments.strip() else {}
                 except json.JSONDecodeError as exc:
@@ -361,10 +482,15 @@ class OpenAICompatGateway:
                 raise DomainError(
                     ErrorCode.MODEL_MALFORMED_OUTPUT, "tool_call arguments are not an object"
                 )
+            name = function.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise DomainError(ErrorCode.MODEL_MALFORMED_OUTPUT, "tool_call has no name")
+            raw_id = tc.get("id")
+            call_id = str(raw_id).strip() if raw_id is not None else ""
             calls.append(
                 ToolCall(
-                    call_id=str(tc.get("id", "")),
-                    tool_id=str(function.get("name", "")),
+                    call_id=call_id or f"call_{index}",
+                    tool_id=wire_to_tool.get(name, name),
                     arguments=arguments,
                 )
             )
@@ -374,15 +500,11 @@ class OpenAICompatGateway:
 
     @staticmethod
     def _action_from_text(raw_text: str) -> ModelAction:
-        """Text that is a typed JSON action object normalizes (INV-07);
-        anything else is a ContinueAction carrying the raw text."""
-        stripped = _strip_code_fence(raw_text.strip())
-        if stripped.startswith("{") and stripped.endswith("}"):
-            try:
-                payload = json.loads(stripped)
-            except json.JSONDecodeError:
-                return ContinueAction()
-            if isinstance(payload, dict) and "type" in payload:
+        """The first typed JSON object found (see ``_action_text_candidates``)
+        is normalized and validated (INV-07); prose alone is a ContinueAction."""
+        for candidate in _action_text_candidates(raw_text):
+            payload = _typed_json_object(candidate)
+            if payload is not None:
                 return normalize_model_action(payload)
         return ContinueAction()
 

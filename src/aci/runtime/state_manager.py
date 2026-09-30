@@ -10,7 +10,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from aci.domain.runtime.authority import GrantEnvelope
-from aci.domain.runtime.events import EventEnvelope
+from aci.domain.runtime.evidence import EvidenceItem
 from aci.domain.runtime.state import (
     BudgetLedger,
     CapabilityActivation,
@@ -18,6 +18,7 @@ from aci.domain.runtime.state import (
     RunState,
     RuntimeStateSnapshot,
     TaskState,
+    TranscriptEntry,
 )
 from aci.domain.runtime.stop_reason import RUN_TRANSITIONS, RunStatus, StopReason
 
@@ -47,7 +48,6 @@ class StateManager:
 
     def __init__(self) -> None:
         self._runs: dict[str, dict[str, Any]] = {}
-        self._events: dict[str, list[EventEnvelope]] = {}
 
     def create(
         self,
@@ -76,6 +76,8 @@ class StateManager:
             "workspace_id": workspace_id,
             "depth": depth,
             "changed_resources": [],
+            "observed_evidence": [],
+            "transcript": [],
         }
         return self.snapshot(run_id)
 
@@ -92,6 +94,8 @@ class StateManager:
             workspace_id=record["workspace_id"],
             depth=record["depth"],
             changed_resources=list(record["changed_resources"]),
+            observed_evidence=list(record["observed_evidence"]),
+            transcript=list(record["transcript"]),
         )
 
     def commit(
@@ -147,7 +151,7 @@ class StateManager:
         record["run"] = run.model_copy(update=update)
         return self.snapshot(run_id)
 
-    # -- typed helpers over commit events ------------------------------------
+    # -- typed helpers: the kernel's own writes, versioned like any commit ----
 
     def advance_turn(self, run_id: str) -> RuntimeStateSnapshot:
         """One model turn: the run's turn counter AND the budget ledger (§7.6)."""
@@ -170,55 +174,68 @@ class StateManager:
         cost_usd: float = 0.0,
         wall_time_seconds: float = 0.0,
     ) -> RuntimeStateSnapshot:
-        record = self._runs[run_id]
-        budget: BudgetLedger = record["budget"]
-        record["budget"] = budget.model_copy(
-            update={
-                "consumed_input_tokens": budget.consumed_input_tokens + input_tokens,
-                "consumed_output_tokens": budget.consumed_output_tokens + output_tokens,
-                "consumed_tool_calls": budget.consumed_tool_calls + tool_calls,
-                "consumed_cost_usd": round(budget.consumed_cost_usd + cost_usd, 6),
-                "consumed_wall_time_seconds": round(
-                    budget.consumed_wall_time_seconds + wall_time_seconds, 3
-                ),
-            }
+        return self._mutate(
+            run_id,
+            StateEvent(
+                event_type="budget.consumed",
+                payload={
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "tool_calls": tool_calls,
+                    "cost_usd": cost_usd,
+                    "wall_time_seconds": wall_time_seconds,
+                },
+            ),
         )
-        return self.snapshot(run_id)
 
     def count_recovery(self, run_id: str) -> RuntimeStateSnapshot:
-        record = self._runs[run_id]
-        budget: BudgetLedger = record["budget"]
-        record["budget"] = budget.model_copy(
-            update={"consumed_recoveries": budget.consumed_recoveries + 1}
-        )
-        return self.snapshot(run_id)
+        return self._mutate(run_id, StateEvent(event_type="recovery.counted"))
 
     def set_plan(self, run_id: str, plan: list[PlanItem]) -> RuntimeStateSnapshot:
-        record = self._runs[run_id]
-        record["plan"] = list(plan)
-        return self.snapshot(run_id)
+        return self._mutate(
+            run_id,
+            StateEvent(
+                event_type="plan.set", payload={"items": [i.model_dump(mode="json") for i in plan]}
+            ),
+        )
 
     def activate_capability(
         self, run_id: str, activation: CapabilityActivation
     ) -> RuntimeStateSnapshot:
-        record = self._runs[run_id]
-        record["capabilities"] = [
-            a for a in record["capabilities"] if a.capability_id != activation.capability_id
-        ] + [activation]
-        return self.snapshot(run_id)
+        return self._mutate(
+            run_id,
+            StateEvent(
+                event_type="capability.activated",
+                payload={"activation": activation.model_dump(mode="json")},
+            ),
+        )
 
     def extend_grants(self, run_id: str, grants: GrantEnvelope) -> RuntimeStateSnapshot:
-        record = self._runs[run_id]
-        record["grants"] = grants
-        return self.snapshot(run_id)
+        return self._mutate(
+            run_id,
+            StateEvent(
+                event_type="grants.extended", payload={"grants": grants.model_dump(mode="json")}
+            ),
+        )
 
     def set_workspace(self, run_id: str, workspace_id: str) -> RuntimeStateSnapshot:
-        record = self._runs[run_id]
-        record["workspace_id"] = workspace_id
-        return self.snapshot(run_id)
+        return self._mutate(
+            run_id, StateEvent(event_type="workspace.set", payload={"workspace_id": workspace_id})
+        )
 
-    def events(self, run_id: str) -> list[EventEnvelope]:
-        return list(self._events.get(run_id, []))
+    def append_transcript(
+        self, run_id: str, entries: list[TranscriptEntry]
+    ) -> RuntimeStateSnapshot:
+        return self._mutate(run_id, transcript_event(entries))
+
+    def _mutate(self, run_id: str, event: StateEvent) -> RuntimeStateSnapshot:
+        """Apply one event and bump the version — every mutation is versioned,
+        so a CAS commit detects ANY intervening write (§8.5)."""
+        record = self._runs[run_id]
+        self._apply(record, event)
+        run: RunState = record["run"]
+        record["run"] = run.model_copy(update={"version": run.version + 1})
+        return self.snapshot(run_id)
 
     def _apply(self, record: dict[str, Any], event: StateEvent) -> None:
         """Apply one StateEvent to the record (called inside commit)."""
@@ -226,16 +243,56 @@ class StateManager:
         if et == "plan.set":
             record["plan"] = [PlanItem.model_validate(i) for i in p["items"]]
         elif et == "capability.activated":
-            record["capabilities"] = record["capabilities"] + [
-                CapabilityActivation.model_validate(p["activation"])
-            ]
+            activation = CapabilityActivation.model_validate(p["activation"])
+            record["capabilities"] = [
+                a for a in record["capabilities"] if a.capability_id != activation.capability_id
+            ] + [activation]
         elif et == "grants.extended":
             record["grants"] = GrantEnvelope.model_validate(p["grants"])
+        elif et == "workspace.set":
+            record["workspace_id"] = p["workspace_id"]
         elif et == "tool.observed":
-            merged = [*record["changed_resources"], *p["resources"]]
+            merged = [*record["changed_resources"], *p.get("resources", [])]
             record["changed_resources"] = list(dict.fromkeys(merged))
+            record["observed_evidence"] = record["observed_evidence"] + [
+                EvidenceItem.model_validate(e) for e in p.get("evidence", [])
+            ]
+        elif et == "transcript.append":
+            record["transcript"] = record["transcript"] + [
+                TranscriptEntry.model_validate(e) for e in p["entries"]
+            ]
+        elif et == "budget.consumed":
+            budget: BudgetLedger = record["budget"]
+            record["budget"] = budget.model_copy(
+                update={
+                    "consumed_input_tokens": budget.consumed_input_tokens
+                    + p.get("input_tokens", 0),
+                    "consumed_output_tokens": budget.consumed_output_tokens
+                    + p.get("output_tokens", 0),
+                    "consumed_tool_calls": budget.consumed_tool_calls + p.get("tool_calls", 0),
+                    "consumed_cost_usd": round(
+                        budget.consumed_cost_usd + p.get("cost_usd", 0.0), 6
+                    ),
+                    "consumed_wall_time_seconds": round(
+                        budget.consumed_wall_time_seconds + p.get("wall_time_seconds", 0.0), 3
+                    ),
+                }
+            )
+        elif et == "recovery.counted":
+            ledger: BudgetLedger = record["budget"]
+            record["budget"] = ledger.model_copy(
+                update={"consumed_recoveries": ledger.consumed_recoveries + 1}
+            )
         elif et == "task.progress":
             task: TaskState = record["task"]
-            record["task"] = task.model_copy(update={"progress": p["progress"]})
+            progress = p["progress"] if "progress" in p else [*task.progress, *p["append"]]
+            record["task"] = task.model_copy(update={"progress": progress})
         else:
             raise ValueError(f"unknown state event: {et}")
+
+
+def transcript_event(entries: list[TranscriptEntry]) -> StateEvent:
+    return StateEvent(
+        event_type="transcript.append",
+        payload={"entries": [e.model_dump(mode="json") for e in entries]},
+    )

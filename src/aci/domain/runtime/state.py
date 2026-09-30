@@ -11,7 +11,9 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from aci.domain.runtime.authority import GrantEnvelope
+from aci.domain.runtime.evidence import EvidenceItem
 from aci.domain.runtime.stop_reason import RunStatus, StopReason
+from aci.domain.runtime.tools import ToolCall
 
 
 class BudgetLedger(BaseModel):
@@ -97,6 +99,23 @@ class CapabilityActivation(BaseModel):
     activated_at: datetime | None = None
 
 
+class TranscriptEntry(BaseModel):
+    """§7.4 — one conversation fragment. The transcript is authoritative run
+    state (INV-01) and serializable (INV-13): checkpoints carry it, and the
+    kernel re-assembles every model request from it within the context budget
+    (INV-09) instead of keeping a private chat log."""
+
+    model_config = {"frozen": True}
+
+    role: Literal["user", "assistant", "tool"]
+    content: str = ""
+    #: Assistant turns that requested tools (the provider wire needs them).
+    tool_calls: list[ToolCall] = Field(default_factory=list)
+    #: Tool results bind to the call that produced them.
+    tool_call_id: str | None = None
+    turn: int = Field(default=0, ge=0)
+
+
 class RuntimeStateSnapshot(BaseModel):
     """The read-only view other components receive (INV-01)."""
 
@@ -114,3 +133,6 @@ class RuntimeStateSnapshot(BaseModel):
     #: ``file:src/app.py``) — the evidence the verifier reconciles claims
     #: against (INV-08), never the model's own report.
     changed_resources: list[str] = Field(default_factory=list)
+    #: Evidence observed on the tool path, in order (reads, command exits).
+    observed_evidence: list[EvidenceItem] = Field(default_factory=list)
+    transcript: list[TranscriptEntry] = Field(default_factory=list)
