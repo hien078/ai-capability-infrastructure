@@ -5,11 +5,12 @@ same HarnessKernel while specializing their loop family, policies, verifiers,
 and risk boundaries (§38 R0–R4).
 """
 
+import posixpath
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
-from aci.domain.runtime.evidence import CheckResult, ResultContract
+from aci.domain.runtime.evidence import CandidateResult, CheckResult, ResultContract
 from aci.domain.runtime.spec import (
     AgentProfileId,
     DelegationPolicy,
@@ -19,7 +20,7 @@ from aci.domain.runtime.spec import (
     PlanningPolicy,
     RuntimeSpec,
 )
-from aci.domain.runtime.state import BudgetLedger
+from aci.domain.runtime.state import BudgetLedger, RuntimeStateSnapshot
 from aci.runtime.verification import VerifierCallable
 
 
@@ -197,20 +198,41 @@ def _as_profile_id(profile: AgentProfileId | str) -> AgentProfileId:
         raise KeyError(f"unknown profile id: {profile}") from exc
 
 
+def _claimed_path(claim: str) -> str:
+    """``"src/app.py: fix off-by-one"`` → ``"src/app.py"`` (the action protocol format)."""
+    return posixpath.normpath(claim.split(":", 1)[0].strip())
+
+
+def _claimed_changes_observed(
+    snapshot: RuntimeStateSnapshot, candidate: CandidateResult
+) -> CheckResult:
+    """INV-08 / §19.4 "changed files exist": every claimed change must match a
+    file effect the tool path CONFIRMED — the model's report alone is never
+    evidence."""
+    name = "claimed_changes_observed"
+    observed = {
+        r.removeprefix("file:") for r in snapshot.changed_resources if r.startswith("file:")
+    }
+    if not observed:
+        return CheckResult(name=name, passed=False, detail="no file change was observed")
+    if not candidate.changes:
+        return CheckResult(name=name, passed=False, detail="candidate claims no changes")
+    unobserved = [c for c in candidate.changes if _claimed_path(c) not in observed]
+    if unobserved:
+        return CheckResult(
+            name=name,
+            passed=False,
+            detail=f"claimed but not observed: {', '.join(unobserved[:5])}",
+        )
+    return CheckResult(name=name, passed=True)
+
+
 def verifier_checks(profile: AgentProfileId | str) -> list[VerifierCallable]:
     """§37 verification profiles: return deterministic checks mapped to profile goals."""
     pid = _as_profile_id(profile)
     if pid is AgentProfileId.CODER:
         return [
-            VerifierCallable(
-                "changed_files_exist",
-                lambda s, c: CheckResult(
-                    name="changed_files_exist",
-                    passed=bool(c.changes),
-                    mandatory=True,
-                    detail="" if c.changes else "candidate result produced no changes",
-                ),
-            ),
+            VerifierCallable("claimed_changes_observed", _claimed_changes_observed),
             VerifierCallable(
                 "summary_present",
                 lambda s, c: CheckResult(

@@ -75,6 +75,7 @@ class StateManager:
             "capabilities": capabilities,
             "workspace_id": workspace_id,
             "depth": depth,
+            "changed_resources": [],
         }
         return self.snapshot(run_id)
 
@@ -90,6 +91,7 @@ class StateManager:
             active_capabilities=list(record["capabilities"]),
             workspace_id=record["workspace_id"],
             depth=record["depth"],
+            changed_resources=list(record["changed_resources"]),
         )
 
     def commit(
@@ -148,11 +150,14 @@ class StateManager:
     # -- typed helpers over commit events ------------------------------------
 
     def advance_turn(self, run_id: str) -> RuntimeStateSnapshot:
+        """One model turn: the run's turn counter AND the budget ledger (§7.6)."""
         record = self._runs[run_id]
         run: RunState = record["run"]
+        budget: BudgetLedger = record["budget"]
         record["run"] = run.model_copy(
             update={"current_turn": run.current_turn + 1, "version": run.version + 1}
         )
+        record["budget"] = budget.model_copy(update={"consumed_turns": budget.consumed_turns + 1})
         return self.snapshot(run_id)
 
     def consume_budget(
@@ -226,6 +231,9 @@ class StateManager:
             ]
         elif et == "grants.extended":
             record["grants"] = GrantEnvelope.model_validate(p["grants"])
+        elif et == "tool.observed":
+            merged = [*record["changed_resources"], *p["resources"]]
+            record["changed_resources"] = list(dict.fromkeys(merged))
         elif et == "task.progress":
             task: TaskState = record["task"]
             record["task"] = task.model_copy(update={"progress": p["progress"]})

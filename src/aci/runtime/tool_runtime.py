@@ -1,10 +1,12 @@
 """ToolRuntime (harness.md §12, §60): the only path for tool side effects (INV-06).
 
 12-step pipeline as explicit methods: registry lookup → argument validation →
-pre-tool guardrails → envelope check (authority preflight happens OUTSIDE —
-ToolRuntime refuses expired envelopes, fail closed) → dispatch → output
-limiting → post-tool guardrails → observation. Dispatcher exceptions are
-normalized into observations; never raised raw out of execute().
+pre-tool guardrails → envelope expiry → authority preflight (§58: the call's
+requirement, derived from the tool's declared argument roles, evaluated
+against the envelope's grants) → dispatch → output limiting → post-tool
+guardrails → observation. Model output is untrusted (INV-07): every failure,
+including an unknown tool id, is normalized into an observation — nothing is
+raised raw out of execute().
 """
 
 import time
@@ -12,13 +14,20 @@ from collections.abc import Callable
 from typing import Any
 
 from aci.domain.capability.errors import DomainError, ErrorCode
-from aci.domain.runtime.authority import ExecutionEnvelope
+from aci.domain.runtime.authority import AuthorityDecision, AuthorityDecisionKind, ExecutionEnvelope
 from aci.domain.runtime.state import RuntimeStateSnapshot
 from aci.domain.runtime.tools import (
+    MUTATING_CLASSES,
     OutputPolicy,
     ToolCall,
     ToolObservation,
     ToolSpec,
+)
+from aci.runtime.authority import (
+    AuthorityPolicy,
+    PolicyEvaluator,
+    derive_requirement,
+    grants_from_envelope,
 )
 from aci.runtime.guardrails import GuardrailResult
 from aci.runtime.protocols import (
@@ -155,11 +164,16 @@ class ToolRuntime:
         *,
         guardrails: GuardrailManager | None = None,
         spill: ArtifactSpill | None = None,
+        authority_policy: AuthorityPolicy | None = None,
     ) -> None:
         self._registry = registry
         self._dispatcher = dispatcher
         self._guardrails = guardrails
         self._spill = spill
+        # Default policy: empty ceiling — anything beyond the run's grants is
+        # DENY (no approval path exists on the kernel run loop yet).
+        self._policy = authority_policy or AuthorityPolicy()
+        self._evaluator = PolicyEvaluator()
         self._validator = ArgumentValidator()
         self._limiter = OutputLimiter()
 
@@ -170,22 +184,42 @@ class ToolRuntime:
         snapshot: RuntimeStateSnapshot,
         envelope: ExecutionEnvelope,
     ) -> ToolObservation:
-        tool = self._lookup(call)
+        tool = self._registry.get(call.tool_id)
+        if tool is None:
+            available = ", ".join(sorted(t.tool_id for t in self._registry.all())) or "none"
+            return self._error_observation(
+                call,
+                "TOOL_NOT_FOUND",
+                f"unknown tool {call.tool_id!r}; available tools: {available}",
+            )
         try:
             args = self._validate_arguments(tool, call)
         except DomainError as exc:
-            return self._error_observation(call, tool, "TOOL_INVALID_ARGUMENT", str(exc))
+            return self._error_observation(call, "TOOL_INVALID_ARGUMENT", str(exc))
         if self._guardrails is not None:
             verdict = self._guardrails.check_pre_tool(tool, args)
             if verdict.status == "BLOCK":
                 return self._blocked_observation(call, tool, verdict)
-        self._check_envelope(envelope)
+        if envelope_expired(envelope):
+            return self._denied_observation(
+                call, "AUTHORITY_EXPIRED", "execution envelope expired — no further effects"
+            )
+        try:
+            decision = self._authorize(tool, args, envelope)
+        except DomainError as exc:
+            return self._error_observation(call, "TOOL_INVALID_ARGUMENT", str(exc))
+        if decision.kind is AuthorityDecisionKind.DENY:
+            return self._denied_observation(call, "AUTHORITY_DENIED", decision.reason)
+        if decision.kind is AuthorityDecisionKind.REQUIRE_APPROVAL:
+            return self._denied_observation(
+                call, "APPROVAL_REQUIRED", f"{decision.reason} (no approval path on this run)"
+            )
         try:
             dispatch = self._dispatch(tool, args, envelope)
         except TimeoutError:
             return self._timeout_observation(call, tool)
         except Exception as exc:  # noqa: BLE003 — normalize, never leak (§12.1)
-            return self._error_observation(call, tool, "TOOL_EXECUTION_FAILED", str(exc))
+            return self._error_observation(call, "TOOL_EXECUTION_FAILED", str(exc))
         inline, artifact_ref = self._limit_output(tool, call, dispatch)
         observation = ToolObservation(
             tool_call_id=call.call_id,
@@ -219,18 +253,22 @@ class ToolRuntime:
         """§12.2 — the specs the model gateway advertises to the model."""
         return list(self._registry.all())
 
-    def _lookup(self, call: ToolCall) -> ToolSpec:
-        return self._registry.require(call.tool_id)
-
     def _validate_arguments(self, tool: ToolSpec, call: ToolCall) -> dict[str, Any]:
         return self._validator.validate(tool, call.arguments)
 
-    def _check_envelope(self, envelope: ExecutionEnvelope) -> None:
-        if envelope.expires_at is not None and envelope.expires_at.timestamp() <= time.time():
-            raise DomainError(
-                ErrorCode.AUTHORITY_EXPIRED,
-                f"execution envelope expired at {envelope.expires_at.isoformat()}",
+    def _authorize(
+        self, tool: ToolSpec, args: dict[str, Any], envelope: ExecutionEnvelope
+    ) -> AuthorityDecision:
+        """§12.1 step 4 / §58 — INV-06: no side effect without authority."""
+        if tool.side_effect_class in MUTATING_CLASSES and tool.authority_requirements.is_empty():
+            return AuthorityDecision(
+                kind=AuthorityDecisionKind.DENY,
+                reason=f"{tool.tool_id} mutates but declares no authority requirements",
             )
+        requirement = derive_requirement(tool, args)
+        return self._evaluator.evaluate(
+            requirement, grants_from_envelope(envelope), self._policy, tool.side_effect_class
+        )
 
     def _dispatch(
         self, tool: ToolSpec, args: dict[str, Any], envelope: ExecutionEnvelope
@@ -262,13 +300,20 @@ class ToolRuntime:
             return str(verdict.transformed_value["redacted_output"]), None
         return None, None
 
-    def _error_observation(
-        self, call: ToolCall, tool: ToolSpec, error_class: str, detail: str
-    ) -> ToolObservation:
+    def _error_observation(self, call: ToolCall, error_class: str, detail: str) -> ToolObservation:
         return ToolObservation(
             tool_call_id=call.call_id,
-            tool_id=tool.tool_id,
+            tool_id=call.tool_id,
             status="error",
+            summary=detail,
+            error_class=error_class,
+        )
+
+    def _denied_observation(self, call: ToolCall, error_class: str, detail: str) -> ToolObservation:
+        return ToolObservation(
+            tool_call_id=call.call_id,
+            tool_id=call.tool_id,
+            status="denied",
             summary=detail,
             error_class=error_class,
         )
@@ -293,3 +338,7 @@ class ToolRuntime:
             summary=verdict.reason or f"blocked by {verdict.guardrail or 'guardrail'}",
             error_class="GUARDRAIL_BLOCKED",
         )
+
+
+def envelope_expired(envelope: ExecutionEnvelope) -> bool:
+    return envelope.expires_at is not None and envelope.expires_at.timestamp() <= time.time()

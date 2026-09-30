@@ -9,19 +9,16 @@ workspace root, checks nothing): enforcement must come from the kernel
 pipeline — validate → guardrail → authority → envelope (INV-06) — never
 from a well-behaved adapter.
 
-Known gaps are ``xfail(strict=True)``: CI stays green, and the moment a fix
-lands the test XPASSes and fails, forcing the marker off. Positive controls
-(no xfail) pin the behavior a fix must preserve, so "block everything" is
-not a passing fix.
+Every invariant test here started as a strict xfail pinning a real gap and
+lost its marker when the fix landed. Positive controls pin the behavior a
+fix must preserve, so "block everything" is never a passing fix. A newly
+found gap goes in as ``xfail(strict=True, raises=...)`` first.
 """
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import pytest
-
-from aci.domain.capability.errors import DomainError
 from aci.domain.runtime.actions import (
     ContinueAction,
     FinalCandidate,
@@ -37,7 +34,7 @@ from aci.domain.runtime.spec import AgentProfileId, RuntimeSpec
 from aci.domain.runtime.state import BudgetLedger
 from aci.domain.runtime.stop_reason import RunStatus, StopReason, is_terminal
 from aci.domain.runtime.subtask import SubtaskContract
-from aci.domain.runtime.tools import SideEffectReport, ToolSpec
+from aci.domain.runtime.tools import SideEffectReport, ToolAuthority, ToolSpec
 from aci.runtime.context_engine import ContextBudget, ContextEngine
 from aci.runtime.model_gateway import ModelRequest, ModelResponse, ModelUsage
 from aci.runtime.profiles import runtime_spec_for, verifier_checks
@@ -97,6 +94,11 @@ def _path_tool(tool_id: str, side_effect: str, *, content: bool) -> ToolSpec:
     properties: dict[str, Any] = {"path": {"type": "string"}}
     if content:
         properties["content"] = {"type": "string"}
+    authority = (
+        ToolAuthority(write_path_args=["path"])
+        if content
+        else ToolAuthority(read_path_args=["path"])
+    )
     return ToolSpec(
         tool_id=tool_id,
         version="1.0.0",
@@ -106,6 +108,7 @@ def _path_tool(tool_id: str, side_effect: str, *, content: bool) -> ToolSpec:
             "required": list(properties),
         },
         side_effect_class=side_effect,  # type: ignore[arg-type]
+        authority_requirements=authority,
     )
 
 
@@ -161,6 +164,16 @@ class TestPositiveControls:
         assert result.status is RunStatus.SUCCEEDED
         assert (tmp_path / "out/app.py").exists()
 
+    def test_spent_tool_budget_still_lets_the_run_finalize(self, tmp_path: Path) -> None:
+        """The tool ceiling gates tool batches, not the finalizing turn."""
+        budget = BudgetLedger(max_tool_calls=1)
+        model = ScriptedModel(
+            [_write("c1", "out/app.py"), FinalCandidate(summary="fixed", changes=["out/app.py"])]
+        )
+        kernel, _ = _kernel(model, tmp_path)
+        result = kernel.run(_contract(), _coder_spec(budget=budget))
+        assert result.status is RunStatus.SUCCEEDED
+
     def test_budget_within_limits_does_not_stop_the_run(self, tmp_path: Path) -> None:
         budget = BudgetLedger(max_turns=5, max_tool_calls=3)
         model = ScriptedModel(
@@ -175,22 +188,12 @@ class TestPositiveControls:
 
 
 class TestVerificationGate:
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="INV-08 gap: coder verifier checks bool(candidate.changes), not observed effects",
-    )
     def test_claimed_changes_without_any_tool_call_never_succeed(self, tmp_path: Path) -> None:
         model = ScriptedModel([FinalCandidate(summary="fixed", changes=["out/app.py: fixed"])])
         kernel, _ = _kernel(model, tmp_path)
         result = kernel.run(_contract(), _coder_spec())
         assert result.status is not RunStatus.SUCCEEDED
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="INV-08 gap: claimed changes are never reconciled with confirmed side effects",
-    )
     def test_claimed_change_must_match_an_observed_side_effect(self, tmp_path: Path) -> None:
         model = ScriptedModel(
             [_write("c1", "out/other.py"), FinalCandidate(summary="fixed", changes=["out/app.py"])]
@@ -204,11 +207,6 @@ class TestVerificationGate:
 
 
 class TestAuthorityOnRunPath:
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="INV-06 gap: no authority preflight on the kernel tool path",
-    )
     def test_write_under_read_only_grant_has_no_effect(self, tmp_path: Path) -> None:
         read_only = GrantEnvelope(filesystem=FilesystemScope(read=["out"], write=[]))
         model = ScriptedModel(
@@ -219,11 +217,6 @@ class TestAuthorityOnRunPath:
         assert not (tmp_path / "out/pwned.txt").exists()
         assert result.status is not RunStatus.SUCCEEDED
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="INV-06 gap: write scope is never compared to the target path",
-    )
     def test_write_outside_granted_scope_has_no_effect(self, tmp_path: Path) -> None:
         model = ScriptedModel(
             [_write("c1", "etc/pwned.txt"), FinalCandidate(summary="ok", changes=["etc/pwned.txt"])]
@@ -232,11 +225,6 @@ class TestAuthorityOnRunPath:
         kernel.run(_contract(), _coder_spec())
         assert not (tmp_path / "etc/pwned.txt").exists()
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=DomainError,
-        reason="INV-07 gap: expired envelope raises AUTHORITY_EXPIRED out of run()",
-    )
     def test_expired_grant_fails_the_run_without_raising(self, tmp_path: Path) -> None:
         expired = WRITE_GRANT.model_copy(
             update={"expires_at": datetime.now(UTC) - timedelta(minutes=1)}
@@ -254,11 +242,6 @@ class TestAuthorityOnRunPath:
 
 
 class TestUntrustedModelOutput:
-    @pytest.mark.xfail(
-        strict=True,
-        raises=DomainError,
-        reason="INV-07 gap: TOOL_NOT_FOUND raises out of run(), run stuck in RUNNING",
-    )
     def test_unknown_tool_is_an_observation_not_a_crash(self, tmp_path: Path) -> None:
         model = ScriptedModel(
             [
@@ -281,11 +264,6 @@ class TestUntrustedModelOutput:
 
 
 class TestBudgetEnforcement:
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="§7.6 gap: consumed_tool_calls is never incremented",
-    )
     def test_tool_call_budget_stops_the_run(self, tmp_path: Path) -> None:
         budget = BudgetLedger(max_tool_calls=1)
         model = ScriptedModel(
@@ -303,11 +281,6 @@ class TestBudgetEnforcement:
         assert not (tmp_path / "out/f2").exists()
         assert state.snapshot(RUN_ID).budget.consumed_tool_calls == 1
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="§7.6 gap: consumed_turns is never incremented; only run(max_turns=40) applies",
-    )
     def test_turn_budget_stops_the_run(self, tmp_path: Path) -> None:
         budget = BudgetLedger(max_turns=3)
         model = ScriptedModel(
@@ -318,3 +291,38 @@ class TestBudgetEnforcement:
         assert result.stop_reason is StopReason.LIMIT_TURNS
         assert result.usage.turns == 3
         assert state.snapshot(RUN_ID).budget.consumed_turns == 3
+
+    def test_batch_larger_than_remaining_budget_never_starts(self, tmp_path: Path) -> None:
+        budget = BudgetLedger(max_tool_calls=2)
+        batch = ToolCallBatchAction(
+            calls=[
+                ToolCall(
+                    call_id=f"c{i}",
+                    tool_id="fs.write",
+                    arguments={"path": f"out/b{i}", "content": "x"},
+                )
+                for i in range(3)
+            ]
+        )
+        kernel, _ = _kernel(ScriptedModel([batch]), tmp_path)
+        result = kernel.run(_contract(), _coder_spec(budget=budget))
+        assert result.stop_reason is StopReason.LIMIT_TOOL_CALLS
+        assert not (tmp_path / "out").exists()
+
+
+# -- no run is ever left live -------------------------------------------------
+
+
+class TestRunAlwaysTerminates:
+    def test_manager_crash_fails_the_run_instead_of_escaping(self, tmp_path: Path) -> None:
+        class ExplodingContext:
+            def build(self, snapshot: object, *, turn: int) -> object:
+                raise RuntimeError("context store unavailable")
+
+        kernel, state = _kernel(ScriptedModel([]), tmp_path)
+        kernel._context = ExplodingContext()  # noqa: SLF001
+        result = kernel.run(_contract(), _coder_spec())
+        assert result.status is RunStatus.FAILED
+        assert result.stop_reason is StopReason.FATAL_ERROR
+        assert state.snapshot(RUN_ID).run.detail_code == "RuntimeError"
+        assert "context store unavailable" not in result.summary  # no raw text on the wire

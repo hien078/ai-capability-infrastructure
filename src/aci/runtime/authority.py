@@ -5,9 +5,11 @@ Approvals extend a grant within policy but never beyond it (INV-02); a changed
 operation invalidates old approvals (§27.4).
 """
 
+import posixpath
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -24,7 +26,7 @@ from aci.domain.runtime.authority import (
     NetworkScope,
     ProcessScope,
 )
-from aci.domain.runtime.tools import SideEffectClass
+from aci.domain.runtime.tools import SideEffectClass, ToolSpec
 
 
 class AuthorityPolicy(BaseModel):
@@ -174,6 +176,55 @@ class PolicyEvaluator:
         if _within_scope(path, ceiling):
             return "CEILING"
         return "DENY"
+
+
+def derive_requirement(tool: ToolSpec, args: dict[str, Any]) -> AuthorityRequirement:
+    """§58 — what ONE call touches, from the tool's declared argument roles.
+
+    Paths are normalized so ``./out//a`` and ``out/a`` scope identically; a
+    path with a ``..`` segment is kept raw so the evaluator denies it. A
+    declared argument holding the wrong type is an invalid argument, never
+    silently skipped (skipping would under-report the requirement)."""
+    declared = tool.authority_requirements
+    return AuthorityRequirement(
+        filesystem_read=[_norm_path(p) for p in _strings(tool, args, declared.read_path_args)],
+        filesystem_write=[_norm_path(p) for p in _strings(tool, args, declared.write_path_args)],
+        process_prefixes=_strings(tool, args, declared.command_args, join_lists=True),
+        network_hosts=_strings(tool, args, declared.host_args),
+    )
+
+
+def grants_from_envelope(envelope: ExecutionEnvelope) -> GrantEnvelope:
+    """The grants an execution envelope carries, for per-call evaluation."""
+    return GrantEnvelope(
+        filesystem=envelope.filesystem,
+        network=envelope.network,
+        process=envelope.process,
+        expires_at=envelope.expires_at,
+    )
+
+
+def _strings(
+    tool: ToolSpec, args: dict[str, Any], names: Sequence[str], *, join_lists: bool = False
+) -> list[str]:
+    values: list[str] = []
+    for name in names:
+        if name not in args:
+            continue
+        value = args[name]
+        if join_lists and isinstance(value, list) and all(isinstance(v, str) for v in value):
+            value = " ".join(value)
+        if not isinstance(value, str):
+            raise DomainError(
+                ErrorCode.TOOL_ARGUMENT_INVALID,
+                f"{tool.tool_id}: authority argument {name!r} must be a string",
+            )
+        values.append(value)
+    return values
+
+
+def _norm_path(path: str) -> str:
+    return path if _has_traversal(path) else posixpath.normpath(path)
 
 
 def _union(base: GrantEnvelope, delta: AuthorityRequirement) -> GrantEnvelope:
@@ -440,4 +491,6 @@ __all__: list[str] = [
     "ExecutionEnvelopeBuilder",
     "GrantLedger",
     "PolicyEvaluator",
+    "derive_requirement",
+    "grants_from_envelope",
 ]

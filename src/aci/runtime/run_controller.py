@@ -23,7 +23,7 @@ from aci.domain.runtime.evidence import CandidateResult, EvidencePack
 from aci.domain.runtime.failures import FailureClass, FailureEnvelope
 from aci.domain.runtime.spec import RuntimeSpec
 from aci.domain.runtime.state import RuntimeStateSnapshot, TaskState
-from aci.domain.runtime.stop_reason import RunStatus, StopReason
+from aci.domain.runtime.stop_reason import RUN_TRANSITIONS, RunStatus, StopReason, is_terminal
 from aci.domain.runtime.subtask import RunResult, RunUsage, SubtaskContract
 from aci.domain.runtime.tools import ToolCall, ToolObservation, ToolSpec
 from aci.runtime.cancellation import CancelToken, RunCancelled
@@ -47,9 +47,10 @@ from aci.runtime.event_bus import (
     VERIFICATION_STARTED,
     EventBus,
 )
-from aci.runtime.model_gateway import ModelUsage
+from aci.runtime.model_gateway import ModelRequest, ModelUsage
 from aci.runtime.recovery import RecoveryManager
 from aci.runtime.state_manager import StateEvent, StateManager
+from aci.runtime.tool_runtime import envelope_expired
 from aci.runtime.verification import VerificationManager
 
 _FAILURE_SEQ = 1000
@@ -162,6 +163,8 @@ class HarnessKernel:
         except RunCancelledError:
             self._state.transition(run_id, RunStatus.CANCELLED, stop_reason=StopReason.CANCELLED)
             result = self._finalize(run_id, usage, started, StopReason.CANCELLED)
+        except Exception as exc:  # noqa: BLE001 — a run never ends stuck in a live state
+            result = self._fail_fatal(run_id, usage, started, exc)
         if result.status is RunStatus.SUCCEEDED:
             self._emit(
                 RUN_COMPLETED,
@@ -285,8 +288,11 @@ class HarnessKernel:
             self._emit(TURN_STARTED, run_id, turn_id=f"turn-{snapshot.run.current_turn + 1}")
             # §17.2 periodic checkpoint trigger for long runs.
             self._maybe_checkpoint(run_id, snapshot.run.current_turn + 1)
+            # Context assembly stays OUTSIDE the model try-block: a context
+            # failure is FATAL_ERROR, not a misreported MODEL_FAILURE.
+            request = self._build_model_request(snapshot, contract, spec)
             try:
-                action, model_usage_raw = self._invoke_model(snapshot, contract, spec)
+                action, model_usage_raw = self._invoke_model(run_id, request)
             except RunCancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — model failures are classified, not crashes
@@ -311,17 +317,32 @@ class HarnessKernel:
                     payload={"calls": [c.tool_id for c in action.calls]},
                     turn_id=f"turn-{snapshot.run.current_turn + 1}",
                 )
-                # §7.6: budget check before each tool execution.
+                # §7.6: budget check before each tool execution — the model
+                # call just consumed budget, and the batch must fit whole.
                 pre = self._state.snapshot(run_id)
-                if self._budget_stop_reason(pre) is not None:
+                tool_stop = self._budget_stop_reason(pre) or _tool_call_stop(pre, len(action.calls))
+                if tool_stop is not None:
+                    self._state.transition(run_id, RunStatus.FAILED, stop_reason=tool_stop)
+                    return self._finalize(run_id, usage, started, tool_stop)
+                envelope = self._envelope(run_id)
+                if envelope_expired(envelope):
+                    # Grants never renew mid-run: every further call would be
+                    # denied, so stop instead of burning model turns.
                     self._state.transition(
-                        run_id, RunStatus.FAILED, stop_reason=StopReason.LIMIT_COST
+                        run_id,
+                        RunStatus.FAILED,
+                        stop_reason=StopReason.AUTHORITY_DENIED,
+                        detail_code="AUTHORITY_EXPIRED",
                     )
-                    return self._finalize(run_id, usage, started, StopReason.LIMIT_COST)
+                    return self._finalize(run_id, usage, started, StopReason.AUTHORITY_DENIED)
+                batch_started = time.monotonic()
                 observations = self._tools.execute_batch(
-                    list(action.calls),
-                    snapshot=self._state.snapshot(run_id),
-                    envelope=self._envelope(run_id),
+                    list(action.calls), snapshot=self._state.snapshot(run_id), envelope=envelope
+                )
+                self._state.consume_budget(
+                    run_id,
+                    tool_calls=len(observations),
+                    wall_time_seconds=time.monotonic() - batch_started,
                 )
                 usage.tool_calls += len(observations)
                 # §7.4: append the assistant action + observations to the
@@ -345,7 +366,19 @@ class HarnessKernel:
                                     f"{len(observations)} tool observation(s)",
                                 ]
                             },
-                        )
+                        ),
+                        # INV-08 evidence: only effects the tool path confirmed.
+                        StateEvent(
+                            event_type="tool.observed",
+                            payload={
+                                "resources": [
+                                    r
+                                    for o in observations
+                                    if o.status == "success" and o.side_effects.state == "confirmed"
+                                    for r in o.side_effects.resources_changed
+                                ]
+                            },
+                        ),
                     ],
                 )
                 for obs in observations:
@@ -376,7 +409,9 @@ class HarnessKernel:
             continue
 
     def _budget_stop_reason(self, snapshot: RuntimeStateSnapshot) -> StopReason | None:
-        """§7.6 preflight: turn/token/tool-call/wall-time/cost ceilings."""
+        """§7.6 preflight: turn/token/wall-time/cost ceilings. The tool-call
+        ceiling gates tool batches (``_tool_call_stop``), not model turns — a
+        run that spent its tool budget may still finalize."""
         b = snapshot.budget
         if b.consumed_turns >= b.max_turns:
             return StopReason.LIMIT_TURNS
@@ -384,13 +419,26 @@ class HarnessKernel:
             return StopReason.LIMIT_TOTAL_TOKENS
         if b.consumed_output_tokens >= b.max_output_tokens:
             return StopReason.LIMIT_OUTPUT_TOKENS
-        if b.consumed_tool_calls >= b.max_tool_calls:
-            return StopReason.LIMIT_TOOL_CALLS
         if b.consumed_wall_time_seconds >= b.max_wall_time_seconds:
             return StopReason.LIMIT_WALL_TIME
         if b.consumed_cost_usd >= b.max_cost_usd:
             return StopReason.LIMIT_COST
         return None
+
+    def _fail_fatal(self, run_id: str, usage: _Usage, started: float, exc: Exception) -> RunResult:
+        """An unexpected manager exception: FAILED/FATAL_ERROR, never a crash
+        that leaves the run live (INV-07 — nothing model-driven escapes run())."""
+        status = self._state.snapshot(run_id).run.status
+        if not is_terminal(status) and RunStatus.FAILED in RUN_TRANSITIONS[status]:
+            self._state.transition(
+                run_id,
+                RunStatus.FAILED,
+                stop_reason=StopReason.FATAL_ERROR,
+                detail_code=type(exc).__name__,
+            )
+        # The type only: raw exception text never reaches the caller (§61).
+        summary = f"internal error ({type(exc).__name__})"
+        return self._finalize(run_id, usage, started, StopReason.FATAL_ERROR, summary=summary)
 
     def _fail_model(self, run_id: str, usage: _Usage, started: float, exc: Exception) -> RunResult:
         """§18: classify the model failure, run recovery, never crash the run."""
@@ -425,13 +473,12 @@ class HarnessKernel:
         self._state.transition(run_id, RunStatus.FAILED, stop_reason=StopReason.MODEL_FAILURE)
         return self._finalize(run_id, usage, started, StopReason.MODEL_FAILURE)
 
-    def _invoke_model(
+    def _build_model_request(
         self, snapshot: RuntimeStateSnapshot, contract: SubtaskContract, spec: RuntimeSpec
-    ) -> tuple[object, object]:
-        """§20.1 — build the provider-neutral ModelRequest (system identity +
-        objective + constraints + active capability instructions), invoke the
-        gateway, return (normalized action, usage) (§47)."""
-        from aci.runtime.model_gateway import ModelMessage, ModelRequest
+    ) -> ModelRequest:
+        """§20.1 — the provider-neutral ModelRequest (system identity +
+        objective + constraints + active capability instructions)."""
+        from aci.runtime.model_gateway import ModelMessage
 
         run_id = snapshot.run.run_id
         history = self._history.setdefault(run_id, [])
@@ -475,17 +522,20 @@ class HarnessKernel:
                     "dropped": len(assembled.dropped_item_ids),
                 },
             )
-        request = ModelRequest(
+        return ModelRequest(
             messages=[m for m in history if isinstance(m, ModelMessage)],
             tools=self._advertised_tools(),
             model_class=spec.model_policy.default_class,
             token_limit=spec.loop_policy.max_output_tokens,
         )
-        self._emit(MODEL_REQUEST_STARTED, snapshot.run.run_id)
+
+    def _invoke_model(self, run_id: str, request: ModelRequest) -> tuple[object, object]:
+        """Invoke the gateway; return (normalized action, usage) (§47)."""
+        self._emit(MODEL_REQUEST_STARTED, run_id)
         response = self._model.invoke(request)  # type: ignore[attr-defined]
         self._emit(
             MODEL_REQUEST_COMPLETED,
-            snapshot.run.run_id,
+            run_id,
             payload={"action_type": type(response.action).__name__},
         )
         return response.action, response.usage
@@ -583,6 +633,14 @@ class HarnessKernel:
         )
 
 
+def _tool_call_stop(snapshot: RuntimeStateSnapshot, batch_size: int) -> StopReason | None:
+    """§7.6 — a batch that does not fit the remaining tool budget never starts."""
+    b = snapshot.budget
+    if b.consumed_tool_calls + batch_size > b.max_tool_calls:
+        return StopReason.LIMIT_TOOL_CALLS
+    return None
+
+
 def _failure(cls: FailureClass, component: str, evidence: list[str]) -> FailureEnvelope:
     global _FAILURE_SEQ
     _FAILURE_SEQ += 1
@@ -612,7 +670,10 @@ Respond with EXACTLY ONE JSON object on the final line — no prose around it:
 "claims": [...], "criteria_addressed": [...]}
 Use it when the objective is met. "summary" must be non-empty. "changes", \
 "artifacts", "claims", "criteria_addressed" are arrays of PLAIN STRINGS only — \
-never objects. Do not emit any other JSON shape."""
+never objects. Each "changes" entry is the workspace-relative path of a file \
+you changed through a tool, optionally followed by ": note" (e.g. \
+"src/app.py: fix off-by-one"); claimed changes are checked against the \
+observed tool effects. Do not emit any other JSON shape."""
 
 
 def _system_prompt(snapshot: RuntimeStateSnapshot, spec: RuntimeSpec) -> str:

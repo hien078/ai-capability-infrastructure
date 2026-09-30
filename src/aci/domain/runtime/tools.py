@@ -27,6 +27,24 @@ class OutputPolicy(BaseModel):
     spill_to_artifact: bool = True
 
 
+class ToolAuthority(BaseModel):
+    """§58 ``tool.derive_authority(args)``: which validated arguments name the
+    resources a call touches. A mutating tool that declares nothing cannot be
+    scoped, so it is denied (INV-06, fail closed)."""
+
+    model_config = {"frozen": True}
+
+    read_path_args: list[str] = Field(default_factory=list)
+    write_path_args: list[str] = Field(default_factory=list)
+    command_args: list[str] = Field(default_factory=list)
+    host_args: list[str] = Field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not (
+            self.read_path_args or self.write_path_args or self.command_args or self.host_args
+        )
+
+
 class ToolSpec(BaseModel):
     """§12.3 tool contract. Frozen — registered tools are immutable."""
 
@@ -38,7 +56,7 @@ class ToolSpec(BaseModel):
     input_schema: dict[str, Any] = Field(default_factory=dict)
     output_schema: dict[str, Any] | None = None
     side_effect_class: SideEffectClass = "READ_ONLY"
-    authority_requirements: dict[str, Any] = Field(default_factory=dict)
+    authority_requirements: ToolAuthority = Field(default_factory=ToolAuthority)
     workspace_requirements: dict[str, Any] = Field(default_factory=dict)
     timeout_ms: int = Field(default=120_000, ge=1)
     cancellation_support: CancellationSupport = "COOPERATIVE"
@@ -70,6 +88,11 @@ class SideEffectReport(BaseModel):
 
     state: Literal["none", "possible", "confirmed"] = "none"
     resources_changed: list[str] = Field(default_factory=list)
+
+
+MUTATING_CLASSES: frozenset[SideEffectClass] = frozenset(
+    {"LOCAL_MUTATION", "EXTERNAL_MUTATION", "DESTRUCTIVE", "PRIVILEGED"}
+)
 
 
 class ToolObservation(BaseModel):

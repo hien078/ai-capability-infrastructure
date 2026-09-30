@@ -146,7 +146,30 @@ class TestStateManager:
         sm = StateManager()
         _create(sm)
         assert sm.advance_turn("run-1").run.current_turn == 1
-        assert sm.advance_turn("run-1").run.current_turn == 2
+        snap = sm.advance_turn("run-1")
+        assert snap.run.current_turn == 2
+        # §7.6: the budget ledger counts turns too — budget.max_turns is live.
+        assert snap.budget.consumed_turns == 2
+
+    def test_tool_observed_records_confirmed_effects_once(self) -> None:
+        sm = StateManager()
+        _create(sm)
+        version = sm.snapshot("run-1").run.version
+        sm.commit(
+            "run-1",
+            expected_version=version,
+            events=[
+                StateEvent(event_type="tool.observed", payload={"resources": ["file:a", "file:a"]})
+            ],
+        )
+        snap = sm.commit(
+            "run-1",
+            expected_version=version + 1,
+            events=[
+                StateEvent(event_type="tool.observed", payload={"resources": ["file:b", "file:a"]})
+            ],
+        )
+        assert snap.changed_resources == ["file:a", "file:b"]
 
     def test_started_at_set_on_first_running(self) -> None:
         sm = StateManager()

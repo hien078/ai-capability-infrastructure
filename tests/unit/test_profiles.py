@@ -79,9 +79,13 @@ class TestProfiles:
         results = [check.fn(snap, empty_candidate) for check in coder_checks]
         assert all(not r.passed for r in results)
 
-        valid_coder = CandidateResult(summary="done", changes=["file.py"])
-        results = [check.fn(snap, valid_coder) for check in coder_checks]
-        assert all(r.passed for r in results)
+        # INV-08: a claimed change passes only against an OBSERVED effect.
+        valid_coder = CandidateResult(summary="done", changes=["file.py: fixed"])
+        assert not all(check.fn(snap, valid_coder).passed for check in coder_checks)
+        observed = snap.model_copy(update={"changed_resources": ["file:file.py"]})
+        assert all(check.fn(observed, valid_coder).passed for check in coder_checks)
+        unobserved = CandidateResult(summary="done", changes=["file.py", "other.py"])
+        assert not all(check.fn(observed, unobserved).passed for check in coder_checks)
 
         # Debugger
         dbg_checks = verifier_checks("debugger")

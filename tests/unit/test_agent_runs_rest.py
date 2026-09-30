@@ -81,17 +81,30 @@ def _body(**overrides: Any) -> dict[str, Any]:
 
 
 class TestAgentRunsRest:
-    def test_run_verified_success(self) -> None:
-        service = _service([FinalCandidate(summary="fixed", changes=["src/x.py"])])
+    # The success-path plumbing tests use the researcher profile: a coder run
+    # cannot verify here (no tools, empty grants — INV-08 needs observed
+    # effects), which test_coder_claim_without_observed_change_fails pins.
+    def test_run_success_round_trip(self) -> None:
+        service = _service([FinalCandidate(summary="found it", claims=["cause: X"])])
         client = _client(service)
-        response = client.post("/v1/agent-runs", json=_body())
+        response = client.post("/v1/agent-runs", json=_body(requested_profile="researcher"))
         assert response.status_code == 201
         data = response.json()
         assert data["status"] == "succeeded"
         assert data["stop_reason"] == "SUCCESS"
-        assert data["summary"] == "fixed"
+        assert data["summary"] == "found it"
         assert data["evidence_verdict"] == "PASS"
         assert data["turns"] == 1
+
+    def test_coder_claim_without_observed_change_fails(self) -> None:
+        """INV-08 at the edge: the model saying it changed src/x.py is not
+        evidence — no tool effect was observed, so the run never succeeds."""
+        service = _service([FinalCandidate(summary="fixed", changes=["src/x.py"])])
+        client = _client(service)
+        data = client.post("/v1/agent-runs", json=_body()).json()
+        assert data["status"] == "failed"
+        assert data["stop_reason"] == "VERIFICATION_FAILED"
+        assert "claimed_changes_observed" in data["summary"]
 
     def test_unknown_profile_rejected(self) -> None:
         service = _service([FinalCandidate(summary="x")])
@@ -119,9 +132,9 @@ class TestAgentRunsRest:
         assert response.json() == {"cancelled": False}
 
     def test_get_run_after_completion(self) -> None:
-        service = _service([FinalCandidate(summary="done", changes=["a"])])
+        service = _service([FinalCandidate(summary="done", claims=["a"])])
         client = _client(service)
-        created = client.post("/v1/agent-runs", json=_body()).json()
+        created = client.post("/v1/agent-runs", json=_body(requested_profile="researcher")).json()
         fetched = client.get(f"/v1/agent-runs/{created['run_id']}")
         assert fetched.status_code == 200
         assert fetched.json()["run_id"] == created["run_id"]
@@ -135,16 +148,17 @@ class TestAgentRunsRest:
 
     def test_revise_links_previous_attempt(self) -> None:
         service = _service(
-            [FinalCandidate(summary="bad"), FinalCandidate(summary="fixed", changes=["a"])]
+            [FinalCandidate(summary="bad"), FinalCandidate(summary="fixed", claims=["a"])]
         )
         client = _client(service)
-        first = client.post("/v1/agent-runs", json=_body()).json()
+        first = client.post("/v1/agent-runs", json=_body(requested_profile="researcher")).json()
         revision = client.post(
             f"/v1/agent-runs/{first['run_id']}/revise",
             json={
                 "objective": "fix the failing test",
                 "failed_criteria": ["test passes"],
                 "feedback": "the summary was empty",
+                "requested_profile": "researcher",
             },
         )
         assert revision.status_code == 201

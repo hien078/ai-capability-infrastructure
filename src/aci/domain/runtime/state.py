@@ -110,3 +110,7 @@ class RuntimeStateSnapshot(BaseModel):
     active_capabilities: list[CapabilityActivation] = Field(default_factory=list)
     workspace_id: str | None = None
     depth: int = Field(default=0, ge=0)
+    #: §41.2 confirmed side effects observed on the tool path (e.g.
+    #: ``file:src/app.py``) — the evidence the verifier reconciles claims
+    #: against (INV-08), never the model's own report.
+    changed_resources: list[str] = Field(default_factory=list)

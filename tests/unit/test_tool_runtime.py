@@ -23,10 +23,12 @@ from aci.domain.runtime.state import (
 from aci.domain.runtime.tools import (
     OutputPolicy,
     SideEffectReport,
+    ToolAuthority,
     ToolCall,
     ToolObservation,
     ToolSpec,
 )
+from aci.runtime.authority import AuthorityPolicy
 from aci.runtime.guardrails import GuardrailResult
 from aci.runtime.protocols import ToolDispatchResult
 from aci.runtime.tool_runtime import OutputLimiter, ToolRegistry, ToolRuntime
@@ -155,12 +157,17 @@ def test_registry_lookup_miss_raises_domain_error() -> None:
     assert exc_info.value.code == ErrorCode.TOOL_NOT_FOUND
 
 
-def test_unknown_tool_in_execute_raises_domain_error() -> None:
-    rt = runtime(FakeDispatcher())
-    with pytest.raises(DomainError) as exc_info:
-        rt.execute(call("missing"), snapshot=snapshot(), envelope=envelope())
-    assert exc_info.value.code == ErrorCode.TOOL_NOT_FOUND
-    assert not rt._dispatcher.calls if hasattr(rt._dispatcher, "calls") else True
+def test_unknown_tool_is_an_error_observation() -> None:
+    """INV-07: a hallucinated tool id is untrusted input, not a crash — the
+    model is told what exists so it can recover."""
+    dispatcher = FakeDispatcher()
+    rt = runtime(dispatcher)
+    obs = rt.execute(call("missing"), snapshot=snapshot(), envelope=envelope())
+    assert obs.status == "error"
+    assert obs.error_class == "TOOL_NOT_FOUND"
+    assert obs.tool_id == "missing"
+    assert "grep" in obs.summary
+    assert dispatcher.calls == []
 
 
 def test_argument_validation_wrong_type() -> None:
@@ -227,9 +234,9 @@ def test_expired_envelope_fails_closed_never_dispatches() -> None:
     dispatcher = FakeDispatcher()
     rt = runtime(dispatcher)
     expired = envelope(expires_at=NOW - timedelta(seconds=1))
-    with pytest.raises(DomainError) as exc_info:
-        rt.execute(call(), snapshot=snapshot(), envelope=expired)
-    assert exc_info.value.code == ErrorCode.AUTHORITY_EXPIRED
+    obs = rt.execute(call(), snapshot=snapshot(), envelope=expired)
+    assert obs.status == "denied"
+    assert obs.error_class == "AUTHORITY_EXPIRED"
     assert dispatcher.calls == []
 
 
@@ -361,3 +368,107 @@ def test_output_limiter_tail_mode() -> None:
     inline, ref = limiter.limit(raw, policy, None, tool_id="t", call_id="c")
     assert inline == raw[-100:]
     assert ref is None
+
+
+# -- §12.1 step 4 / §58: authority preflight (INV-06) -------------------------
+
+
+def _write_tool(**authority: list[str]) -> ToolSpec:
+    return ToolSpec(
+        tool_id="fs.write",
+        version="1.0.0",
+        input_schema={"properties": {"path": {"type": "string"}, "cmd": {}}},
+        side_effect_class="LOCAL_MUTATION",
+        authority_requirements=ToolAuthority(**authority),
+    )
+
+
+def _scoped(write: list[str] | None = None, process: list[str] | None = None) -> ExecutionEnvelope:
+    return envelope().model_copy(
+        update={
+            "filesystem": FilesystemScope(write=write or []),
+            "process": ProcessScope(allowed_prefixes=process or []),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "allowed"),
+    [
+        ("out/a.py", True),
+        ("./out//a.py", True),
+        ("out", True),
+        ("outside/a.py", False),
+        ("outx/a.py", False),
+        ("out/../etc/passwd", False),
+        ("/etc/passwd", False),
+    ],
+)
+def test_write_path_is_scoped_by_grants(path: str, allowed: bool) -> None:
+    dispatcher = FakeDispatcher()
+    rt = runtime(dispatcher, tools=[_write_tool(write_path_args=["path"])])
+    obs = rt.execute(
+        call("fs.write", path=path), snapshot=snapshot(), envelope=_scoped(write=["out"])
+    )
+    assert (obs.status == "success") is allowed
+    assert (len(dispatcher.calls) == 1) is allowed
+    if not allowed:
+        assert obs.status == "denied"
+        assert obs.error_class == "AUTHORITY_DENIED"
+
+
+def test_mutating_tool_without_declared_authority_is_denied() -> None:
+    dispatcher = FakeDispatcher()
+    rt = runtime(dispatcher, tools=[_write_tool()])
+    obs = rt.execute(
+        call("fs.write", path="out/a.py"), snapshot=snapshot(), envelope=_scoped(write=["out"])
+    )
+    assert obs.status == "denied"
+    assert "declares no authority" in obs.summary
+    assert dispatcher.calls == []
+
+
+def test_command_prefix_is_scoped_by_process_grants() -> None:
+    dispatcher = FakeDispatcher()
+    rt = runtime(dispatcher, tools=[_write_tool(command_args=["cmd"])])
+    ok = rt.execute(
+        call("fs.write", cmd=["pytest", "-q"]),
+        snapshot=snapshot(),
+        envelope=_scoped(process=["pytest"]),
+    )
+    denied = rt.execute(
+        call("fs.write", cmd=["rm", "-rf", "."]),
+        snapshot=snapshot(),
+        envelope=_scoped(process=["pytest"]),
+    )
+    assert ok.status == "success"
+    assert denied.status == "denied"
+    assert len(dispatcher.calls) == 1
+
+
+def test_authority_argument_of_wrong_type_is_invalid_not_skipped() -> None:
+    dispatcher = FakeDispatcher()
+    rt = runtime(dispatcher, tools=[_write_tool(write_path_args=["path"])])
+    obs = rt.execute(
+        call("fs.write", path=["out/a.py"]), snapshot=snapshot(), envelope=_scoped(write=["out"])
+    )
+    assert obs.status == "error"
+    assert obs.error_class == "TOOL_INVALID_ARGUMENT"
+    assert dispatcher.calls == []
+
+
+def test_approval_class_fails_closed_without_an_approval_path() -> None:
+    dispatcher = FakeDispatcher()
+    registry = ToolRegistry()
+    registry.register(_write_tool(write_path_args=["path"]))
+    rt = ToolRuntime(
+        registry,
+        dispatcher,
+        authority_policy=AuthorityPolicy(approval_classes={"LOCAL_MUTATION"}),
+    )
+    obs = rt.execute(
+        call("fs.write", path="out/a.py"), snapshot=snapshot(), envelope=_scoped(write=["out"])
+    )
+    assert obs.status == "denied"
+    assert obs.error_class == "APPROVAL_REQUIRED"
+    assert dispatcher.calls == []
