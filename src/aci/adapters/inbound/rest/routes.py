@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Request
 
+from aci.adapters.inbound.rest.auth import api_token, bearer_gate
 from aci.adapters.inbound.rest.schemas import RouteRequest
 from aci.adapters.inbound.rest.wiring import Container, get_container
 from aci.domain.capability.errors import DomainError, ErrorCode
@@ -12,7 +13,9 @@ from aci.domain.capability.models import RouteCapabilitiesCommand
 from aci.domain.policy.models import ClientDescriptor, ProtocolDescriptor, RequestContext
 from aci.domain.routing.models import RouteResult, RouteRun
 
-router = APIRouter(prefix="/v1/routes", tags=["routes"])
+router = APIRouter(
+    prefix="/v1/routes", tags=["routes"], dependencies=[Depends(bearer_gate(api_token))]
+)
 
 
 @router.post("", status_code=201)

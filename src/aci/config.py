@@ -65,6 +65,16 @@ class Settings(BaseSettings):
     #: deployment must keep the port on localhost. The public Agent Card
     #: (/.well-known/agent-card.json) stays open for discovery.
     a2a_token: str = ""
+    #: Named A2A callers: principal → bearer token (JSON env, e.g.
+    #: ACI_A2A_PRINCIPALS='{"orchestrator-a": "tok1"}'). A task is owned by the
+    #: principal that created it; GetTask/CancelTask on another principal's
+    #: task is TASK_NOT_FOUND. `a2a_token` (if set) is the principal "default".
+    a2a_principals: dict[str, str] = Field(default_factory=dict)
+    #: Bearer token guarding the REST read/write surfaces (/v1/routes,
+    #: /v1/bundles, /v1/outcomes, /v1/evaluations, /v1/capabilities,
+    #: /opencode/skills, /ui). Empty (default) = UNAUTHENTICATED mode —
+    #: localhost-only by deployment assumption. /health and /ready stay open.
+    api_token: str = ""
 
 
 settings = Settings()

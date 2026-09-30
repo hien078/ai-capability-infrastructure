@@ -22,10 +22,11 @@ OpenCode V2 catalog semantics (verified against the V2 docs, §77):
 
 import hashlib
 import re
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Header, Request, Response
 
+from aci.adapters.inbound.rest.auth import verify_bearer
 from aci.application.protocols import (
     ArtifactStore,
     CapabilityRepository,
@@ -45,7 +46,20 @@ _MEDIA_TYPES: dict[str, str] = {
     ".yml": "text/yaml",
 }
 
-router = APIRouter(prefix="/opencode/skills", tags=["opencode-catalog"])
+
+def _require_api_token(
+    request: Request, authorization: Annotated[str | None, Header()] = None
+) -> None:
+    """ACI_API_TOKEN gate: the catalog serves every production skill's bytes.
+    Reads app.state like the handlers below (wiring imports this module)."""
+    verify_bearer(authorization, request.app.state.container.settings.api_token)
+
+
+router = APIRouter(
+    prefix="/opencode/skills",
+    tags=["opencode-catalog"],
+    dependencies=[Depends(_require_api_token)],
+)
 
 
 def _safe_relative(path: str) -> bool:

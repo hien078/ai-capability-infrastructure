@@ -4,15 +4,16 @@ Thin edge: request → SubtaskContract + RuntimeSpec (from the AgentProfile) →
 AgentRunService → RunResult projected as compact typed state (§29A: status,
 verdict, checks, evidence refs, artifacts — never the transcript)."""
 
-import hmac
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from aci.adapters.inbound.rest.auth import bearer_gate
 from aci.adapters.inbound.rest.wiring import Container, get_container
 from aci.application.run_agent_task import new_run_id
+from aci.config import Settings
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.spec import AgentProfileId
 from aci.domain.runtime.state import BudgetLedger
@@ -20,30 +21,18 @@ from aci.domain.runtime.subtask import AcceptanceCriterion, RunResult, SubtaskCo
 from aci.runtime.profiles import runtime_spec_for
 
 
-def _require_run_token(
-    container: Annotated[Container, Depends(get_container)],
-    authorization: Annotated[str | None, Header()] = None,
-) -> None:
-    """Exposure gate for the whole /v1/agent-runs surface: a run executes
-    under the server user (no sandbox, §16.4), so anyone who can reach the
-    port can otherwise run code here. With ACI_AGENT_RUNS_TOKEN set, every
-    route requires `Authorization: Bearer <token>`. Empty token =
-    UNAUTHENTICATED mode — the deployment keeps the port on localhost
-    (build_agent_run_service warns at startup)."""
-    token = container.settings.agent_runs_token
-    if not token:
-        return
-    # Constant-time compare: a plain != leaks the match position through
-    # response timing (standard practice for secrets on the wire).
-    expected = f"Bearer {token}".encode()
-    if not hmac.compare_digest((authorization or "").encode(), expected):
-        raise HTTPException(status_code=401, detail="invalid or missing agent-run token")
+def _agent_runs_token(settings: Settings) -> str:
+    """A run executes under the server user (no sandbox, §16.4), so anyone
+    who can reach the port can otherwise run code here. With
+    ACI_AGENT_RUNS_TOKEN set, every route requires `Authorization: Bearer
+    <token>`; empty = UNAUTHENTICATED mode (build_agent_run_service warns)."""
+    return settings.agent_runs_token
 
 
 router = APIRouter(
     prefix="/v1/agent-runs",
     tags=["agent-runs"],
-    dependencies=[Depends(_require_run_token)],
+    dependencies=[Depends(bearer_gate(_agent_runs_token))],
 )
 
 

@@ -8,19 +8,29 @@ human gates stay CLI (capctl) on purpose; a button is too easy to press.
 
 All SQL reads go through the container's OWN database URL (§ never a
 second source of truth for which DB to read).
+
+Auth (ACI_API_TOKEN set): a browser cannot attach a Bearer header, so
+``POST /ui/login`` checks the token once and sets an HttpOnly,
+SameSite=Strict session cookie holding an HMAC derived from it (never the
+API token itself). Every console page requires that cookie; unsafe methods
+additionally require a same-origin Origin/Referer, because SameSite ignores
+ports and any other localhost service is "same-site". Empty token = open.
 """
 
+import hashlib
+import hmac
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import make_url
 
+from aci.adapters.inbound.rest.auth import tokens_match
 from aci.adapters.inbound.rest.wiring import Container, get_container
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.capability.models import RouteCapabilitiesCommand, TaskContext
@@ -28,7 +38,55 @@ from aci.domain.policy.models import ClientDescriptor, ProtocolDescriptor, Reque
 
 _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates" / "ui"))
 
+SESSION_COOKIE = "aci_token"
+
+_LOGIN_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sign in · aci console</title><link rel="stylesheet" href="/ui/static/ui.css">
+</head><body><main>
+<h1>aci console</h1><p class="dim">{message}</p>
+<form method="post" action="/ui/login">
+<label for="token">api token</label>
+<input type="password" name="token" id="token" autocomplete="current-password" required>
+<p><button>sign in</button></p>
+</form></main></body></html>"""
+
+
+def session_value(api_token: str) -> str:
+    """Cookie value for a console session: derived from, never equal to, the token."""
+    return hmac.new(api_token.encode(), b"aci-console-session", hashlib.sha256).hexdigest()
+
+
+def _same_origin(request: Request) -> bool:
+    own = f"{request.url.scheme}://{request.url.netloc}"
+    origin = request.headers.get("origin")
+    if origin is not None:
+        return origin == own
+    referer = request.headers.get("referer", "")
+    return referer == own or referer.startswith(f"{own}/")
+
+
+def _require_console_session(
+    request: Request, container: Annotated[Container, Depends(get_container)]
+) -> None:
+    """Pages redirect to the login form without a valid session cookie;
+    unsafe methods also need a same-origin request (CSRF)."""
+    token = container.settings.api_token
+    if not token:
+        return
+    cookie = request.cookies.get(SESSION_COOKIE, "")
+    if not tokens_match(cookie, session_value(token)):
+        if request.method in ("GET", "HEAD"):
+            raise HTTPException(status_code=303, headers={"Location": "/ui/login"})
+        raise HTTPException(status_code=401, detail="console session required")
+    if request.method not in ("GET", "HEAD") and not _same_origin(request):
+        raise HTTPException(status_code=403, detail="cross-origin request refused")
+
+
+#: Open router: the login form only. Every console page hangs off `_console`.
 router = APIRouter(prefix="/ui", tags=["ui"], include_in_schema=False)
+_console = APIRouter(dependencies=[Depends(_require_console_session)])
 
 #: Read-only engines, one per database URL — the console must read the
 #: SAME database the container's repos write to, never a second URL.
@@ -87,7 +145,7 @@ def _render(
     )
 
 
-@router.get("/")
+@_console.get("/")
 def dashboard(
     request: Request, container: Annotated[Container, Depends(get_container)]
 ) -> HTMLResponse:
@@ -183,7 +241,7 @@ def dashboard(
     )
 
 
-@router.get("/routes")
+@_console.get("/routes")
 def routes(
     request: Request,
     container: Annotated[Container, Depends(get_container)],
@@ -219,7 +277,7 @@ def routes(
     )
 
 
-@router.get("/routes/{route_run_id}")
+@_console.get("/routes/{route_run_id}")
 def route_detail(
     route_run_id: str,
     request: Request,
@@ -259,7 +317,7 @@ def route_detail(
     )
 
 
-@router.get("/corpus")
+@_console.get("/corpus")
 def corpus(
     request: Request,
     container: Annotated[Container, Depends(get_container)],
@@ -314,7 +372,7 @@ def corpus(
     )
 
 
-@router.get("/corpus/{capability_id}")
+@_console.get("/corpus/{capability_id}")
 def capability(
     capability_id: str,
     request: Request,
@@ -383,7 +441,7 @@ def capability(
     )
 
 
-@router.get("/try")
+@_console.get("/try")
 def try_form(
     request: Request,
     container: Annotated[Container, Depends(get_container)],
@@ -392,7 +450,7 @@ def try_form(
     return _render(request, "try.html", container, task=task, examples=TRY_EXAMPLES)
 
 
-@router.post("/try")
+@_console.post("/try")
 def try_route(
     request: Request,
     container: Annotated[Container, Depends(get_container)],
@@ -423,3 +481,39 @@ def try_route(
         request=request_context,
     )
     return RedirectResponse(f"/ui/routes/{result.route_run_id}", status_code=303)
+
+
+@router.get("/login")
+def login_form(container: Annotated[Container, Depends(get_container)]) -> Response:
+    if not container.settings.api_token:
+        return RedirectResponse("/ui/", status_code=303)
+    return HTMLResponse(_LOGIN_PAGE.format(message="this console requires the ACI api token."))
+
+
+@router.post("/login")
+def login(
+    request: Request,
+    container: Annotated[Container, Depends(get_container)],
+    token: Annotated[str, Form()],
+) -> Response:
+    """Exchange the api token for a session cookie (HttpOnly, SameSite=Strict)."""
+    api_token = container.settings.api_token
+    if not api_token:
+        return RedirectResponse("/ui/", status_code=303)
+    if not _same_origin(request):
+        raise HTTPException(status_code=403, detail="cross-origin request refused")
+    if not tokens_match(token, api_token):
+        return HTMLResponse(_LOGIN_PAGE.format(message="invalid token."), status_code=401)
+    response = RedirectResponse("/ui/", status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE,
+        session_value(api_token),
+        path="/ui",
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+    )
+    return response
+
+
+router.include_router(_console)

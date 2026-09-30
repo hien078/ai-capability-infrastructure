@@ -5,12 +5,15 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
+from aci.adapters.inbound.rest.auth import api_token, bearer_gate
 from aci.adapters.inbound.rest.schemas import OutcomeRequest
 from aci.adapters.inbound.rest.wiring import Container, get_container
 from aci.application.report_outcome import new_outcome_id
 from aci.domain.capability.models import OutcomeEvidence, OutcomeVerdict
 
-router = APIRouter(prefix="/v1/outcomes", tags=["outcomes"])
+router = APIRouter(
+    prefix="/v1/outcomes", tags=["outcomes"], dependencies=[Depends(bearer_gate(api_token))]
+)
 
 
 @router.post("", status_code=201)
