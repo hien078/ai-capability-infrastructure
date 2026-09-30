@@ -4,7 +4,7 @@
 
 ## Commands (verified)
 
-- `.venv/bin/python -m pytest -q` (or plain `pytest -q`) — 470 tests: 368 unit + 83 integration + 19 security (live-DB ones skip without Postgres). Works with no install (`pyproject.toml` sets `pythonpath = ["src"]`); full deps live in `.venv/`.
+- `.venv/bin/python -m pytest -q` (or plain `pytest -q`) — 672 tests: 570 unit + 83 integration + 19 security (live-DB ones skip without Postgres). Works with no install (`pyproject.toml` sets `pythonpath = ["src"]`); full deps live in `.venv/`. **Test-DB hygiene (2026-09-30): the `aci` DB was truncated to zero fixtures after accumulating 7,701 capabilities / 3,428 production-active releases — that accumulation made the benchmark integration test alone take 171s (every route call loaded all of them); after the reset the whole integration suite runs in ~6s. If integration tests creep slow again, truncate `aci` fixtures (it is 100% test data; the real corpus lives in `aci_bench`).**
 - `ruff check src tests` + `ruff format --check src tests` — both clean required (line-length 100, rules `E,F,I,UP,B`).
 - `.venv/bin/python -m mypy src` — strict, clean. System python lacks mypy; use `.venv` or `uvx mypy src`.
 - DB: `docker compose up -d db` (`pgvector/pgvector:pg16`, service `db`), then `alembic upgrade head` (needs `.venv` on PATH: `.venv/bin/alembic`). `migrations/env.py` reads `ACI_DATABASE_URL` first, falls back to `alembic.ini`.
