@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}routes · aci console{% endblock %}
+{% block main %}
+<h1>route runs</h1>
+<form method="get" action="/ui/routes">
+  <input name="principal" value="{{ principal }}" placeholder="filter by principal" size="24">
+  <button>filter</button>
+</form>
+
+<table>
+  <tr><th>created (utc)</th><th>principal</th><th>task</th>
+      <th class="num">elig</th><th class="num">ms</th><th>embedder</th></tr>
+  {% for r in runs %}
+  <tr>
+    <td><a href="/ui/routes/{{ r.route_run_id }}">{{ r.created_at.strftime("%m-%d %H:%M:%S") }}</a></td>
+    <td>{{ r.principal_id }}</td>
+    <td class="dim">{{ r.task_text[:64] }}{% if r.task_text|length > 64 %}…{% endif %}</td>
+    <td class="num">{{ r.eligible_count }}</td>
+    <td class="num">{{ r.latency_ms if r.latency_ms is not none else '—' }}</td>
+    <td class="dim">{{ (r.embedder or '—').split(':')[0] }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<span class="dim">{{ runs | length }} most recent runs{% if principal %} · principal={{ principal }}{% endif %}</span>
+{% endblock %}

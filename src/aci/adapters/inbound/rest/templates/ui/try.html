@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}try · aci console{% endblock %}
+{% block main %}
+<h1>try a route</h1>
+<p class="dim">runs the real §14 pipeline as principal <code>console</code> — telemetry is recorded like any other client's. the run lands on its own detail page.</p>
+<form method="post" action="/ui/try">
+  <label for="task">task</label>
+  <textarea name="task" id="task" required
+    placeholder="debug a flaky python test in the payment retry module"></textarea>
+  <label for="language">language</label>
+  <input name="language" id="language" placeholder="python">
+  <label for="frameworks">frameworks (comma-separated)</label>
+  <input name="frameworks" id="frameworks" placeholder="pytest, sqlalchemy">
+  <label for="phase">phase</label>
+  <input name="phase" id="phase" placeholder="debugging">
+  <p><button>route</button></p>
+</form>
+{% endblock %}

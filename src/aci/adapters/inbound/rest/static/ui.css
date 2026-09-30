@@ -1,0 +1,90 @@
+/* aci console — one hand-written file. numbers right-aligned, ids left.
+   dark, dense, no shadows: this is a terminal that happens to be html. */
+
+:root {
+  --bg: #14161a;
+  --panel: #1b1e24;
+  --border: #2a2e36;
+  --text: #c6ccd4;
+  --dim: #8b93a0;
+  --bright: #e8ebef;
+  --accent: #d2923a;
+  --ok: #7fb069;
+  --fail: #c05656;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.dim { color: var(--dim); }
+.right { margin-left: auto; }
+
+header {
+  display: flex; align-items: baseline; gap: 18px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.brand { color: var(--bright); font-weight: 600; letter-spacing: 0.02em; }
+nav { display: flex; gap: 14px; }
+nav a { color: var(--text); }
+nav a:hover { color: var(--bright); text-decoration: none; border-bottom: 1px solid var(--accent); }
+
+main { padding: 14px 16px 40px; }
+footer {
+  padding: 8px 16px 24px; font-size: 11px;
+  color: var(--dim); border-top: 1px solid var(--border);
+}
+
+h1 { font-size: 15px; font-weight: 600; color: var(--bright); margin: 4px 0 12px; }
+h2 { font-size: 12px; font-weight: 600; color: var(--dim);
+     text-transform: uppercase; letter-spacing: 0.06em; margin: 18px 0 6px; }
+
+table { border-collapse: collapse; width: 100%; margin: 0 0 8px; }
+th {
+  text-align: left; font-weight: 500; font-size: 11px;
+  color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 3px 10px 4px 0; border-bottom: 1px solid var(--border);
+}
+td { padding: 3px 10px 3px 0; border-bottom: 1px solid #20232a; }
+.num { text-align: right; padding-right: 14px; }
+th.num { padding-right: 14px; }
+
+.grid { display: flex; gap: 28px; flex-wrap: wrap; margin-bottom: 6px; }
+.stat { }
+.stat .k { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; }
+.stat .v { font-size: 17px; color: var(--bright); }
+
+.ok { color: var(--ok); }
+.fail { color: var(--fail); }
+.unknown { color: var(--dim); }
+.accent { color: var(--accent); }
+
+form { display: inline; }
+input, textarea, select {
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: 0;
+  font: inherit; padding: 5px 8px; width: 340px;
+}
+textarea { width: 640px; min-height: 84px; resize: vertical; }
+button {
+  background: var(--panel); color: var(--bright);
+  border: 1px solid var(--border); border-radius: 0;
+  font: inherit; padding: 5px 16px; cursor: pointer;
+}
+button:hover { border-color: var(--accent); color: var(--accent); }
+label { display: block; margin: 10px 0 3px; font-size: 11px;
+        color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; }
+
+pre { background: var(--panel); border: 1px solid var(--border);
+      padding: 8px 10px; overflow-x: auto; font-size: 12px; }
+code { color: var(--bright); }
+dl { margin: 0; }
+dt { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; }
+dd { margin: 0 0 8px; }

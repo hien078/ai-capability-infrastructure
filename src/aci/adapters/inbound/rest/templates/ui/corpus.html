@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}corpus · aci console{% endblock %}
+{% block main %}
+<h1>corpus — production active</h1>
+<p class="dim">{{ rows | length }} capabilities on the production channel. staging is not exposure (ADR-013) — it does not appear here.</p>
+<table>
+  <tr><th>capability</th><th>kind</th><th>version</th><th>license</th>
+      <th>redistributable</th><th>scan</th><th>status</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td><a href="/ui/corpus/{{ r.capability_id }}">{{ r.capability_id }}</a></td>
+    <td>{{ r.kind }}</td>
+    <td>{{ r.version }}</td>
+    <td>{{ r.license_identifier or '—' }}</td>
+    <td class="{{ 'ok' if r.redistributable == 'true' else 'fail' }}">{{ r.redistributable or '—' }}</td>
+    <td class="{{ 'ok' if r.scan_status == 'passed' else 'fail' }}">{{ r.scan_status or '—' }}</td>
+    <td>{{ r.status }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

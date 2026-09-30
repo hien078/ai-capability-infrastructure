@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}{{ cap.capability_id }} · aci console{% endblock %}
+{% block main %}
+<h1>{{ cap.capability_id }}</h1>
+<p>
+  kind <code>{{ cap.kind }}</code> ·
+  <a href="/v1/capabilities/{{ cap.capability_id }}">raw json</a>
+</p>
+
+<h2>versions (immutable)</h2>
+<table>
+  <tr><th>version</th><th>digest</th><th>created (utc)</th></tr>
+  {% for v in versions %}
+  <tr><td>{{ v.version }}</td><td class="dim">{{ v.content_digest[:19] }}…</td>
+      <td class="dim">{{ v.created_at.strftime("%Y-%m-%d") }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>releases (pointers — promotion changes these, never versions)</h2>
+<table>
+  <tr><th>channel</th><th>status</th><th>version</th><th>promoted (utc)</th><th>by</th></tr>
+  {% for r in releases %}
+  <tr><td>{{ r.channel }}</td>
+      <td class="{{ 'ok' if r.status == 'active' else 'accent' }}">{{ r.status }}</td>
+      <td>{{ r.version }}</td>
+      <td class="dim">{{ r.promoted_at.strftime("%Y-%m-%d %H:%M") if r.promoted_at else '—' }}</td>
+      <td class="dim">{{ r.approved_by or '—' }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>provenance</h2>
+<table>
+  <tr><th>source</th><th>commit</th><th>ingestion</th><th>fetched (utc)</th></tr>
+  {% for p in provenance %}
+  <tr><td>{{ p.source_repository }}</td>
+      <td class="dim">{{ (p.commit_sha or '')[:10] }}</td>
+      <td class="{{ 'ok' if p.ingestion_status == 'accepted' else 'accent' }}">{{ p.ingestion_status }}</td>
+      <td class="dim">{{ p.ingested_at.strftime("%Y-%m-%d") if p.ingested_at else '—' }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>license assessments (append-only, latest wins)</h2>
+<table>
+  <tr><th>version</th><th>license</th><th>redistributable</th><th>assessed by</th><th>notes</th></tr>
+  {% for l in licenses %}
+  <tr><td>{{ l.version }}</td><td>{{ l.license_identifier }}</td>
+      <td class="{{ 'ok' if l.redistributable == 'true' else 'fail' }}">{{ l.redistributable }}</td>
+      <td class="dim">{{ l.assessed_by }}</td>
+      <td class="dim">{{ (l.notes or '')[:60] }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>security scans</h2>
+<table>
+  <tr><th>version</th><th>status</th><th>scanner</th><th>scanned (utc)</th></tr>
+  {% for s in scans %}
+  <tr><td>{{ s.version }}</td>
+      <td class="{{ 'ok' if s.scan_status == 'passed' else 'fail' }}">{{ s.scan_status }}</td>
+      <td class="dim">{{ s.scanner_version }}</td>
+      <td class="dim">{{ s.scanned_at.strftime("%Y-%m-%d") }}</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

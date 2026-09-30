@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}route · aci console{% endblock %}
+{% block main %}
+<h1>route run</h1>
+<p>
+  <code>{{ run.route_run_id }}</code> ·
+  <span class="dim">{{ run.created_at.strftime("%Y-%m-%d %H:%M:%S") }} utc</span> ·
+  principal <code>{{ run.principal_id }}</code> ·
+  client <span class="dim">{{ run.client_type }}</span> ·
+  latency <span class="num">{{ run.latency_ms }} ms</span> ·
+  <a href="/v1/routes/{{ run.route_run_id }}">raw json</a>
+</p>
+
+<h2>task</h2>
+<pre>{{ run.task_text }}</pre>
+
+<h2>bundle — {{ bundle.items | length }} item{{ 's' if bundle.items | length != 1 }}{% if bundle.items | length == 0 %} (valid abstention, ADR-008){% endif %}</h2>
+{% if bundle %}
+<table>
+  <tr><th>#</th><th>capability</th><th>version</th><th>kind</th><th>role</th><th>digest</th></tr>
+  {% for item in bundle.items %}
+  <tr>
+    <td class="num">{{ loop.index }}</td>
+    <td><a href="/ui/corpus/{{ item.capability_id }}">{{ item.capability_id }}</a></td>
+    <td>{{ item.version }}</td>
+    <td>{{ item.kind }}</td>
+    <td>{{ item.role }}</td>
+    <td class="dim">{{ item.digest[:19] }}…</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="dim">no bundle recorded (error_code={{ run.error_code or 'none' }})</p>
+{% endif %}
+
+{% if verdicts %}
+<h2>outcome trail (§33)</h2>
+<table>
+  <tr><th>pos</th><th>source</th><th>status</th><th>confidence</th></tr>
+  {% for v in verdicts %}
+  <tr>
+    <td class="num">{{ v.position }}</td>
+    <td>{{ v.source }}</td>
+    <td class="{{ 'ok' if v.status == 'success' else ('fail' if v.status == 'failure' else 'unknown') }}">{{ v.status }}</td>
+    <td>{{ v.confidence }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h2>stage traces (§14)</h2>
+
+<h2>eligibility — kept {{ stages.eligibility.kept }}, excluded {{ stages.eligibility.excluded | length }}</h2>
+{% if stages.eligibility.excluded %}
+<table>
+  <tr><th>capability</th><th>version</th><th>reason</th><th>detail</th></tr>
+  {% for e in stages.eligibility.excluded %}
+  <tr><td>{{ e.capability_id }}</td><td>{{ e.version }}</td>
+      <td class="fail">{{ e.reason }}</td><td class="dim">{{ e.detail }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h2>retrieval — {{ stages.retrieval.model_id }}</h2>
+<p class="dim">eligible {{ stages.retrieval.eligible_count }} · searched {{ stages.retrieval.searched_count }} · returned {{ stages.retrieval.returned_count }} · limit {{ stages.retrieval.limit }}</p>
+<table>
+  <tr><th>rank</th><th>capability</th><th class="num">score</th></tr>
+  {% for c in stages.retrieved[:10] %}
+  <tr><td class="num">{{ loop.index }}</td>
+      <td><a href="/ui/corpus/{{ c.capability_id }}">{{ c.capability_id }}</a></td>
+      <td class="num">{{ "%.4f" | format(c.score) }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>rerank — {{ stages.rerank.implementation }} v{{ stages.rerank.version }} (in {{ stages.rerank.input_count }}, out {{ stages.rerank.output_count }})</h2>
+<table>
+  <tr><th>rank</th><th>capability</th><th class="num">score</th></tr>
+  {% for c in stages.reranked[:10] %}
+  <tr><td class="num">{{ c.rank }}</td>
+      <td><a href="/ui/corpus/{{ c.capability_id }}">{{ c.capability_id }}</a></td>
+      <td class="num">{{ "%.4f" | format(c.score) }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>resolution — selected {{ stages.resolution.trace.selected_count }}, dropped {{ stages.resolution.trace.dropped_count }}</h2>
+{% if stages.resolution.dropped %}
+<table>
+  <tr><th>capability</th><th>reason</th></tr>
+  {% for d in stages.resolution.dropped %}
+  <tr><td>{{ d.capability_id }}</td><td class="fail">{{ d.reason }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% endblock %}

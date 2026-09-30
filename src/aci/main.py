@@ -4,9 +4,11 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from sqlalchemy import create_engine, text
+from starlette.staticfiles import StaticFiles
 
 from aci.adapters.inbound.a2a.gateway import A2AGateway, create_a2a_router
 from aci.adapters.inbound.opencode import catalog as opencode_catalog
@@ -15,6 +17,7 @@ from aci.adapters.inbound.rest import capabilities as rest_capabilities
 from aci.adapters.inbound.rest import evaluations as rest_evaluations
 from aci.adapters.inbound.rest import outcomes as rest_outcomes
 from aci.adapters.inbound.rest import routes as rest_routes
+from aci.adapters.inbound.rest import ui as rest_ui
 from aci.adapters.inbound.rest.errors import register_error_handlers
 from aci.adapters.inbound.rest.wiring import Container
 from aci.config import settings
@@ -43,7 +46,13 @@ def create_app(container: Container | None = None) -> FastAPI:
     app.include_router(rest_bundles.router)
     app.include_router(rest_outcomes.router)
     app.include_router(rest_evaluations.router)
+    app.include_router(rest_ui.router)
     app.include_router(opencode_catalog.router)
+    app.mount(
+        "/ui/static",
+        StaticFiles(directory=str(Path(rest_ui.__file__).parent / "static")),
+        name="ui-static",
+    )
     app.include_router(
         create_a2a_router(
             A2AGateway(

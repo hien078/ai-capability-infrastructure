@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}aci console{% endblock %}</title>
+  <link rel="stylesheet" href="/ui/static/ui.css">
+</head>
+<body>
+<header>
+  <span class="brand">aci<span class="dim">·</span>console</span>
+  <nav>
+    <a href="/ui/">overview</a>
+    <a href="/ui/routes">routes</a>
+    <a href="/ui/corpus">corpus</a>
+    <a href="/ui/try">try</a>
+  </nav>
+  <span class="dim right">db {{ env.db }}</span>
+</header>
+<main>
+{% block main %}{% endblock %}
+</main>
+<footer>
+  aci console — {{ env.date }} · db {{ env.db }} ·
+  <a class="dim" href="/docs">openapi</a> ·
+  <span class="dim">read-only; governance stays in capctl</span>
+</footer>
+</body>
+</html>

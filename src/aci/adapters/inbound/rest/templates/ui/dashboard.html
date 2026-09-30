@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}overview · aci console{% endblock %}
+{% block main %}
+<h1>overview</h1>
+
+<div class="grid">
+  {% for row in corpus %}
+  <div class="stat"><div class="k">{{ row.kind }}</div><div class="v">{{ row.n }}</div></div>
+  {% endfor %}
+  <div class="stat"><div class="k">route runs</div><div class="v">{{ routing.runs }}</div></div>
+  <div class="stat"><div class="k">mean latency ms</div><div class="v">{{ routing.mean_latency }}</div></div>
+  <div class="stat"><div class="k">mean eligible</div><div class="v">{{ routing.mean_eligible }}</div></div>
+  <div class="stat"><div class="k">bundles</div>
+    <div class="v">{{ bundles.total }} <span class="dim">({{ bundles.empty }} empty — valid abstention, ADR-008)</span></div></div>
+</div>
+
+<h2>releases</h2>
+<table>
+  <tr><th>channel</th><th>status</th><th class="num">n</th></tr>
+  {% for r in releases %}
+  <tr><td>{{ r.channel }}</td><td>{{ r.status }}</td><td class="num">{{ r.n }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>verdicts by source</h2>
+<table>
+  <tr><th>source</th><th>status</th><th class="num">n</th></tr>
+  {% for v in verdicts %}
+  <tr><td>{{ v.source }}</td>
+      <td class="{{ 'ok' if v.status == 'success' else ('fail' if v.status == 'failure' else 'unknown') }}">{{ v.status }}</td>
+      <td class="num">{{ v.n }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>benchmark — full_pipeline mean recall per era</h2>
+<table>
+  <tr><th>label</th><th class="num">results</th><th class="num">mean recall</th></tr>
+  {% for b in benchmarks %}
+  <tr><td>{{ b.label }}</td><td class="num">{{ b.results }}</td>
+      <td class="num">{{ b.mean_recall if b.mean_recall is not none else '—' }}</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

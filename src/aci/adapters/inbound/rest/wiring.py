@@ -110,6 +110,9 @@ class Container:
     def __init__(self, settings: Settings) -> None:
         engine = make_engine(settings.database_url)
         sessions = make_session_factory(engine)
+        #: exposed for read-only adapters (the ops UI) that need the SAME
+        #: database as the repos — never a second URL source of truth.
+        self.settings = settings
 
         capabilities = SqlAlchemyCapabilityRepository(sessions)
         releases = SqlAlchemyReleaseRepository(sessions)
