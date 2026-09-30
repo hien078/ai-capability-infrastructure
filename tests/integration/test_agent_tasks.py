@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from aci.adapters.outbound.postgres.tasks import SqlAlchemyTaskRepository
 from aci.domain.agent.models import AgentTask, TaskArtifact, TaskMessage, advance_task
 
+pytestmark = pytest.mark.integration
+
 NOW = datetime(2026, 9, 28, tzinfo=UTC)
 LATER = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
 

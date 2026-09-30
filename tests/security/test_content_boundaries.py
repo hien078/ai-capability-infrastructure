@@ -81,6 +81,7 @@ def request_context() -> RoutingRequestContext:
         {
             "client": {"type": "test", "supported_features": ["skills"]},
             "scope": {"principal_id": "sec-test"},
+            "request_id": "req-sec",
         }
     )
 

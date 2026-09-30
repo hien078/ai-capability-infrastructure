@@ -81,6 +81,7 @@ def _request_context() -> RoutingRequestContext:
     return RoutingRequestContext(
         client=ClientDescriptor(type="opencode", supported_features=["skills"]),
         scope=ScopeContext(principal_id="p-1"),
+        request_id="req-1",
     )
 
 

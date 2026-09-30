@@ -148,6 +148,46 @@ class PromotionService:
             )
         )
 
+    def promote_canary(
+        self,
+        capability_id: str,
+        version: str,
+        channel: ReleaseChannel,
+        *,
+        canary_percent: int,
+        approved_by: str,
+        now: datetime | None = None,
+    ) -> CapabilityRelease:
+        """Move a release pointer into canary (§27): the same production
+        gates as promote(), but the release routes only its percentage
+        share until the monitor + human graduate it. Rollback = the
+        monitor flips status to disabled (pointer move, §45)."""
+        if not 0 <= canary_percent <= 100:
+            raise DomainError(
+                ErrorCode.POLICY_DENIED,
+                f"canary_percent {canary_percent} out of range 0-100",
+            )
+        promoted_at = now or datetime.now(UTC)
+        checks = self.prerequisites(capability_id, version, channel)
+        failed = [c for c in checks if not c.passed]
+        if failed:
+            reasons = "; ".join(f"{c.name}: {c.detail}" for c in failed)
+            raise DomainError(
+                ErrorCode.POLICY_DENIED,
+                f"canary promotion of {capability_id}@{version} to {channel} blocked — {reasons}",
+            )
+        return self._releases.set_release(
+            CapabilityRelease(
+                capability_id=capability_id,
+                version=version,
+                channel=channel,
+                status="canary",
+                canary_percent=canary_percent,
+                promoted_at=promoted_at,
+                approved_by=approved_by,
+            )
+        )
+
     def revoke(
         self, capability_id: str, channel: ReleaseChannel, *, approved_by: str
     ) -> CapabilityRelease:

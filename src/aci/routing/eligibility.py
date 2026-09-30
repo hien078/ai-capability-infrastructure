@@ -34,6 +34,12 @@ def _canary_selected(request_id: str, capability_id: str, percent: int) -> bool:
     return int(digest[:8], 16) % 100 < percent
 
 
+def _client_supported(client_type: str, supported_clients: list[str]) -> bool:
+    """§48 client filter — same semantics as evaluate_compatibility:
+    an explicit list, with the "any" wildcard meaning every client."""
+    return client_type in supported_clients or "any" in supported_clients
+
+
 class DefaultEligibilityPolicy:
     """Implements the EligibilityPolicy protocol (plan §44)."""
 
@@ -76,11 +82,18 @@ class DefaultEligibilityPolicy:
         #    their deterministic percentage share (§27); everything else
         #    is excluded as before.
         if candidate.status == "canary":
-            percent = candidate.canary_percent if candidate.canary_percent is not None else 100
-            if not _canary_selected(context.request_id, candidate.capability_id, percent):
+            # Fail-closed: a canary without its percentage is a broken
+            # release record — it routes NOTHING, never everything (§27
+            # limited rollout must not degrade to full traffic).
+            percent = candidate.canary_percent
+            if percent is None or not _canary_selected(
+                context.request_id, candidate.capability_id, percent
+            ):
                 return (
                     ErrorCode.CAPABILITY_NOT_ELIGIBLE,
-                    f"canary {percent}%: request not in the canary population",
+                    "canary release without canary_percent — excluded (fail-closed)"
+                    if percent is None
+                    else f"canary {percent}%: request not in the canary population",
                 )
         elif candidate.status != "active":
             return (
@@ -159,9 +172,8 @@ class DefaultEligibilityPolicy:
         compat = candidate.compatibility
         if compat is None:
             return None
-        if (
-            compat.supported_clients is not None
-            and context.client.type not in compat.supported_clients
+        if compat.supported_clients is not None and not _client_supported(
+            context.client.type, compat.supported_clients
         ):
             return (
                 ErrorCode.CLIENT_INCOMPATIBLE,

@@ -54,7 +54,9 @@ class RoutingRequestContext(BaseModel):
     task: TaskContext = Field(default_factory=TaskContext)
     #: §27 canary split key — the request's stable id (deterministic
     #: hash input; same request → same canary decision, always).
-    request_id: str = ""
+    #: REQUIRED: an empty id would collapse the canary hash to a
+    #: constant, turning the percentage split all-or-nothing.
+    request_id: str = Field(min_length=1)
 
 
 class ProtocolDescriptor(BaseModel):
@@ -110,7 +112,7 @@ class EligibleCandidate(BaseModel):
     facets: dict[str, list[str]] = Field(default_factory=dict)
     channel: ReleaseChannel
     status: ReleaseStatus
-    canary_percent: int | None = None
+    canary_percent: int | None = Field(default=None, ge=0, le=100)
     trust_tier: TrustTier = "untrusted"
     license_blocked: bool = False
     owner_scope: OwnerScope = "global"
