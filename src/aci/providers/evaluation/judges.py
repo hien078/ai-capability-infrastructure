@@ -141,20 +141,27 @@ class JudgeEnsemble:
             raw = self._complete(_judge_system(role), user)
             try:
                 data, _ = json.JSONDecoder().raw_decode(_strip_fence(raw))
+                if not isinstance(data, dict):
+                    raise JudgeError(f"judge {role}: output is not a JSON object")
+                claims = []
+                for c in data.get("claims", []):
+                    item = EvidenceItem(
+                        claim=str(c.get("claim", "")),
+                        evidence=[str(e) for e in c.get("evidence", [])],
+                        source_location=str(c.get("source_location", "")),
+                        confidence=c.get("confidence", "medium"),
+                        counter_evidence=[str(e) for e in c.get("counter_evidence", [])],
+                        uncertainty=str(c.get("uncertainty", "")),
+                    )
+                    claims.append(item)
+                    merged.append(item)
             except json.JSONDecodeError as exc:
                 raise JudgeError(f"judge {role}: unparseable output {exc}") from exc
-            claims = []
-            for c in data.get("claims", []):
-                item = EvidenceItem(
-                    claim=str(c.get("claim", "")),
-                    evidence=[str(e) for e in c.get("evidence", [])],
-                    source_location=str(c.get("source_location", "")),
-                    confidence=c.get("confidence", "medium"),
-                    counter_evidence=[str(e) for e in c.get("counter_evidence", [])],
-                    uncertainty=str(c.get("uncertainty", "")),
-                )
-                claims.append(item)
-                merged.append(item)
+            except (AttributeError, TypeError, ValueError) as exc:
+                # malformed claim shapes (non-dict entries, bad confidence,
+                # …) surface as JudgeError — never a raw crash, never a
+                # fabricated verdict (§74)
+                raise JudgeError(f"judge {role}: malformed output {exc!r}") from exc
             report["judges"][role] = {
                 "score": data.get("score_0_5"),
                 "summary": str(data.get("summary", "")),
@@ -196,6 +203,7 @@ class JudgeEnsemble:
             headers=headers,
             timeout=180,
         )
+        resp.raise_for_status()
         data, _ = json.JSONDecoder().raw_decode(resp.text.lstrip())
         content = data["choices"][0]["message"]["content"]
         return str(content)

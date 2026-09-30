@@ -68,3 +68,28 @@ def test_judge_error_is_never_silent() -> None:
     """§74: a failed judge raises JudgeError — there is no code path
     that returns an empty-but-successful report."""
     assert issubclass(JudgeError, Exception)
+
+
+def test_judge_array_output_raises_judge_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§74: a judge returning a JSON ARRAY (not an object) raises
+    JudgeError — never an AttributeError crash, never a fabricated report."""
+    ens = JudgeEnsemble("http://x")
+    monkeypatch.setattr(ens, "_complete", lambda system, user: '[{"claim": "x"}]')
+    with pytest.raises(JudgeError, match="not a JSON object"):
+        ens.evaluate(_package(), "corpus")
+
+
+def test_judge_malformed_claims_raise_judge_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A claim entry that is not a dict, or an invalid confidence value,
+    raises JudgeError — the ensemble never crashes with a raw pydantic
+    ValidationError (§74)."""
+    ens = JudgeEnsemble("http://x")
+    monkeypatch.setattr(
+        ens,
+        "_complete",
+        lambda system, user: (
+            '{"claims": [{"claim": "x", "evidence": ["e"], "confidence": "sure!"}]}'
+        ),
+    )
+    with pytest.raises(JudgeError, match="malformed output"):
+        ens.evaluate(_package(), "corpus")

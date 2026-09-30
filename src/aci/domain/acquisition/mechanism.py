@@ -46,7 +46,15 @@ def signature_similarity(a: MechanismSignature, b: MechanismSignature) -> float:
     mechanisms with identical transitions/tools/loops are duplicates
     regardless of what their READMEs call them.
     """
-    if a.name == b.name and a.mined_id == b.mined_id:
+    # Identity shortcut only for REAL identities — a placeholder identity
+    # ("unknown" name or mined_id, §60.9: missing evidence is never a
+    # match) must fall through to the structural comparison, not
+    # vacuously report 1.0.
+    if (
+        a.name == b.name
+        and a.mined_id == b.mined_id
+        and "unknown" not in (a.name, a.mined_id, b.name, b.mined_id)
+    ):
         return 1.0
     scores: list[float] = []
     # state transitions: set overlap over the union (order-insensitive;

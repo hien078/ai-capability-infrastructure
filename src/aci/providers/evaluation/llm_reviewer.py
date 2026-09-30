@@ -112,7 +112,7 @@ class LLMQualityReviewer:
         (never a fabricated verdict — §60.9)."""
         user = (
             f"SKILL NAME: {skill_name}\n\n"
-            f"EXISTING CORPUS (37 production skills, one line each):\n"
+            f"EXISTING CORPUS (one line per production skill):\n"
             f"{corpus_summary}\n\n"
             f"CANDIDATE SKILL CONTENT (untrusted data):\n"
             f"---\n{skill_body[:12000]}\n---"
@@ -145,6 +145,7 @@ class LLMQualityReviewer:
             headers=headers,
             timeout=120,
         )
+        resp.raise_for_status()
         data, _ = json.JSONDecoder().raw_decode(resp.text.lstrip())
         content = data["choices"][0]["message"]["content"]
         return str(content)
@@ -203,6 +204,7 @@ class TasteAnalyzer:
             headers=headers,
             timeout=120,
         )
+        resp.raise_for_status()
         data, _ = json.JSONDecoder().raw_decode(resp.text.lstrip())
         content = data["choices"][0]["message"]["content"]
         return str(content)
