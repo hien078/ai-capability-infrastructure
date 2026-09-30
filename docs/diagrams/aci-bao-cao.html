@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACI — Báo cáo hệ thống</title>
+<style>
+  :root{
+    --bg:#141414; --chrome:#1a1a1a; --surface:#1e1e1e; --elevated:#242424;
+    --text:#f0f0f0; --text2:#b4b4b4; --text3:#8f8f8f; --text4:#565656;
+    --stroke:#333333; --stroke2:#2a2a2a; --stroke3:#242424;
+    --fill1:#2e2e2e; --fill2:#262626; --fill3:#202020; --fill4:#1d1d1d;
+    --accent:#4e9cff; --link:#5592fc;
+    --green:#1f8a65; --orange:#d29922; --red:#f85149; --blue:#4e9cff; --pink:#c85898;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font:15px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;margin:0 auto;max-width:1000px;padding:40px 30px 100px}
+  h1{font-size:27px;font-weight:800;margin:0 0 8px}
+  h2{font-size:20px;font-weight:750;margin:0 0 14px}
+  h3{font-size:15px;font-weight:650;margin:22px 0 8px}
+  p{margin:10px 0}
+  .sub{color:var(--text2);font-size:14px}
+  .small{font-size:13px}
+  .tiny{font-size:11.5px;color:var(--text3)}
+  code{font:0.9em ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--fill2);border:1px solid var(--stroke3);border-radius:4px;padding:1px 5px;color:#d8d8d8}
+  .muted code{background:none;border:none;padding:0;color:var(--text3)}
+  hr{border:none;border-top:1px solid var(--stroke2);margin:34px 0}
+  section{margin:46px 0}
+  .kicker{color:var(--accent);font-size:12px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin:0 0 6px}
+  .story{font-size:15.5px;color:var(--text);background:var(--fill4);border:1px solid var(--stroke3);border-left:3px solid var(--accent);border-radius:10px;padding:16px 20px;margin:16px 0}
+  .story b{color:var(--accent)}
+  .toc{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 0}
+  .toc a{color:var(--link);text-decoration:none;font-size:12.5px;border:1px solid var(--stroke3);border-radius:16px;padding:4px 12px}
+  .toc a:hover{border-color:var(--link)}
+  .stats{display:flex;flex-wrap:wrap;gap:30px;margin:18px 0 4px}
+  .stat b{display:block;font-size:23px;font-weight:750}
+  .stat span{font-size:11.5px;color:var(--text3)}
+  .card{background:var(--surface);border:1px solid var(--stroke2);border-radius:10px;padding:14px 16px}
+  .card h4{margin:0 0 8px;font-size:12.5px;font-weight:650;color:var(--text2)}
+  .card p{font-size:12.5px;color:var(--text2);margin:6px 0}
+  .card p b{color:var(--text)}
+  .callout{border:1px solid var(--stroke2);border-radius:8px;padding:11px 14px;font-size:13px;color:var(--text2);margin:14px 0}
+  .callout b{display:block;color:var(--text);font-size:13px;margin-bottom:4px}
+  .callout.info{border-left:3px solid var(--blue)}
+  .callout.warn{border-left:3px solid var(--orange)}
+  .callout.danger{border-left:3px solid var(--red)}
+  .callout.neutral{border-left:3px solid var(--stroke)}
+  .callout.success{border-left:3px solid var(--green)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+  @media (max-width:820px){.grid2,.grid3{grid-template-columns:1fr}}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th{color:var(--text3);font-weight:600;text-align:left;padding:9px 12px;border-bottom:1px solid var(--stroke);font-size:12px}
+  td{padding:9px 12px;border-bottom:1px solid var(--stroke3);color:var(--text2);vertical-align:top}
+  tr:nth-child(even) td{background:var(--fill4)}
+  td:first-child{color:var(--text)}
+  .num{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:var(--fill2);border:1px solid var(--stroke);color:var(--text);font-size:11.5px;font-weight:700;margin-right:4px}
+  .flowwrap{overflow-x:auto;border:1px solid var(--stroke3);border-radius:12px;background:var(--fill4);padding:18px}
+  .legend{display:flex;flex-wrap:wrap;gap:16px;margin:12px 2px 0}
+  .legend span{font-size:12px;color:var(--text2)}
+  .legend i{display:inline-block;width:22px;height:4px;border-radius:2px;margin-right:6px;vertical-align:3px}
+  details{border:1px solid var(--stroke3);border-radius:10px;background:var(--fill4);margin:14px 0}
+  details summary{cursor:pointer;padding:12px 16px;font-size:13.5px;font-weight:650;color:var(--text2);list-style:none}
+  details summary::before{content:"▸ ";color:var(--accent)}
+  details[open] summary::before{content:"▾ "}
+  details .dbody{padding:4px 18px 16px}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:1px}
+  .foot{color:var(--text4);font-size:12px}
+  .bar{height:4px;width:110px;background:var(--accent);border-radius:2px;margin-top:12px}
+  a.plain{color:var(--link)}
+</style>
+</head>
+<body>
+
+<h1>ACI — Báo cáo hệ thống</h1>
+<p class="sub"><b>AI Capability Infrastructure</b> · báo cáo dự án · cập nhật 2026-09-30 · nguồn: <code>plan_v2_revised.md</code>, <code>AGENTS.md</code>, 14 ADR, telemetry thật trong <code>data/</code></p>
+<div class="toc">
+  <a href="#s0">0 · ACI là gì?</a>
+  <a href="#s1">1 · Bản đồ hệ thống</a>
+  <a href="#s2">2 · Chu trình A — nạp kỹ năng</a>
+  <a href="#s3">3 · Chu trình B — route task</a>
+  <a href="#s4">4 · Chu trình C — agent tự chạy</a>
+  <a href="#s5">5 · Chu trình D — học từ kết quả</a>
+  <a href="#s6">6 · Kiến trúc &amp; công nghệ</a>
+  <a href="#s7">7 · Trạng thái &amp; kết luận</a>
+</div>
+
+<!-- ================= 0 ================= -->
+<section id="s0">
+<p class="kicker">Phần 0</p>
+<h2>ACI là gì — nói bằng một đoạn văn</h2>
+<p class="story">ACI là <b>thư viện kỹ năng trung tâm cho AI agent</b> — như một App Store cho "skills": mỗi kỹ năng là một file hướng dẫn (<code>SKILL.md</code>) thu thập từ GitHub, được <b>kiểm duyệt an toàn</b> (giấy phép + quét mã độc), lưu <b>bất biến</b> (không ai sửa được nội dung đã phát hành). Khi bạn làm việc với AI, hệ thống <b>tự chọn 0–5 kỹ năng phù hợp nhất</b> đưa vào ngữ cảnh agent. Agent làm xong thì <b>báo kết quả nhiều nguồn</b> (test, tự đánh giá, người duyệt, LLM judge) — dữ liệu đó đo chất lượng và định hướng cải thiện.</p>
+<p class="sub">Hai khách hàng thật đang dùng hàng ngày: <b>OpenCode</b> (plugin tự route mỗi prompt) và <b>Antigravity</b> (qua MCP). Thêm một mặt mới: <b>agent tự chạy có kiểm chứng</b> (HarnessKernel) — giao mục tiêu, agent tự sửa code trên bản copy workspace, pytest quyết định xong hay chưa.</p>
+<div class="stats">
+  <div class="stat"><b>38</b><span>kỹ năng thật trong kho</span></div>
+  <div class="stat"><b>2</b><span>client thật (OpenCode, Antigravity)</span></div>
+  <div class="stat"><b>957</b><span>tests xanh (unit + integration + security)</span></div>
+  <div class="stat"><b>4</b><span>chu trình vận hành (A–D)</span></div>
+</div>
+</section>
+
+<hr>
+
+<!-- ================= 1 ================= -->
+<section id="s1">
+<p class="kicker">Phần 1</p>
+<h2>Bản đồ hệ thống — toàn cảnh một trang</h2>
+<p class="sub">Ba vùng: <b>người dùng &amp; agent</b> (trái) → <b>nền tảng ACI</b> (giữa) → <b>hạ tầng</b> (phải). Bốn mũi tên màu = bốn chu trình vận hành, giải thích chi tiết ở phần 2–5.</p>
+<div class="flowwrap"><div id="map"></div></div>
+<div class="legend">
+  <span><i style="background:var(--orange)"></i><b style="color:var(--orange)">①</b> nạp kỹ năng vào kho (phần 2)</span>
+  <span><i style="background:var(--blue)"></i><b style="color:var(--blue)">②</b> route task cho agent (phần 3)</span>
+  <span><i style="background:var(--green)"></i><b style="color:var(--green)">③</b> agent tự chạy có kiểm chứng (phần 4)</span>
+  <span><i style="background:var(--pink)"></i><b style="color:var(--pink)">④</b> học từ kết quả (phần 5)</span>
+</div>
+</section>
+
+<hr>
+
+<!-- ================= 2 ================= -->
+<section id="s2">
+<p class="kicker">Phần 2 · Chu trình A</p>
+<h2>Một kỹ năng vào kho — kiểm duyệt trước khi lên kệ</h2>
+<p class="story">Giả sử bạn thấy một skill debugging hay trên GitHub và muốn thêm vào kho. <b>Mặc định nó KHÔNG được dùng</b> — phải qua chuỗi kiểm duyệt bên dưới; chỉ khi người duyệt đồng ý nó mới hiện ra cho agent.</p>
+<div class="flowwrap"><div id="flow-a"></div></div>
+<h3>Diễn giải từng bước</h3>
+<table>
+<tr><th style="width:34px">#</th><th style="width:30%">Bước</th><th>Điều gì xảy ra</th></tr>
+<tr><td><span class="num">1</span></td><td>Tải &amp; ghim nguồn</td><td>Clone đúng commit được ghim (<code>repo + sha</code>) — biết chính xác nội dung đến từ đâu, mọi lúc kiểm tra lại được (<code>check_upstream.py</code> còn báo khi nguồn có bản mới).</td></tr>
+<tr><td><span class="num">2</span></td><td>Băm &amp; lưu blob</td><td>Nội dung được băm <code>sha256</code> và lưu vào kho blob (content-addressed: cùng nội dung = cùng khóa). Mỗi lần đọc ra đều <b>re-verify</b> — blob bị sửa là hệ thống từ chối đọc (409 ARTIFACT_INTEGRITY_ERROR).</td></tr>
+<tr><td><span class="num">3</span></td><td>Tạo bản ghi bất biến</td><td><code>CapabilityVersion</code> — bản mô tả kỹ năng đóng băng vĩnh viễn kèm manifest từng file. Phát hành/thu hồi chỉ là <b>con trỏ</b> (release), không ai sửa được nội dung đã phát hành.</td></tr>
+<tr><td><span class="num">4</span></td><td>Ghi nguồn gốc, trạng thái cách ly</td><td><code>source_record</code> sinh ra ở trạng thái <b>quarantined</b> (cách ly) — tức là mọi thứ mới nạp đều vô hình với agent cho tới khi qua cổng.</td></tr>
+<tr><td><span class="num">5</span></td><td>Kiểm tự động</td><td><b>Giấy phép</b>: dò SPDX theo từng file (MIT, Apache-2.0…); không nhận diện được → <b>giữ cách ly</b>, không đoán. <b>Bảo mật</b>: pattern scanner quét mã độc (<code>curl|sh</code>, eval base64… CRITICAL = chặn).</td></tr>
+<tr><td><span class="num">6</span></td><td>Người duyệt → production</td><td><code>capctl</code> / <code>review_queue</code> là cổng người: duyệt license, xem bằng chứng, đẩy production qua <code>PromotionService</code> (cổng ADR-012: đủ chuỗi nguồn gốc + license tái phân phối + scan pass). Kỹ năng giờ hiện trong catalog &amp; router.</td></tr>
+</table>
+<div class="callout warn"><b>Tại sao phức tạp vậy?</b>Đây là an toàn chuỗi cung ứng (supply-chain safety) cho prompt: nội dung đã phát hành bất biến + production luôn cần người. Automation tối đa chỉ được đẩy tới <b>staging / canary</b> (ADR-013) — không bao giờ tự lên production. Re-ingest giống hệt = idempotent; cùng version khác nội dung = từ chối.</div>
+</section>
+
+<hr>
+
+<!-- ================= 3 ================= -->
+<section id="s3">
+<p class="kicker">Phần 3 · Chu trình B</p>
+<h2>Route một task — hệ thống chọn kỹ năng giúp agent</h2>
+<p class="story">Bạn gõ <b>"giúp mình sửa con bug này"</b> trong OpenCode. Plugin (rất mỏng) gửi lên ACI một mô tả ngữ cảnh tối thiểu; vài trăm ms sau nó nhận lại danh sách 0–5 kỹ năng phù hợp, OpenCode tự nạp nội dung và agent bắt đầu làm việc với kỹ năng đúng miền trong tay.</p>
+<div class="flowwrap"><div id="flow-b"></div></div>
+<h3>Diễn giải từng bước</h3>
+<table>
+<tr><th style="width:34px">#</th><th style="width:30%">Bước</th><th>Điều gì xảy ra</th></tr>
+<tr><td><span class="num">1</span></td><td>Plugin gửi context</td><td>Hook prompt của OpenCode gửi <b>chỉ</b> hints tối thiểu (ngôn ngữ, phase, tóm tắt ngắn) lên <code>POST /v1/routes</code> — không bao giờ gửi <code>.env</code>, token, hay repo dump (§25.4).</td></tr>
+<tr><td><span class="num">2</span></td><td>Eligibility — lọc hợp lệ</td><td>Chỉ kỹ năng <b>đang active production</b>, license cho phép, đúng scope/kind được giữ lại. Bước này chạy TRƯỚC mọi xếp hạng — thả rank cao cũng không cứu được nội dung bị loại (ADR-009).</td></tr>
+<tr><td><span class="num">3</span></td><td>Retrieval — tìm semantic</td><td>Metadata <b>tin cậy đã chuẩn hoá</b> (tên, mô tả, facets) được embed (FastEmbed 384d) và tìm bằng pgvector top 10–30. Lưu ý: <b>body skill thô không bao giờ được embed</b> — chống prompt-injection (§16.1).</td></tr>
+<tr><td><span class="num">4</span></td><td>Rerank — chấm lại</td><td>HeuristicReranker v3 chấm 4 tín hiệu (retrieval, lexical, facet, trust), min-max chuẩn hoá theo tập ứng viên — chỉ <b>xếp lại hạng</b>, không thêm bớt ai.</td></tr>
+<tr><td><span class="num">5</span></td><td>Resolve + compose</td><td>Xử lý quan hệ (<code>conflicts_with</code> bỏ bên rank thấp, <code>requires</code> phải đủ), ghép <b>bundle 0–5 items</b> pin chính xác version + digest, kèm budget token.</td></tr>
+<tr><td><span class="num">6</span></td><td>Client nạp &amp; làm việc</td><td>OpenCode nhận danh sách ID → lazy-load từng file từ catalog ACI (đọc từ blob, re-verify) → nội dung vào ngữ cảnh agent → agent làm theo kỹ năng.</td></tr>
+<tr><td><span class="num">7</span></td><td>Báo kết quả</td><td>Agent xong → <code>POST /v1/outcomes</code> (verdict đa nguồn) và <code>POST /v1/evaluations</code> (rubric tự chấm) — dữ liệu cho chu trình D.</td></tr>
+</table>
+<div class="grid3">
+  <div class="callout info"><b>Bundle rỗng = success hợp lệ</b>Không có kỹ năng nào đủ phù hợp? 0 item là kết quả ĐÚNG — hệ thống không bao giờ nhét skill yếu cho có (ADR-008).</div>
+  <div class="callout warn"><b>Không rescue được</b>Reranker chỉ xếp lại hạng ứng viên đã hợp lệ — không thể "cứu" nội dung fail eligibility, dù metadata có đẹp tới đâu.</div>
+  <div class="callout neutral"><b>Đo được</b>Trên bộ dev-31 (31 task thật): recall 0.766 retrieval → 0.712 sau rerank; router semantic route đúng kỹ năng miền (debugging cho task Python-debug) end-to-end qua plugin thật.</div>
+</div>
+</section>
+
+<hr>
+
+<!-- ================= 4 ================= -->
+<section id="s4">
+<p class="kicker">Phần 4 · Chu trình C</p>
+<h2>Agent tự chạy có kiểm chứng — HarnessKernel (ADR-014)</h2>
+<p class="story">Giờ tới phần "agent tự làm trọn việc": bạn gọi <code>POST /v1/agent-runs</code> với một mục tiêu — <b>"sửa fixture này, pytest phải xanh"</b> — kèm thư mục workspace và lệnh kiểm chứng. Kernel copy workspace sang một thư mục riêng, rồi chạy vòng lặp: model đề xuất hành động → guardrail chặn nguy hiểm → tool chạy thật → pytest kiểm chứng → chưa xanh thì phản hồi lại model sửa tiếp.</p>
+<div class="flowwrap"><div id="flow-c"></div></div>
+<h3>Diễn giải vòng lặp</h3>
+<table>
+<tr><th style="width:34px">#</th><th style="width:30%">Bước</th><th>Điều gì xảy ra</th></tr>
+<tr><td><span class="num">1</span></td><td>Workspace riêng</td><td>Mỗi run có bản copy workspace dưới <code>data/agent-runs/&lt;run&gt;</code> — agent làm hỏng cũng không dính repo thật. Không cấu hình model gateway = fail caller-visible ngay (không im lặng dùng model mặc định).</td></tr>
+<tr><td><span class="num">2</span></td><td>Model đề xuất hành động</td><td>glm-5.3 (qua gateway OpenAI-compat) trả về hành động: đọc/sửa file, chạy lệnh… trong budget 60k token context.</td></tr>
+<tr><td><span class="num">3</span></td><td>Authority + guardrail</td><td>AuthorityManager cấp <code>ExecutionEnvelope</code>; guardrail chặn <b>trước</b> khi chạy (shell-injection, path-traversal) và rà <b>sau</b> (secret leak). Whitelist lệnh: <code>ACI_AGENT_PROCESS_PREFIXES</code>.</td></tr>
+<tr><td><span class="num">4</span></td><td>Tool chạy thật</td><td>ToolRuntime thực thi trên workspace copy — read/write/edit/bash thật, kết quả quay lại context.</td></tr>
+<tr><td><span class="num">5</span></td><td>Pytest kiểm chứng</td><td>VerificationManager chạy đúng lệnh client cung cấp (<code>pytest -q</code>). <b>Đây là cổng</b> — model không tự tuyên bố "xong".</td></tr>
+<tr><td><span class="num">6</span></td><td>Đỏ → repair turn</td><td>Test fail → output thất bại được phản hồi vào model → vòng sửa lại (mũi tên đứt quay lại bước 2). Mọi bước ghi event append-only (checkpoint).</td></tr>
+<tr><td><span class="num">7</span></td><td>Xanh → kết thúc</td><td><code>succeeded</code> + bằng chứng (output test, files đổi, tool calls). 3 run thật đầu tiên: 3/3 verifier-gated succeeded.</td></tr>
+</table>
+<div class="callout success"><b>Vì sao vòng kiểm chứng quan trọng — số thật</b>H-bench round 1 (8 task multi-file/long-horizon, cùng model, cùng tool, cùng budget 12 turn): kernel <b>6/8</b> chấp nhận vs naive ReAct loop (không verify, không repair) <b>4/8</b> — <b>delta dương đầu tiên</b> trong lịch sử đo của dự án. 2 case naive thua vì đốt hết budget mà không land được fix; kernel dùng feedback pytest để sửa trúng trong budget. false_success 0/8 cả hai arm — glm-5.3 không bao giờ claim xong khi test còn đỏ.</div>
+<div class="callout warn"><b>Honest-fail, không sandbox</b>Không có sandbox thật: tool chạy dưới user của server, whitelist lệnh là tuyến phòng chính. <code>ACI_AGENT_RUNS_TOKEN</code> đặt = mọi route cần Bearer token. Gap đã ghi nhận: runs RAM-only (restart mất), agent chưa được wire CapabilityRuntime (chưa dùng kỹ năng registry), approval flow chưa wire, không resume từ checkpoint.</div>
+</section>
+
+<hr>
+
+<!-- ================= 5 ================= -->
+<section id="s5">
+<p class="kicker">Phần 5 · Chu trình D</p>
+<h2>Hệ thống học từ kết quả — outcome, evaluation, đo lường</h2>
+<p class="story">Mỗi lần agent xong việc là một cơ hội dữ liệu: kết quả được ghi <b>đa nguồn</b> (không bao giờ một con số <code>{"success": true}</code> duy nhất), rồi telemetry đó quyết định hệ thống nên học gì tiếp.</p>
+<div class="flowwrap"><div id="flow-d"></div></div>
+<h3>Bốn lớp dữ liệu phản hồi</h3>
+<table>
+<tr><th style="width:26%">Lớp</th><th>Cách hoạt động</th></tr>
+<tr><td>Outcome đa nguồn (§33)</td><td>Mỗi bundle được báo bởi nhiều nguồn: <b>test_harness</b> (chắc nhất), <b>agent_self_report</b>, <b>human_review</b>, <b>external_evaluator</b> — mỗi verdict có confidence và thứ tự; thiếu证据 cứ để <b>unknown</b>, không ép về pass/fail (ADR-010).</td></tr>
+<tr><td>Evaluation V4-1</td><td>Rubric khai báo (<code>all/any/majority</code>) tự chấm bundle qua <code>POST /v1/evaluations</code> — criterion thiếu evidence = <b>unknown chứ không phải pass</b>. Verdict ghi đè thành một nguồn external_evaluator trên trail outcome.</td></tr>
+<tr><td>Telemetry §36</td><td>Mọi route ghi trace đầy đủ: router versions, latency, bundle size, từng stage. Dashboard (<code>dashboard.py</code>) + console <code>/ui</code> đọc trực tiếp.</td></tr>
+<tr><td>Detector → đề xuất</td><td><code>detect_gaps.py</code> / <code>detect_deprecation.py</code> đọc telemetry và <b>chỉ đề xuất</b> (proposal-only) — 14 evidence-gap proposals là dữ liệu thật. Benchmark arena (smoke-10, dev-31, H-bench) là cổng bắt buộc cho mọi thay đổi router/kernel.</td></tr>
+</table>
+<div class="callout info"><b>Kết quả đo lớn nhất tới nay (đọc trung thực)</b>§80 (7 vòng, n=33 task thật): <b>không</b> thấy delta outcome khi thêm kỹ năng vào task đơn — model giải được naked. H-bench round 1: delta harness dương đầu tiên (6/8 vs 4/8) nhưng budget-sensitive. false-success (H008) chưa demonstrate được ở tier glm-5.3 — trục tiếp theo là model yếu hơn.</div>
+</section>
+
+<hr>
+
+<!-- ================= 6 ================= -->
+<section id="s6">
+<p class="kicker">Phần 6</p>
+<h2>Kiến trúc &amp; công nghệ</h2>
+<p class="sub">Modular monolith (ADR-011) — một process FastAPI, phân tầng rõ, phụ thuộc một chiều qua Protocols; domain thuần túy không biết framework nào.</p>
+<div class="grid2">
+  <div class="card">
+    <h4>Phân tầng (đơn giản hoá)</h4>
+    <p><b>1 · Cổng vào</b> — REST /v1 · A2A /a2a · MCP stdio · catalog OpenCode · console /ui</p>
+    <p><b>2 · Dịch vụ ứng dụng</b> — route · search · resolve · outcome · evaluation · delegate · agent-runs</p>
+    <p><b>3 · Định tuyến</b> — eligibility → pgvector → rerank → resolve → compose</p>
+    <p><b>4 · Governance</b> — promotion gates · license · security scan</p>
+    <p><b>5 · Domain thuần túy</b> — capability · provenance · policy · agent · runtime contracts</p>
+    <p><b>6 · Ra ngoài</b> — Postgres (13 repos) · pgvector · model gateway · object store</p>
+    <p class="tiny">Boundary tests chặn vi phạm: domain/application không import FastAPI/SQLAlchemy/MCP.</p>
+  </div>
+  <div class="card">
+    <h4>Stack</h4>
+    <p><b>Ngôn ngữ</b> — Python 3.12 (mypy strict) + TypeScript (plugin OpenCode)</p>
+    <p><b>Web/API</b> — FastAPI · Pydantic</p>
+    <p><b>Dữ liệu</b> — PostgreSQL 16 + pgvector (384d) · SQLAlchemy · Alembic (14 migrations)</p>
+    <p><b>AI</b> — FastEmbed ONNX bge-small-en-v1.5 (local) · OpenAI-compat gateway (glm-5.3)</p>
+    <p><b>Chất lượng</b> — pytest 957 tests · ruff · mypy strict · CI GitHub Actions</p>
+    <p><b>Vận hành</b> — Docker Compose (pgvector:pg16) · scripts ops (dashboard, capctl, proof_loop, run_hbench…)</p>
+  </div>
+</div>
+<details>
+<summary>Chi tiết: mô hình dữ liệu (8 nhóm bảng)</summary>
+<div class="dbody">
+<table>
+<tr><th style="width:190px">Nhóm</th><th>Bảng</th><th style="width:34%">Vai trò</th></tr>
+<tr><td>Registry</td><td class="muted"><code>capabilities</code> · <code>capability_versions</code> · <code>capability_releases</code> · <code>capability_bindings</code> · <code>capability_facets</code> · <code>capability_relations</code> · <code>capability_artifacts</code></td><td>Version bất biến; release là con trỏ (staging/production/canary)</td></tr>
+<tr><td>Provenance</td><td class="muted"><code>provenance_events</code> · <code>source_records</code> · <code>license_assessments</code> · <code>security_assessments</code> · <code>policy_snapshots</code></td><td>Chuỗi bằng chứng + cổng license/scan</td></tr>
+<tr><td>Embeddings</td><td class="muted"><code>embedding_documents</code> · <code>embedding_vectors</code></td><td>pgvector 384d, cache re-derivable</td></tr>
+<tr><td>Telemetry</td><td class="muted"><code>route_runs</code> · <code>bundles</code> · <code>bundle_items</code></td><td>Trace mỗi route; items FK exact version</td></tr>
+<tr><td>Outcomes</td><td class="muted"><code>outcome_events</code> · <code>outcome_verdicts</code></td><td>Verdict đa nguồn + evidence envelope</td></tr>
+<tr><td>Benchmark</td><td class="muted"><code>benchmark_cases</code> · <code>benchmark_runs</code> · <code>benchmark_results</code></td><td>Smoke-10 · dev-31 · H-bench</td></tr>
+<tr><td>Agent (V3)</td><td class="muted"><code>agent_tasks</code> · <code>task_messages</code> · <code>task_artifacts</code></td><td>Task lifecycle validated ở domain</td></tr>
+<tr><td>Canary</td><td class="muted"><code>capability_releases.status='canary'</code> + <code>canary_percent</code></td><td>ADR-013: split deterministic, fail-closed</td></tr>
+</table>
+</div>
+</details>
+<details>
+<summary>Chi tiết: các mặt API</summary>
+<div class="dbody">
+<table>
+<tr><th style="width:110px">Surface</th><th>Endpoint</th><th style="width:36%">Chức năng</th></tr>
+<tr><td>REST</td><td class="muted"><code>POST /v1/routes</code> · <code>GET /v1/routes/{id}</code> · <code>GET /v1/bundles/{id}</code></td><td>Route pipeline §14 + telemetry</td></tr>
+<tr><td>REST</td><td class="muted"><code>POST /v1/capabilities/search</code> · <code>GET /v1/capabilities/{id}</code> · <code>/{id}/versions/{v}</code></td><td>Discovery + chi tiết</td></tr>
+<tr><td>REST</td><td class="muted"><code>POST /v1/outcomes</code> · <code>POST /v1/evaluations</code></td><td>Báo kết quả + rubric V4-1</td></tr>
+<tr><td>REST</td><td class="muted"><code>POST /v1/agent-runs</code> · <code>GET /{id}</code> · <code>POST /{id}/cancel</code> · <code>POST /{id}/revise</code></td><td>HarnessKernel (ADR-014)</td></tr>
+<tr><td>A2A</td><td class="muted"><code>POST /a2a</code> · <code>GET /.well-known/agent-card.json</code></td><td>JSON-RPC task lifecycle + agent card</td></tr>
+<tr><td>OpenCode</td><td class="muted"><code>GET /opencode/skills/index.json</code> · <code>/opencode/skills/{id}/{file}</code></td><td>Catalog native OpenCode V2</td></tr>
+<tr><td>MCP stdio</td><td class="muted">tools <code>route_capabilities</code> · <code>search_capabilities</code> · <code>report_outcome</code> · resources <code>skill://{id}/{+path}</code></td><td>Client Antigravity</td></tr>
+<tr><td>Console</td><td class="muted"><code>/ui</code> · <code>/ui/routes</code> · <code>/ui/corpus</code> · <code>/ui/try</code></td><td>Ops UI</td></tr>
+<tr><td>Health</td><td class="muted"><code>/health</code> · <code>/ready</code></td><td>Liveness + DB check</td></tr>
+</table>
+</div>
+</details>
+</section>
+
+<hr>
+
+<!-- ================= 7 ================= -->
+<section id="s7">
+<p class="kicker">Phần 7</p>
+<h2>Trạng thái dự án &amp; kết luận</h2>
+<div class="grid2">
+  <div class="card">
+    <h4>Hành trình (đã xong gì)</h4>
+    <p><b>V1</b> — registry → routing → REST → 2 client thật (OpenCode + Antigravity)</p>
+    <p><b>V2</b> — governance: license detector, scanner, review queue, semantic embedder, benchmark arena (9/9)</p>
+    <p><b>V3</b> — A2A + aci-coder + delegation: sống, frozen không mở rộng</p>
+    <p><b>V4-1</b> — Evaluation service: live (rubric → external_evaluator)</p>
+    <p><b>HarnessKernel</b> — unfrozen (ADR-014): 3 run thật + H-bench round 1</p>
+  </div>
+  <div class="card">
+    <h4>Kết luận trung thực</h4>
+    <p><b style="color:var(--green)">Đã chứng minh</b> — router semantic route đúng kỹ năng miền end-to-end qua plugin thật; delta harness dương đầu tiên (6/8 vs 4/8); 2 client vận hành; judge phân biệt adversarial.</p>
+    <p><b style="color:var(--orange)">Chưa chứng minh</b> — giá trị outcome trên task đơn (§80 n=33: A=E, model giải được naked); false-success (H008) chưa thấy ở tier glm-5.3.</p>
+    <p><b>Tiếp theo</b> — durable runs (lưu DB); wire CapabilityRuntime (agent dùng kỹ năng registry); H-bench trục model yếu.</p>
+  </div>
+</div>
+<div class="callout danger"><b>Cảnh báo dữ liệu: aci_bench không còn trong container đang chạy</b>Container <code>aci-db-1</code> + volume <code>aci_pgdata</code> được tạo lại 2026-09-30 21:52 (+07); hiện chỉ còn DB <code>aci</code> (733 capabilities = fixture test). DB operational <code>aci_bench</code> — nơi chứa corpus thật (~38 kỹ năng) + toàn bộ lịch sử route_runs/outcomes/benchmark — <b>không còn</b>. Nếu không có dump/backup ở nơi khác, dữ liệu đã mất cùng volume cũ — cần kiểm tra ngay.</div>
+<p class="foot">Số liệu trong báo cáo lấy từ code thật (<code>src/aci/**</code>, wiring, main) + hồ sơ đo trong <code>data/</code> (proof-loop, hbench) — mọi con số truy được nguồn ở AGENTS.md. Phụ lục kỹ thuật đầy đủ (sơ đồ module chi tiết, bảng migrations, freeze map): <a class="plain" href="./aci-system-architecture.html">aci-system-architecture.html</a>.</p>
+<div class="bar"></div>
+</section>
+
+<script>
+/* ================= renderer ================= */
+const C={edge:"#4a4a4a",edgeD:"#3a3a3a",box:"#242424",boxMuted:"#202020",stroke:"#3a3a3a",
+  accent:"#4e9cff",text:"#f0f0f0",text3:"#8f8f8f",text4:"#565656",
+  blue:"#4e9cff",green:"#1f8a65",orange:"#d29922",pink:"#c85898"};
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;")}
+function arrow(x1,y1,x2,y2,color,dashed){
+  const dx=x2-x1,dy=y2-y1,len=Math.hypot(dx,dy)||1,ux=dx/len,uy=dy/len;
+  const bx=x2-ux*9,by=y2-uy*9,ox=-uy,oy=ux,w=5;
+  const col=color||C.edge;
+  return `<line x1="${x1}" y1="${y1}" x2="${bx}" y2="${by}" stroke="${col}" stroke-width="1.8" ${dashed?'stroke-dasharray="5 5"':''}/>`+
+    `<polygon points="${x2},${y2} ${bx+ox*w},${by+oy*w} ${bx-ox*w},${by-oy*w}" fill="${col}"/>`;
+}
+function poly(pts,color,dashed){
+  const p=pts,tx=p[p.length-1][0],ty=p[p.length-1][1],px=p[p.length-2][0],py=p[p.length-2][1];
+  const dx=tx-px,dy=ty-py,len=Math.hypot(dx,dy)||1,ux=dx/len,uy=dy/len;
+  const bx=tx-ux*9,by=ty-uy*9,ox=-uy,oy=ux,w=5,col=color||C.edgeD;
+  return `<path d="M ${p[0][0]} ${p[0][1]} ${p.slice(1).map(q=>`L ${q[0]} ${q[1]}`).join(" ")}" fill="none" stroke="${col}" stroke-width="1.8" ${dashed===false?'':'stroke-dasharray="5 5"'} stroke-linejoin="round"/>`+
+    `<polygon points="${tx},${ty} ${bx+ox*w},${by+oy*w} ${bx-ox*w},${by-oy*w}" fill="${col}"/>`;
+}
+function box(n){
+  const acc=n.accent,mut=n.muted;
+  const stroke=acc?C.accent:(n.color||C.stroke),sw=acc||n.color?1.6:1;
+  const fill=mut?C.boxMuted:C.box;
+  const tcol=mut?C.text3:C.text;
+  let s=`<rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" rx="${n.r||10}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>`;
+  const cx=n.x+n.w/2,hasSub=!!n.sub;
+  const lines=String(n.label).split("\n");
+  const start=hasSub?n.y+n.h/2-6-(lines.length-1)*8:n.y+n.h/2+4-(lines.length-1)*8;
+  lines.forEach((t,i)=>{s+=`<text x="${cx}" y="${start+i*15}" text-anchor="middle" font-size="${n.fs||12.5}" font-weight="650" fill="${tcol}">${esc(t)}</text>`;});
+  if(n.sub){
+    const subs=String(n.sub).split("\n");
+    subs.forEach((t,i)=>{s+=`<text x="${cx}" y="${n.y+n.h/2+13+i*13}" text-anchor="middle" font-size="10" fill="${C.text3}">${esc(t)}</text>`;});
+  }
+  return s;
+}
+function badge(x,y,num,color){
+  return `<circle cx="${x}" cy="${y}" r="11" fill="${color}" stroke="#141414" stroke-width="2"/>`+
+    `<text x="${x}" y="${y+4}" text-anchor="middle" font-size="12" font-weight="800" fill="#141414">${num}</text>`;
+}
+function zone(x,y,w,h,label,color){
+  return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="14" fill="#1a1a1a" stroke="${color}" stroke-width="1.4"/>`+
+    `<text x="${x+w/2}" y="${y+22}" text-anchor="middle" font-size="11" font-weight="800" letter-spacing="1.5" fill="${color}">${esc(label)}</text>`;
+}
+function render(id,inner,w,h){document.getElementById(id).innerHTML=`<svg width="${w}" height="${h}" style="display:block">${inner}</svg>`}
+
+/* ================= 1. MAP ================= */
+(function(){
+  let s="";
+  s+=zone(10,30,262,400,"NGƯỜI DÙNG & AGENT",C.text3);
+  s+=zone(300,30,556,400,"NỀN TẢNG ACI (FastAPI · 1 process)",C.accent);
+  s+=zone(884,30,262,400,"HẠ TẦNG",C.text3);
+  /* left */
+  const L=[["OpenCode","plugin route mỗi prompt"],["Antigravity","qua MCP stdio"],["A2A client","JSON-RPC task"],["Ops scripts","proof_loop · hbench · dashboard"],["Nguồn GitHub","skills (pin commit)"],["Người duyệt","capctl · review_queue"]];
+  L.forEach((a,i)=>{s+=box({x:28,y:60+i*58,w:226,h:46,label:a[0],sub:a[1],fs:12});});
+  /* center */
+  s+=box({x:322,y:60,w:250,h:150,label:"CỔNG API",sub:"REST /v1 · A2A /a2a · MCP stdio\ncatalog OpenCode · console /ui",fs:13});
+  s+=box({x:600,y:60,w:236,h:66,label:"BỘ ĐỊNH TUYẾN",sub:"eligibility → pgvector → rerank → bundle",fs:12.5});
+  s+=box({x:600,y:148,w:236,h:62,label:"KERNEL AGENT",sub:"HarnessKernel — vòng verify",fs:12.5});
+  s+=box({x:322,y:232,w:250,h:62,label:"KHO KỸ NĂNG + GOVERNANCE",sub:"registry · license · security scan",fs:11.5});
+  s+=box({x:600,y:232,w:236,h:62,label:"ĐO LƯỜNG & EVALUATION",sub:"outcomes §33 · rubric V4-1 · telemetry §36",fs:11.5});
+  s+=box({x:322,y:312,w:514,h:62,label:"BENCHMARK ARENA",sub:"smoke-10 · dev-31 · H-bench — cổng bắt buộc cho mọi thay đổi router/kernel",fs:11.5});
+  /* right */
+  const R=[["Kho blob sha256","data/objects — bất biến"],["Model gateway","OpenAI-compat · glm-5.3"],["PostgreSQL + pgvector","aci · aci_bench · 14 migrations"],["Workspace agent","data/agent-runs/<run>"]];
+  R.forEach((a,i)=>{s+=box({x:902,y:60+i*84,w:226,h:62,label:a[0],sub:a[1],fs:11.5});});
+  /* ② route: clients → API → router; bundle quay về */
+  s+=arrow(254,83,322,83,C.blue);
+  s+=arrow(254,141,322,141,C.blue);
+  s+=arrow(254,199,322,199,C.blue);
+  s+=arrow(254,257,322,204,C.blue);
+  s+=arrow(572,100,600,93,C.blue);
+  s+=poly([[718,60],[718,18],[240,18],[240,60]],C.blue);
+  s+=`<text x="480" y="12" text-anchor="middle" font-size="10" fill="${C.blue}">bundle 0–5 skills quay về client</text>`;
+  /* ③ agent-run: API → kernel → model gateway */
+  s+=arrow(572,170,600,179,C.green);
+  s+=arrow(836,179,902,175,C.green);
+  /* ① ingest: nguồn + người duyệt → kho kỹ năng */
+  s+=arrow(254,315,322,263,C.orange);
+  s+=arrow(254,373,322,285,C.orange);
+  /* ④ feedback: kernel → đo lường → postgres */
+  s+=arrow(718,210,718,232,C.pink);
+  s+=arrow(836,263,902,259,C.pink);
+  /* badges */
+  s+=badge(288,289,"1",C.orange);
+  s+=badge(288,83,"2",C.blue);
+  s+=badge(869,177,"3",C.green);
+  s+=badge(869,261,"4",C.pink);
+  render("map",s,1156,440);
+})();
+
+/* ================= 2. FLOW A — ingest ================= */
+(function(){
+  const W=196,H=64,G=26;
+  const steps=[
+    ["Tải & ghim nguồn","repo + commit sha"],
+    ["Băm & lưu blob","sha256 — content-addressed"],
+    ["Bản ghi bất biến","CapabilityVersion + manifest"],
+    ["Ghi nguồn gốc","trạng thái CÁCH LY"],
+    ["Kiểm tự động","license SPDX + quét mã độc"],
+    ["Người duyệt","capctl · review_queue"],
+    ["PRODUCTION","catalog + router thấy được"]
+  ];
+  let s="";
+  steps.forEach((st,i)=>{
+    s+=box({x:i*(W+G),y:0,w:W,h:H,label:st[0],sub:st[1],fs:12,accent:i===6});
+    if(i<steps.length-1) s+=arrow(i*(W+G)+W,32,(i+1)*(W+G),32);
+  });
+  s+=box({x:4*(W+G),y:118,w:W,h:56,label:"CÁCH LY (HELD)",sub:"unknown license · scan fail",muted:true,fs:11.5});
+  s+=arrow(4*(W+G)+W/2,64,4*(W+G)+W/2,118,C.orange,true);
+  s+=arrow(4*(W+G)+W/2,174,5*(W+G)+W/2,64,C.orange,true);
+  s+=`<text x="${4*(W+G)+W/2+10}" y="100" font-size="10" fill="${C.orange}">không qua cổng</text>`;
+  render("flow-a",s,7*(W+G)-G,190);
+})();
+
+/* ================= 3. FLOW B — route ================= */
+(function(){
+  const W=196,H=64,G=26;
+  const steps=[
+    ["Prompt trong OpenCode","plugin gửi context tối thiểu"],
+    ["Eligibility","lọc hợp lệ (ADR-009)"],
+    ["Retrieval","pgvector top 10–30"],
+    ["Rerank v3","chấm lại 4 tín hiệu"],
+    ["Resolve + compose","bundle 0–5 · pin version"],
+    ["Agent dùng kỹ năng","lazy-load từ catalog"],
+    ["Outcome + Evaluation","báo kết quả đa nguồn"]
+  ];
+  let s="";
+  steps.forEach((st,i)=>{
+    s+=box({x:i*(W+G),y:0,w:W,h:H,label:st[0],sub:st[1],fs:12,accent:i===6});
+    if(i<steps.length-1) s+=arrow(i*(W+G)+W,32,(i+1)*(W+G),32);
+  });
+  s+=`<text x="${W/2}" y="${H+26}" font-size="10.5" fill="${C.text4}">client</text>`;
+  s+=`<text x="${2.5*(W+G)}" y="${H+26}" text-anchor="middle" font-size="10.5" fill="${C.text4}">ACI routing (server, ~vài trăm ms)</text>`;
+  s+=`<text x="${6*(W+G)+W/2}" y="${H+26}" text-anchor="middle" font-size="10.5" fill="${C.text4}">client lại</text>`;
+  render("flow-b",s,7*(W+G)-G,H+40);
+})();
+
+/* ================= 4. FLOW C — kernel loop ================= */
+(function(){
+  const W=210,H=60;
+  const N={
+    model:{x:430,y:0,label:"MODEL (glm-5.3)",sub:"đề xuất hành động"},
+    guard:{x:430,y:120,label:"GUARDRAIL + AUTHORITY",sub:"chặn shell-inject · path-traversal"},
+    tool:{x:430,y:240,label:"TOOL RUNTIME",sub:"chạy trên bản copy workspace"},
+    verif:{x:100,y:240,label:"PYTEST KIỂNG CHỨNG",sub:"lệnh client cung cấp — CỔNG"},
+    rec:{x:100,y:120,label:"REPAIR TURN",sub:"feedback thất bại"},
+    done:{x:100,y:0,label:"KẾT THÚC",sub:"succeeded + evidence",accent:true}
+  };
+  const g=C.green,o=C.orange;
+  let s="";
+  s+=arrow(430+W/2,60,430+W/2,120,g);                   /* model → guard */
+  s+=arrow(430+W/2,180,430+W/2,240,g);                  /* guard → tool */
+  s+=arrow(430,270,100+W,270,g);                        /* tool → verif */
+  s+=poly([[100+W/2,240],[100+W/2,180]],o);            /* verif --fail--> rec */
+  s+=poly([[100+W,150],[370,150],[370,30],[430,30]],o); /* rec --repair--> model */
+  s+=poly([[100,270],[60,270],[60,30],[100,30]],g);     /* verif --pass--> done */
+  s+=`<text x="${100+W/2+10}" y="205" font-size="10.5" fill="${o}">test đỏ</text>`;
+  s+=`<text x="80" y="22" text-anchor="middle" font-size="10.5" fill="${g}">test xanh</text>`;
+  s+=`<text x="380" y="95" font-size="10.5" fill="${o}">sửa rồi thử lại</text>`;
+  for(const k in N) s+=box(Object.assign({w:W,h:H,fs:11.5},N[k]));
+  render("flow-c",s,640,300);
+})();
+
+/* ================= 5. FLOW D — feedback ================= */
+(function(){
+  const W=200,H=60;
+  const steps=[
+    ["Agent xong việc","fix + test"],
+    ["Outcome đa nguồn","test · self · human · judge"],
+    ["Evaluation rubric","V4-1 — thiếu = unknown"],
+    ["Telemetry §36","trace mọi route"],
+    ["Detector → đề xuất","gap · deprecation (proposal-only)"],
+    ["Quyết định cải thiện","thêm skill · đổi router · benchmark"]
+  ];
+  let s="";
+  steps.forEach((st,i)=>{
+    s+=box({x:i*(W+22),y:0,w:W,h:H,label:st[0],sub:st[1],fs:11.5,accent:i===5});
+    if(i<steps.length-1) s+=arrow(i*(W+22)+W,30,(i+1)*(W+22),30);
+  });
+  s+=poly([[5*(W+22)+W/2,60],[5*(W+22)+W/2,100],[W/2,100],[W/2,60]],C.pink);
+  s+=`<text x="${2.5*(W+22)}" y="94" text-anchor="middle" font-size="10.5" fill="${C.pink}">vòng học: dữ liệu quay lại phục vụ route &amp; governance</text>`;
+  render("flow-d",s,6*(W+22)-22,118);
+})();
+</script>
+</body>
+</html>
