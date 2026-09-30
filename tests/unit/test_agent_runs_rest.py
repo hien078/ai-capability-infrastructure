@@ -67,10 +67,22 @@ def _service(actions: list[Any], **options: Any) -> AgentRunService:
     )
 
 
-def _client(service: AgentRunService) -> TestClient:
+def _client(service: AgentRunService, settings: Settings | None = None) -> TestClient:
     app = FastAPI()
     register_error_handlers(app)
-    container = cast(Container, type("C", (), {"agent_run_service": service})())
+    container = cast(
+        Container,
+        type(
+            "C",
+            (),
+            {
+                "agent_run_service": service,
+                # The exposure gate reads the token off container settings;
+                # default = unauthenticated mode (backward compatible).
+                "settings": settings or Settings(agent_runs_token=""),
+            },
+        )(),
+    )
     app.dependency_overrides[rest_agent_runs.get_container] = lambda: container
     app.include_router(rest_agent_runs.router)
     return TestClient(app)
@@ -243,6 +255,93 @@ class TestAgentRunsRest:
         assert response.status_code == 404
 
     # -- workspace runs (§16) ----------------------------------------------------
+
+    def test_run_token_required_when_configured(self) -> None:
+        """Exposure gate: with ACI_AGENT_RUNS_TOKEN set, every agent-run
+        route requires `Authorization: Bearer <token>` — a run executes
+        under the server user, so the port must not be open without it."""
+        service = _service([FinalCandidate(summary="x")])
+        client = _client(service, Settings(agent_runs_token="s3cret"))
+        assert client.post("/v1/agent-runs", json=_body()).status_code == 401
+        wrong = client.post(
+            "/v1/agent-runs", json=_body(), headers={"Authorization": "Bearer nope"}
+        )
+        assert wrong.status_code == 401
+        ok = client.post("/v1/agent-runs", json=_body(), headers={"Authorization": "Bearer s3cret"})
+        assert ok.status_code == 201
+
+    def test_run_token_gate_covers_read_and_cancel(self) -> None:
+        service = _service([FinalCandidate(summary="x")])
+        client = _client(service, Settings(agent_runs_token="s3cret"))
+        assert client.get("/v1/agent-runs/run-1").status_code == 401
+        assert client.post("/v1/agent-runs/run-1/cancel").status_code == 401
+
+    def test_workspace_guardrails_block_shell_injection(self, tmp_path: Path) -> None:
+        """The REST path wires the standard guardrail set (§14): a command
+        carrying shell metacharacters is BLOCKED as an observation — never
+        executed — and the run continues to its normal terminal state."""
+        injected = ToolCallBatchAction(
+            calls=[
+                ToolCall(
+                    call_id="c1",
+                    tool_id="run_command",
+                    arguments={
+                        "command": [
+                            sys.executable,
+                            "-c",
+                            "import os; os.system('echo pwned > pwned.txt') # $(marker)",
+                        ]
+                    },
+                )
+            ]
+        )
+        service = _service(
+            [
+                injected,
+                _read("notes.txt"),
+                FinalCandidate(summary="ok", claims=["notes.txt: cause X"]),
+            ],
+            **_workspace(tmp_path),
+        )
+        client = _client(service)
+        data = client.post(
+            "/v1/agent-runs", json=_body(requested_profile="researcher", workspace="proj")
+        ).json()
+        # The block is an observation for the model, never a crash (§58) —
+        # the run still reaches its verifier-gated terminal state.
+        assert data["status"] == "succeeded"
+        # And the injected command never executed: without the guardrail
+        # the os.system call would have written pwned.txt into the run dir.
+        assert not (_run_dir(tmp_path, data["run_id"]) / "pwned.txt").exists()
+
+    def test_workspace_guardrails_block_path_traversal(self, tmp_path: Path) -> None:
+        """`..` escapes are blocked by the guardrail BEFORE the dispatcher
+        ever sees them (the workspace path check is the first line; this
+        is the second)."""
+        escape = ToolCallBatchAction(
+            calls=[
+                ToolCall(
+                    call_id="c1",
+                    tool_id="write_file",
+                    arguments={"path": "../escape.txt", "content": "x"},
+                )
+            ]
+        )
+        service = _service(
+            [
+                escape,
+                _read("notes.txt"),
+                FinalCandidate(summary="ok", claims=["notes.txt: cause X"]),
+            ],
+            **_workspace(tmp_path),
+        )
+        client = _client(service)
+        data = client.post(
+            "/v1/agent-runs", json=_body(requested_profile="researcher", workspace="proj")
+        ).json()
+        assert data["status"] == "succeeded"
+        assert not (tmp_path / "sources" / "escape.txt").exists()
+        assert not (_run_dir(tmp_path, data["run_id"]) / "escape.txt").exists()
 
     def test_workspace_run_writes_file(self, tmp_path: Path) -> None:
         service = _service(

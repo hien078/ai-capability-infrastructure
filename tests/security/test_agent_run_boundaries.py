@@ -37,7 +37,7 @@ from fastapi.testclient import TestClient
 
 from aci.adapters.inbound.rest import agent_runs as rest_agent_runs
 from aci.adapters.inbound.rest.errors import register_error_handlers
-from aci.adapters.inbound.rest.wiring import Container
+from aci.adapters.inbound.rest.wiring import Container, Settings
 from aci.application.run_agent_task import AgentRunService, ModelGatewayFactory
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.actions import FinalCandidate, ToolCall, ToolCallBatchAction
@@ -150,7 +150,19 @@ def _service(
 def _client(service: AgentRunService) -> TestClient:
     app = FastAPI()
     register_error_handlers(app)
-    container = cast(Container, type("C", (), {"agent_run_service": service})())
+    container = cast(
+        Container,
+        type(
+            "C",
+            (),
+            {
+                "agent_run_service": service,
+                # The exposure gate reads the token off container settings;
+                # default = unauthenticated mode (these tests never set one).
+                "settings": Settings(agent_runs_token=""),
+            },
+        )(),
+    )
     app.dependency_overrides[rest_agent_runs.get_container] = lambda: container
     app.include_router(rest_agent_runs.router)
     return TestClient(app)
@@ -315,8 +327,12 @@ def test_tool_path_escape_never_writes_outside_the_run_dir(roots: Roots) -> None
     assert list(roots.tmp.rglob("escape.txt")) == []
     assert list(roots.tmp.rglob("abs-escape.txt")) == []
     results = _tool_results(gateway)
-    assert results["rel"].startswith("status: denied")
-    assert results["abs"].startswith("status: denied")
+    # Either defense line may fire first (guardrails run before the
+    # authority preflight): `..` → GUARDRAIL_BLOCKED, the absolute path →
+    # GUARDRAIL_BLOCKED or AUTHORITY_DENIED. Both mean: no effect, the
+    # model sees a refusal observation, the run cannot succeed on it.
+    assert results["rel"].startswith(("status: denied", "status: blocked"))
+    assert results["abs"].startswith(("status: denied", "status: blocked"))
 
 
 def test_write_scopes_bound_writes_to_the_granted_prefix(roots: Roots) -> None:

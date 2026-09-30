@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     agent_command_timeout_seconds: float = 120.0
     #: Timeout for the client's verification_command (seconds).
     agent_verification_timeout_seconds: float = 300.0
+    #: Bearer token guarding every /v1/agent-runs route (exposure gate:
+    #: anyone who can reach the port can otherwise start a run that
+    #: executes under the server user). Empty (default) = UNAUTHENTICATED
+    #: mode — the deployment must keep the port on localhost; a startup
+    #: warning says so. Set to expose the surface beyond localhost.
+    agent_runs_token: str = ""
 
 
 settings = Settings()

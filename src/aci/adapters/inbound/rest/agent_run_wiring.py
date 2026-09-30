@@ -44,6 +44,17 @@ class _NullCapabilityRuntime:
 
 
 def build_agent_run_service(settings: Settings) -> AgentRunService:
+    if not settings.agent_runs_token:
+        # Honest-default log, once per process: the surface is reachable by
+        # anyone with network access to the port and a run executes under
+        # the server user (no sandbox, §16.4).
+        import logging
+
+        logging.getLogger("aci.agent_runs").warning(
+            "ACI_AGENT_RUNS_TOKEN unset — /v1/agent-runs is UNAUTHENTICATED; "
+            "keep the port on localhost or set the token before exposing it"
+        )
+
     class _ModelFactory:
         def build(self) -> object:
             if settings.agent_model_base_url:

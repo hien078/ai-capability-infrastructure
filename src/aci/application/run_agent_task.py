@@ -234,6 +234,12 @@ class AgentRunService:
         """§16: provision <runs_root>/<run_id> from `source`, bind the run's
         grants to the workspace (defense in depth, INV-04) and build the
         tool runtime + optional client verifier over it."""
+        from aci.runtime.guardrails import (
+            GuardrailManager,
+            PathTraversalGuard,
+            SecretLeakGuard,
+            ShellInjectionGuard,
+        )
         from aci.runtime.workspace import WorkspaceManager
         from aci.runtime.workspace_tools import (
             build_workspace_tool_runtime,
@@ -276,6 +282,14 @@ class AgentRunService:
             workspace_id,
             allow_commands=bool(prefixes),
             command_timeout_ms=self._command_timeout_ms,
+            # Second defense line (§14/§25): authority + workspace path
+            # checks are the FIRST; these guards catch what a well-formed
+            # but malicious call would do — shell metacharacters, `..`
+            # escapes, secrets leaking back through observations.
+            guardrails=GuardrailManager(
+                pre_guardrails=[ShellInjectionGuard(), PathTraversalGuard()],
+                post_guardrails=[SecretLeakGuard()],
+            ),
         )
         check: VerifierCallable | None = None
         if verification is not None:

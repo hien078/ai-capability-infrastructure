@@ -7,7 +7,7 @@ verdict, checks, evidence refs, artifacts — never the transcript)."""
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from aci.adapters.inbound.rest.wiring import Container, get_container
@@ -18,7 +18,29 @@ from aci.domain.runtime.state import BudgetLedger
 from aci.domain.runtime.subtask import AcceptanceCriterion, RunResult, SubtaskContract
 from aci.runtime.profiles import runtime_spec_for
 
-router = APIRouter(prefix="/v1/agent-runs", tags=["agent-runs"])
+
+def _require_run_token(
+    container: Annotated[Container, Depends(get_container)],
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    """Exposure gate for the whole /v1/agent-runs surface: a run executes
+    under the server user (no sandbox, §16.4), so anyone who can reach the
+    port can otherwise run code here. With ACI_AGENT_RUNS_TOKEN set, every
+    route requires `Authorization: Bearer <token>`. Empty token =
+    UNAUTHENTICATED mode — the deployment keeps the port on localhost
+    (build_agent_run_service warns at startup)."""
+    token = container.settings.agent_runs_token
+    if not token:
+        return
+    if authorization != f"Bearer {token}":
+        raise HTTPException(status_code=401, detail="invalid or missing agent-run token")
+
+
+router = APIRouter(
+    prefix="/v1/agent-runs",
+    tags=["agent-runs"],
+    dependencies=[Depends(_require_run_token)],
+)
 
 
 class AgentRunRequest(BaseModel):
