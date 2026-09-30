@@ -47,4 +47,6 @@ jobs:
 
       - run: alembic upgrade head
 
+      - run: alembic check
+
       - run: python -m pytest -q

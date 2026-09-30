@@ -52,3 +52,15 @@ def test_send_message_without_configured_profile_is_invalid_params(
         },
     )
     assert response.json()["error"]["code"] == -32602
+
+
+def test_a2a_token_from_container_settings_gates_rpc(engine: Any) -> None:  # noqa: ARG001
+    """ACI_A2A_TOKEN reaches the mounted router through the app container."""
+    client = TestClient(create_app(Container(Settings(a2a_token="wired-token"))))
+    rpc = {"jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": {"id": "task-none"}}
+
+    assert client.post("/a2a", json=rpc).status_code == 401
+    authed = client.post("/a2a", json=rpc, headers={"Authorization": "Bearer wired-token"})
+    assert authed.status_code == 200
+    assert authed.json()["error"]["code"] == -32001
+    assert client.get("/.well-known/agent-card.json").status_code == 200

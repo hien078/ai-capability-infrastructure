@@ -6,9 +6,12 @@ Artifact projection, error codes -32600/-32601/-32602/-32700/-32001/
 -32002/-32009, Agent Card at the well-known URI.
 """
 
+import asyncio
+import time
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -161,7 +164,48 @@ def _profile() -> AgentProfile:
     )
 
 
-def _client() -> tuple[TestClient, FakeTasks]:
+class SlowExecutor(EchoExecutor):
+    """Blocks like a synchronous model HTTP call before completing."""
+
+    def execute(
+        self,
+        task: AgentTask,
+        profile: AgentProfile,
+        skills: list[Any],
+        *,
+        now: datetime,
+    ) -> ExecutorResult:
+        time.sleep(1.0)
+        return super().execute(task, profile, skills, now=now)
+
+
+class ForeignOutputExecutor:
+    """Returns a message for another task: the runtime raises a DomainError
+    whose text interpolates internal message/task ids."""
+
+    def execute(
+        self,
+        task: AgentTask,
+        profile: AgentProfile,
+        skills: list[Any],
+        *,
+        now: datetime,
+    ) -> ExecutorResult:
+        return ExecutorResult(
+            status="completed",
+            messages=[
+                TaskMessage(
+                    message_id="msg-SECRET-internal",
+                    task_id="task-SECRET-foreign",
+                    author="agent",
+                    content="x",
+                    created_at=now,
+                )
+            ],
+        )
+
+
+def _app(executor: Any = None, *, token: str | None = None) -> tuple[FastAPI, FakeTasks]:
     tasks = FakeTasks()
     releases = FakeReleases()
     releases.add(
@@ -178,7 +222,7 @@ def _client() -> tuple[TestClient, FakeTasks]:
         runtime=ProfileDrivenAgentRuntime(
             tasks=cast(TaskRepository, tasks),
             releases=cast(ReleaseRepository, releases),
-            executor=cast(AgentExecutor, EchoExecutor()),
+            executor=cast(AgentExecutor, executor or EchoExecutor()),
         ),
         tasks=cast(TaskRepository, tasks),
         releases=cast(ReleaseRepository, releases),
@@ -187,11 +231,21 @@ def _client() -> tuple[TestClient, FakeTasks]:
         service_url="http://testserver",
     )
     app = FastAPI()
-    app.include_router(create_a2a_router(gateway))
+    app.include_router(create_a2a_router(gateway, token=token))
+
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    return app, tasks
+
+
+def _client(executor: Any = None, *, token: str | None = None) -> tuple[TestClient, FakeTasks]:
+    app, tasks = _app(executor, token=token)
     return TestClient(app), tasks
 
 
-def _send(client: TestClient, **overrides: Any) -> Any:
+def _send_body(**overrides: Any) -> dict[str, Any]:
     params: dict[str, Any] = {
         "message": {
             "role": "ROLE_USER",
@@ -200,9 +254,11 @@ def _send(client: TestClient, **overrides: Any) -> Any:
         }
     }
     params.update(overrides)
-    return client.post(
-        "/a2a", json={"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": params}
-    )
+    return {"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": params}
+
+
+def _send(client: TestClient, headers: dict[str, str] | None = None, **overrides: Any) -> Any:
+    return client.post("/a2a", json=_send_body(**overrides), headers=headers)
 
 
 def test_agent_card_projects_agent_capabilities_only() -> None:
@@ -313,3 +369,53 @@ def test_unsupported_protocol_version_is_rejected() -> None:
     )
     assert response.json()["error"]["code"] == -32009
     assert response.headers["A2A-Version"] == "1.0"
+
+
+def test_blocking_dispatch_does_not_stall_the_event_loop() -> None:
+    """Regression: a SendMessage whose executor blocks (sync model HTTP call)
+    must run off the loop — /health keeps answering meanwhile."""
+    app, _ = _app(SlowExecutor())
+
+    async def scenario() -> tuple[float, int]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            started = time.perf_counter()
+            send = asyncio.create_task(client.post("/a2a", json=_send_body()))
+            await asyncio.sleep(0.05)
+            health = await client.get("/health")
+            health_elapsed = time.perf_counter() - started
+            sent = await send
+        assert health.json() == {"status": "ok"}
+        return health_elapsed, sent.status_code
+
+    health_elapsed, send_status = asyncio.run(scenario())
+    assert send_status == 200
+    assert health_elapsed < 0.5, f"/health blocked {health_elapsed:.2f}s behind SendMessage"
+
+
+def test_token_set_requires_matching_bearer() -> None:
+    client, _ = _client(token="s3cret")
+    for headers in (None, {"Authorization": "Bearer wrong"}, {"Authorization": "s3cret"}):
+        response = _send(client, headers=headers)
+        assert response.status_code == 401
+        body = response.json()
+        assert body["error"] == {"code": -32000, "message": "Unauthorized"}
+        assert "s3cret" not in response.text
+    ok = _send(client, headers={"Authorization": "Bearer s3cret"})
+    assert ok.status_code == 200
+    assert ok.json()["result"]["task"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    # Discovery stays public.
+    assert client.get("/.well-known/agent-card.json").status_code == 200
+
+
+def test_token_unset_is_unauthenticated_mode() -> None:
+    for token in (None, ""):
+        client, _ = _client(token=token)
+        assert _send(client).status_code == 200
+
+
+def test_domain_error_text_never_reaches_the_wire() -> None:
+    client, _ = _client(ForeignOutputExecutor())
+    body = _send(client).json()
+    assert body["error"] == {"code": -32602, "message": "EXECUTOR_CONTRACT_VIOLATION"}
+    assert "SECRET" not in str(body)

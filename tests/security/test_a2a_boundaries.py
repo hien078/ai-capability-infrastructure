@@ -5,8 +5,12 @@ Load-bearing claims, enforced as tests:
 
 - Artifacts are digest-pinned: the wire carries sha256 digests, NEVER
   raw artifact bytes (§39 content-addressed store boundary).
-- GetTask returns only its own task's history — a foreign task id is
-  TASK_NOT_FOUND, never a leak of another principal's tasks.
+- GetTask on an unknown task id is TASK_NOT_FOUND and echoes no other
+  task's data. KNOWN GAP: there is NO per-principal isolation — AgentTask
+  has no owner field and GetTask/CancelTask look up by id alone, so any
+  caller who holds (or guesses) a task id can read or cancel that task.
+- /a2a is bearer-gated when ACI_A2A_TOKEN is set (401, no detail); the
+  Agent Card stays public for discovery.
 - The agent card advertises only production-active releases: a staging
   or revoked release never appears in the public card.
 - JSON-RPC errors are typed codes with stable messages — no stack
@@ -17,12 +21,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-import pytest
 from fastapi.testclient import TestClient
 
 from aci.adapters.inbound.a2a.gateway import A2AGateway, create_a2a_router
-
-pytestmark = pytest.mark.integration
 
 NOW = datetime(2026, 9, 29, tzinfo=UTC)
 DIGEST = "sha256:" + "ab" * 32
@@ -95,11 +96,11 @@ def _gateway(tasks: FakeTasks, releases: FakeReleases) -> A2AGateway:
     )
 
 
-def _client(gateway: A2AGateway) -> TestClient:
+def _client(gateway: A2AGateway, *, token: str | None = None) -> TestClient:
     from fastapi import FastAPI
 
     app = FastAPI()
-    app.include_router(create_a2a_router(gateway))
+    app.include_router(create_a2a_router(gateway, token=token))
     return TestClient(app)
 
 
@@ -158,9 +159,10 @@ def test_artifact_wire_carries_digest_never_raw_bytes() -> None:
     assert "report body" not in str(body)
 
 
-def test_get_task_foreign_id_is_not_found_never_a_leak() -> None:
-    """A foreign task id yields the typed TASK_NOT_FOUND error — never
-    another principal's task, history, or input text."""
+def test_get_task_unknown_id_is_not_found_never_a_leak() -> None:
+    """An unknown task id yields the typed TASK_NOT_FOUND error and echoes
+    no stored task's history or input text. (Not a principal boundary —
+    see the module docstring's known gap.)"""
     tasks = FakeTasks()
     mine = uid("task")
     _seeded_task(tasks, mine)
@@ -234,3 +236,22 @@ def test_send_message_requires_metadata_never_guesses_a_profile() -> None:
     )
     assert "error" in body
     assert body["error"]["code"] == -32602
+
+
+def test_rpc_requires_bearer_when_token_configured() -> None:
+    """With a token set, /a2a rejects missing/wrong bearers with 401 and a
+    detail-free body; the Agent Card stays public."""
+    tasks = FakeTasks()
+    task_id = uid("task")
+    _seeded_task(tasks, task_id)
+    client = _client(_gateway(tasks, FakeReleases()), token="tok-123")
+    rpc = {"jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": {"id": task_id}}
+
+    for headers in ({}, {"Authorization": "Bearer nope"}):
+        resp = client.post("/a2a", json=rpc, headers=headers)
+        assert resp.status_code == 401
+        assert resp.json()["error"] == {"code": -32000, "message": "Unauthorized"}
+        assert "secret user input" not in resp.text and "tok-123" not in resp.text
+    ok = client.post("/a2a", json=rpc, headers={"Authorization": "Bearer tok-123"})
+    assert ok.status_code == 200 and ok.json()["result"]["task"]["id"] == task_id
+    assert client.get("/.well-known/agent-card.json").status_code == 200

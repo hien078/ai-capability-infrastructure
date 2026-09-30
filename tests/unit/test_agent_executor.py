@@ -261,10 +261,12 @@ def test_system_prompt_carries_policy_and_skill_body() -> None:
 
 
 def test_api_error_fails_the_task_with_detail() -> None:
-    executor, _ = _executor(lambda r: httpx.Response(503, text="overloaded"))
+    executor, _ = _executor(lambda r: httpx.Response(503, text="overloaded at /srv/secret"))
     result = executor.execute(_task(), _profile(), GRANTS, now=NOW)
     assert result.status == "failed"
     assert "503" in (result.detail or "")
+    # §61: the detail lands in A2A task history — the provider body never does.
+    assert "/srv/secret" not in (result.detail or "")
 
 
 def test_malformed_response_fails_the_task() -> None:

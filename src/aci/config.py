@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     #: mode — the deployment must keep the port on localhost; a startup
     #: warning says so. Set to expose the surface beyond localhost.
     agent_runs_token: str = ""
+    #: Bearer token guarding the /a2a JSON-RPC endpoint (SendMessage runs a
+    #: delegated agent task). Empty (default) = UNAUTHENTICATED mode — the
+    #: deployment must keep the port on localhost. The public Agent Card
+    #: (/.well-known/agent-card.json) stays open for discovery.
+    a2a_token: str = ""
 
 
 settings = Settings()

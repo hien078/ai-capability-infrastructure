@@ -155,14 +155,14 @@ def test_build_rejects_non_directory(tmp_path: Path) -> None:
 
 def test_fs_object_store_roundtrip(tmp_path: Path) -> None:
     store = FsObjectStore(tmp_path / "objects")
-    key = "ab" * 32
     data = b"hello blob"
+    key = hash_bytes(data)
     assert store.get(key) is None
     assert not store.exists(key)
     store.put(key, data)
     assert store.get(key) == data
     assert store.exists(key)
-    store.put(key, b"other")  # idempotent: content-addressed, never rewritten
+    store.put(key, data)  # idempotent: content-addressed, never rewritten
     assert store.get(key) == data
 
 

@@ -20,6 +20,7 @@ the repository only projects the resulting immutable states. An executor that
 crashes fails its task — never the platform.
 """
 
+import logging
 from datetime import datetime
 from uuid import uuid4
 
@@ -37,6 +38,8 @@ from aci.domain.agent.models import (
     advance_task,
 )
 from aci.domain.capability.errors import DomainError, ErrorCode
+
+log = logging.getLogger(__name__)
 
 
 class ProfileDrivenAgentRuntime:
@@ -75,7 +78,12 @@ class ProfileDrivenAgentRuntime:
         try:
             result = self._executor.execute(working, profile, grants, now=now)
         except Exception as exc:  # executor failure fails the task, never the platform
-            result = ExecutorResult(status="failed", detail=f"executor error: {exc}")
+            # Task history is served to A2A callers: the type only on the wire,
+            # the real text in the server log (§61).
+            log.warning("executor failed for task %s: %s", task.task_id, exc)
+            result = ExecutorResult(
+                status="failed", detail=f"executor error ({type(exc).__name__})"
+            )
         violation = self._validate_output(working, result)
         if violation is not None:
             failed = advance_task(working, "failed", now=now)

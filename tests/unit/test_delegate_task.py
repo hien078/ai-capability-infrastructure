@@ -194,13 +194,16 @@ def test_missing_required_release_fails_task_with_visible_reason() -> None:
 
 
 def test_executor_crash_fails_task_not_the_platform() -> None:
-    executor = FakeExecutor(RuntimeError("model provider down"))
+    executor = FakeExecutor(RuntimeError("model provider down at /srv/secret"))
     runtime, tasks = _runtime(executor)
 
     final = runtime.delegate(_task(), _profile(), now=NOW)
 
     assert final.status == "failed"
-    assert any("executor error" in m.content for m in tasks.list_messages("task-1"))
+    history = [m.content for m in tasks.list_messages("task-1")]
+    assert any("executor error (RuntimeError)" in m for m in history)
+    # Task history is served over A2A GetTask: the exception text stays server-side.
+    assert not any("/srv/secret" in m for m in history)
 
 
 def test_executor_failed_result_records_detail() -> None:

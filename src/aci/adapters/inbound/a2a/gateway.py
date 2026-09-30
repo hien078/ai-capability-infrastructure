@@ -17,11 +17,13 @@ carries raw bodies). This adapter ONLY translates; all lifecycle semantics
 live in the domain (``advance_task``) and the runtime.
 """
 
+import hmac
 from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from aci.application.delegate_task import ProfileDrivenAgentRuntime
 from aci.application.protocols import (
@@ -40,6 +42,8 @@ from aci.domain.agent.models import (
 from aci.domain.capability.errors import DomainError, ErrorCode
 
 A2A_VERSION = "1.0"
+#: JSON-RPC implementation-defined server error; auth is HTTP-level in A2A (401).
+_UNAUTHORIZED = -32000
 _STATE_WIRE = {
     "submitted": "TASK_STATE_SUBMITTED",
     "working": "TASK_STATE_WORKING",
@@ -254,13 +258,29 @@ class A2AGateway:
         return "\n".join(t for t in texts if isinstance(t, str) and t.strip())
 
     def _domain_error(self, request_id: object, exc: DomainError) -> JSONResponse:
+        # The stable code only: DomainError text is raiser-interpolated
+        # (paths, model output, internal ids) and never goes on the wire.
         if exc.code in (ErrorCode.TASK_NOT_FOUND,):
-            return _rpc_error(request_id, -32001, str(exc))
-        return _rpc_error(request_id, -32602, str(exc))
+            return _rpc_error(request_id, -32001, exc.code.value)
+        return _rpc_error(request_id, -32602, exc.code.value)
 
 
-def create_a2a_router(gateway: A2AGateway) -> APIRouter:
-    """HTTP surface: the well-known Agent Card + one JSON-RPC endpoint."""
+def _configured_token(request: Request, token: str | None) -> str:
+    """Explicit router token, else the app container's ``a2a_token`` ("" = open)."""
+    if token is not None:
+        return token
+    container = getattr(request.app.state, "container", None)
+    return str(getattr(getattr(container, "settings", None), "a2a_token", "") or "")
+
+
+def create_a2a_router(gateway: A2AGateway, *, token: str | None = None) -> APIRouter:
+    """HTTP surface: the well-known Agent Card + one JSON-RPC endpoint.
+
+    ``/a2a`` requires ``Authorization: Bearer <token>`` when a token is
+    configured (``token`` here, else ``ACI_A2A_TOKEN`` via the app
+    container); empty = UNAUTHENTICATED, localhost-only by deployment. The
+    Agent Card stays public (discovery).
+    """
     router = APIRouter()
 
     @router.get("/.well-known/agent-card.json")
@@ -269,6 +289,12 @@ def create_a2a_router(gateway: A2AGateway) -> APIRouter:
 
     @router.post("/a2a")
     async def rpc(request: Request) -> JSONResponse:
+        expected = _configured_token(request, token)
+        if expected:
+            presented = request.headers.get("Authorization", "").encode()
+            # Constant-time compare: != leaks the match position via timing.
+            if not hmac.compare_digest(presented, f"Bearer {expected}".encode()):
+                return _rpc_error(None, _UNAUTHORIZED, "Unauthorized", status=401)
         try:
             body = await request.json()
         except Exception:
@@ -282,6 +308,8 @@ def create_a2a_router(gateway: A2AGateway) -> APIRouter:
         params = body.get("params")
         if not isinstance(method, str) or not isinstance(params, dict):
             return _rpc_error(body["id"], -32602, "method and params are required")
-        return gateway.dispatch(body["id"], method, params)
+        # dispatch is sync and may block for minutes (model HTTP call, DB):
+        # run it off the event loop so one delegation cannot stall the server.
+        return await run_in_threadpool(gateway.dispatch, body["id"], method, params)
 
     return router
