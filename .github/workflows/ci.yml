@@ -33,7 +33,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install -e ".[dev]"
+      # `semantic` too: mypy (strict) type-checks the FastEmbedEmbedder import
+      # in model_provider/semantic.py — without the extra installed it fails
+      # with import-not-found, and the local venv (which has it) would not
+      # catch that drift.
+      - run: pip install -e ".[dev,semantic]"
 
       - run: ruff check src tests
 
