@@ -76,7 +76,7 @@ from aci.domain.runtime.subtask import (  # noqa: E402
     AcceptanceCriterion,
     SubtaskContract,
 )
-from aci.runtime.context_engine import ContextBudget, ContextEngine  # noqa: E402
+from aci.runtime.context_engine import AssembledContext, ContextBudget, ContextEngine  # noqa: E402
 from aci.runtime.event_bus import (  # noqa: E402
     RECOVERY_ACTION,
     VERIFICATION_COMPLETED,
@@ -186,16 +186,56 @@ class _NullHandler:
         return []
 
 
+class _NoItemsContextEngine(ContextEngine):
+    """Ablation `items`: ContextEngine items OFF — build() contributes
+    nothing (the objective/authority still reach the model via
+    _system_prompt; what disappears is the task item's acceptance line,
+    plan items and every registered context item)."""
+
+    def build(  # type: ignore[override]
+        self, snapshot: Any, *, turn: int
+    ) -> AssembledContext:
+        return AssembledContext(items=[], dropped_item_ids=[])
+
+
+ABLATIONS = ("items", "progress", "continue")
+
+
+def apply_ablations(ablations: list[str]) -> None:
+    """Process-wide mechanism switches for the ablation arms (one invocation
+    = one ablation set; the report records which were active). `items` is
+    handled by the context factory in _kernel_service; `progress` and
+    `continue` patch the RunController module (the measurement script IS
+    the experiment harness — these are experiment switches, not product
+    code)."""
+    import aci.runtime.run_controller as rc
+
+    for ab in ablations:
+        if ab == "progress":
+            rc._progress_summary = lambda snapshot: ""  # type: ignore[assignment]
+        elif ab == "continue":
+            rc._CONTINUE_PROMPT = ""  # type: ignore[assignment]
+
+
 def _kernel_service(
-    gateway: OpenAICompatGateway, sources: Path, runs: Path, bus: EventBus
+    gateway: OpenAICompatGateway,
+    sources: Path,
+    runs: Path,
+    bus: EventBus,
+    *,
+    ablations: list[str] | None = None,
 ) -> AgentRunService:
+    ablations = ablations or []
+    context_engine = (
+        _NoItemsContextEngine(ContextBudget(total_tokens=60_000))
+        if "items" in ablations
+        else ContextEngine(ContextBudget(total_tokens=60_000))
+    )
     return AgentRunService(
         model_gateway_factory=_Factory(gateway),  # type: ignore[arg-type]
         tool_executor_factory=_Factory(_NullHandler()),  # type: ignore[arg-type]
         capability_runtime_factory=_Factory(_NullHandler()),  # type: ignore[arg-type]
-        context_engine_factory=_Factory(  # type: ignore[arg-type]
-            ContextEngine(ContextBudget(total_tokens=60_000))
-        ),
+        context_engine_factory=_Factory(context_engine),  # type: ignore[arg-type]
         workspace_root=sources,
         runs_root=runs,
         process_prefixes=PROCESS_PREFIXES,
@@ -214,9 +254,11 @@ def run_kernel_arm(
     runs: Path,
     *,
     max_turns: int,
+    ablations: list[str] | None = None,
+    trace_dir: Path | None = None,
 ) -> dict[str, Any]:
     bus = EventBus()
-    service = _kernel_service(gateway, sources, runs, bus)
+    service = _kernel_service(gateway, sources, runs, bus, ablations=ablations)
     started = time.monotonic()
     result = service.run(
         contract,
@@ -226,7 +268,17 @@ def run_kernel_arm(
         verification_command=VERIFICATION,
     )
     wall = time.monotonic() - started
-    counts = mechanism_counts(bus.history(result.run_id))
+    history = bus.history(result.run_id)
+    if trace_dir is not None:
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        (trace_dir / f"trace-{fixture['name']}-{result.run_id}.json").write_text(
+            json.dumps(
+                [{"event": e.event_type, "turn": e.turn_id, "payload": e.payload} for e in history],
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    counts = mechanism_counts(history)
     # SAME yardstick as arm N: did the tests pass in the run dir at the end,
     # regardless of whether the model proposed completion? A LIMIT_TURNS run
     # where the fix landed but was never proposed counts here (and NOT in
@@ -440,6 +492,8 @@ def _run_one(
     runs: Path,
     *,
     max_turns: int,
+    ablations: list[str] | None = None,
+    trace_dir: Path | None = None,
 ) -> dict[str, Any]:
     contract, spec = _contract_spec(fixture)
     gateway = OpenAICompatGateway(
@@ -447,7 +501,15 @@ def _run_one(
     )
     if arm == "K":
         record = run_kernel_arm(
-            fixture, contract, spec, gateway, sources, runs, max_turns=max_turns
+            fixture,
+            contract,
+            spec,
+            gateway,
+            sources,
+            runs,
+            max_turns=max_turns,
+            ablations=ablations,
+            trace_dir=trace_dir,
         )
     else:
         record = run_naive_arm(fixture, contract, spec, gateway, sources, runs, max_turns=max_turns)
@@ -468,6 +530,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repeat", type=int, default=3, help="runs per case per arm (default 3)")
     parser.add_argument("--parallel", type=int, default=4, help="concurrent runs (default 4)")
     parser.add_argument("--max-turns", type=int, default=12)
+    parser.add_argument(
+        "--ablate",
+        default="",
+        help=(
+            "comma subset of ABLATIONS (items,progress,continue) — turn K "
+            "mechanisms OFF one at a time to attribute the edge; process-wide"
+        ),
+    )
+    parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="dump every K run's event history to <report>/traces/",
+    )
     parser.add_argument("--out", default="", help="report path (default data/hbench/<ts>.json)")
     args = parser.parse_args(argv)
 
@@ -478,6 +553,14 @@ def main(argv: list[str] | None = None) -> int:
         print("no API key — set ACI_AGENT_MODEL_API_KEY or --api-key", file=sys.stderr)
         return 2
     arms = [a.strip().upper() for a in args.arms.split(",") if a.strip()]
+    ablations = [a.strip() for a in args.ablate.split(",") if a.strip()]
+    unknown = [a for a in ablations if a not in ABLATIONS]
+    if unknown:
+        print(f"unknown ablations {unknown!r} — pick from {ABLATIONS}", file=sys.stderr)
+        return 2
+    if ablations:
+        apply_ablations(ablations)
+        print(f"ABLATIONS ACTIVE: {ablations} (process-wide)", flush=True)
     fixtures = _all_fixtures()
     if args.cases:
         wanted = {c.strip() for c in args.cases.split(",")}
@@ -502,6 +585,7 @@ def main(argv: list[str] | None = None) -> int:
         for fixture in fixtures
         for arm in arms
     ]
+    trace_dir = root / "traces" if args.trace else None
     print(f"{len(jobs)} runs ({len(fixtures)} cases x {arms} x {args.repeat})", flush=True)
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:
@@ -516,6 +600,8 @@ def main(argv: list[str] | None = None) -> int:
                 sources,
                 runs,
                 max_turns=args.max_turns,
+                ablations=ablations,
+                trace_dir=trace_dir,
             ): (fixture, arm, repeat)
             for fixture, arm, repeat in jobs
         }
@@ -583,6 +669,7 @@ def main(argv: list[str] | None = None) -> int:
         "arms": arms,
         "repeat": args.repeat,
         "max_turns": args.max_turns,
+        "ablations": ablations,
         "verification": VERIFICATION,
         "pending_h_cases": PENDING_H_CASES,
         "aggregate": {arm: _agg(arm) for arm in arms},

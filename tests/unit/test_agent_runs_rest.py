@@ -343,6 +343,65 @@ class TestAgentRunsRest:
         assert not (tmp_path / "sources" / "escape.txt").exists()
         assert not (_run_dir(tmp_path, data["run_id"]) / "escape.txt").exists()
 
+    def test_turn_limit_records_passing_verification_as_evidence(self, tmp_path: Path) -> None:
+        """2026-10-01 review: LIMIT_TURNS is a FAILURE even when the fix
+        landed (INV-08 is never waived) — but the verifier's command still
+        runs once and its outcome is recorded as EVIDENCE, so "budget
+        expired, suite green, unclaimed" is distinguishable from "nothing
+        landed" on the wire."""
+        actions = [
+            _write("test_ok.py", "def test_ok():\n    assert True\n"),
+            _read("notes.txt"),
+            _read("notes.txt"),
+        ]
+        service = _service(actions, **_workspace(tmp_path))
+        client = _client(service)
+        data = client.post(
+            "/v1/agent-runs",
+            json=_body(
+                workspace="proj",
+                verification_command=[sys.executable, "-m", "pytest", "-q"],
+                max_turns=3,
+            ),
+        ).json()
+        assert data["status"] == "failed"
+        assert data["stop_reason"] == "LIMIT_TURNS"
+        # The suite IS green at the limit — recorded, never converted to success.
+        assert "PASS:verification_at_limit" in data["checks"]
+        assert data["evidence_verdict"] == "INCONCLUSIVE"
+
+    def test_turn_limit_records_failing_verification_as_evidence(self, tmp_path: Path) -> None:
+        """Nothing landed → the at-limit check FAILs: the two limit flavors
+        are distinguishable in the result."""
+        actions = [_read("notes.txt"), _read("notes.txt"), _read("notes.txt")]
+        service = _service(actions, **_workspace(tmp_path))
+        client = _client(service)
+        data = client.post(
+            "/v1/agent-runs",
+            json=_body(
+                workspace="proj",
+                verification_command=[sys.executable, "-m", "pytest", "-q"],
+                max_turns=3,
+            ),
+        ).json()
+        assert data["status"] == "failed"
+        assert data["stop_reason"] == "LIMIT_TURNS"
+        assert "FAIL:verification_at_limit" in data["checks"]
+
+    def test_turn_limit_without_verification_command_records_no_evidence(
+        self, tmp_path: Path
+    ) -> None:
+        """No command configured → nothing to run at the limit → no evidence
+        pack, plain LIMIT_TURNS."""
+        actions = [_read("notes.txt"), _read("notes.txt"), _read("notes.txt")]
+        service = _service(actions, **_workspace(tmp_path))
+        client = _client(service)
+        data = client.post("/v1/agent-runs", json=_body(workspace="proj", max_turns=3)).json()
+        assert data["status"] == "failed"
+        assert data["stop_reason"] == "LIMIT_TURNS"
+        assert data["checks"] == []
+        assert data["evidence_verdict"] is None
+
     def test_workspace_run_writes_file(self, tmp_path: Path) -> None:
         service = _service(
             [_write("out.txt"), FinalCandidate(summary="done", changes=["out.txt"])],

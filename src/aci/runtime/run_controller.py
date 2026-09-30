@@ -225,6 +225,8 @@ class HarnessKernel:
             if stop is None and snapshot.run.current_turn >= r.max_turns:
                 stop = StopReason.LIMIT_TURNS
             if stop is not None:
+                if stop is StopReason.LIMIT_TURNS:
+                    return self._fail(r, stop, evidence=self._at_limit_evidence(r))
                 return self._fail(r, stop)
             turn = snapshot.run.current_turn + 1
             self._state.advance_turn(r.run_id)
@@ -648,9 +650,52 @@ class HarnessKernel:
         )
         self._emit(CHECKPOINT_SAVED, run_id, payload={"turn": turn})
 
-    def _fail(self, r: _Run, stop: StopReason, *, detail: str | None = None) -> RunResult:
+    def _fail(
+        self,
+        r: _Run,
+        stop: StopReason,
+        *,
+        detail: str | None = None,
+        evidence: EvidencePack | None = None,
+    ) -> RunResult:
         self._state.transition(r.run_id, RunStatus.FAILED, stop_reason=stop, detail_code=detail)
-        return self._finalize(r, stop)
+        return self._finalize(r, stop, evidence=evidence)
+
+    def _at_limit_evidence(self, r: _Run) -> EvidencePack | None:
+        """2026-10-01 review: at the TURN limit the run is FAILED whatever the
+        verifier says — but the verification command still runs once and its
+        outcome is recorded as EVIDENCE, so "budget exhausted, fix landed,
+        unclaimed" is distinguishable from "nothing landed" on the wire.
+        INV-08 is never waived: a passing command here is NOT a success; the
+        pack's verdict is INCONCLUSIVE and only the command check survives
+        (renamed) — the profile checks are meaningless without a candidate
+        and are discarded."""
+        from aci.runtime.workspace_tools import VERIFICATION_CHECK_NAME
+
+        self._emit(VERIFICATION_STARTED, r.run_id, payload={"at_limit": True})
+        verification = self._verifier.verify(
+            CandidateResult(summary=""),
+            snapshot=self._state.snapshot(r.run_id),
+            contract=r.spec.result_contract,
+        )
+        self._emit(
+            VERIFICATION_COMPLETED,
+            r.run_id,
+            payload={"verdict": verification.verdict, "at_limit": True},
+        )
+        at_limit = [
+            check.model_copy(update={"name": "verification_at_limit"})
+            for check in verification.checks
+            if check.name == VERIFICATION_CHECK_NAME
+        ]
+        if not at_limit:
+            return None  # no verification command configured — nothing to record
+        return EvidencePack(
+            verification_verdict="INCONCLUSIVE",
+            checks=[f"{'PASS' if c.passed else 'FAIL'}:{c.name}" for c in at_limit],
+            evidence_refs=[i.ref for i in verification.evidence.items],
+            summary="turn limit reached — verification outcome recorded as evidence, not success",
+        )
 
     def _cancelled(self, r: _Run) -> RunResult:
         status = self._state.snapshot(r.run_id).run.status
