@@ -6,10 +6,15 @@ Load-bearing claims, enforced as tests:
 - Artifacts are digest-pinned: the wire carries sha256 digests, NEVER
   raw artifact bytes (§39 content-addressed store boundary).
 - GetTask on an unknown task id is TASK_NOT_FOUND and echoes no other
-  task's data. KNOWN GAP: there is NO per-principal isolation — AgentTask
-  has no owner field and GetTask/CancelTask look up by id alone, so any
-  caller who holds (or guesses) a task id can read or cancel that task.
-- /a2a is bearer-gated when ACI_A2A_TOKEN is set (401, no detail); the
+  task's data.
+- Per-principal isolation: the bearer token resolves a principal
+  (ACI_A2A_PRINCIPALS name; ACI_A2A_TOKEN = "default"; no token configured
+  = "anonymous"), SendMessage stamps it as ``AgentTask.owner``, and
+  GetTask/CancelTask on another principal's task is TASK_NOT_FOUND with the
+  exact shape of an unknown id — never "forbidden" or "not cancelable",
+  which would confirm the id exists. Holding (or guessing) a task id no
+  longer grants read or cancel.
+- /a2a is bearer-gated when any A2A token is set (401, no detail); the
   Agent Card stays public for discovery.
 - The agent card advertises only production-active releases: a staging
   or revoked release never appears in the public card.
@@ -96,11 +101,16 @@ def _gateway(tasks: FakeTasks, releases: FakeReleases) -> A2AGateway:
     )
 
 
-def _client(gateway: A2AGateway, *, token: str | None = None) -> TestClient:
+def _client(
+    gateway: A2AGateway,
+    *,
+    token: str | None = None,
+    principals: dict[str, str] | None = None,
+) -> TestClient:
     from fastapi import FastAPI
 
     app = FastAPI()
-    app.include_router(create_a2a_router(gateway, token=token))
+    app.include_router(create_a2a_router(gateway, token=token, principals=principals))
     return TestClient(app)
 
 
@@ -110,7 +120,7 @@ def _rpc(client: TestClient, method: str, params: dict[str, Any]) -> dict[str, A
     return resp.json()
 
 
-def _seeded_task(tasks: FakeTasks, task_id: str) -> None:
+def _seeded_task(tasks: FakeTasks, task_id: str, *, owner: str = "anonymous") -> None:
     from aci.domain.agent.models import AgentTask, TaskArtifact, TaskMessage
 
     tasks.put_task(
@@ -119,6 +129,7 @@ def _seeded_task(tasks: FakeTasks, task_id: str) -> None:
             profile_id="prof-x",
             capability_id="cap-x",
             input_text="secret user input for this task only",
+            owner=owner,
             status="working",
             created_at=NOW,
             updated_at=NOW,
@@ -161,8 +172,7 @@ def test_artifact_wire_carries_digest_never_raw_bytes() -> None:
 
 def test_get_task_unknown_id_is_not_found_never_a_leak() -> None:
     """An unknown task id yields the typed TASK_NOT_FOUND error and echoes
-    no stored task's history or input text. (Not a principal boundary —
-    see the module docstring's known gap.)"""
+    no stored task's history or input text."""
     tasks = FakeTasks()
     mine = uid("task")
     _seeded_task(tasks, mine)
@@ -243,7 +253,7 @@ def test_rpc_requires_bearer_when_token_configured() -> None:
     detail-free body; the Agent Card stays public."""
     tasks = FakeTasks()
     task_id = uid("task")
-    _seeded_task(tasks, task_id)
+    _seeded_task(tasks, task_id, owner="default")  # a2a_token's principal
     client = _client(_gateway(tasks, FakeReleases()), token="tok-123")
     rpc = {"jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": {"id": task_id}}
 
@@ -255,3 +265,74 @@ def test_rpc_requires_bearer_when_token_configured() -> None:
     ok = client.post("/a2a", json=rpc, headers={"Authorization": "Bearer tok-123"})
     assert ok.status_code == 200 and ok.json()["result"]["task"]["id"] == task_id
     assert client.get("/.well-known/agent-card.json").status_code == 200
+
+
+def _rpc_as(client: TestClient, method: str, task_id: str, token: str) -> Any:
+    return client.post(
+        "/a2a",
+        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": {"id": task_id}},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+def _normalized_error(resp: Any, task_id: str) -> dict[str, Any]:
+    """The full response with the (caller-supplied) id masked out."""
+    return {
+        "status": resp.status_code,
+        "headers": resp.headers.get("A2A-Version"),
+        "body": resp.text.replace(task_id, "<ID>"),
+    }
+
+
+def test_foreign_task_is_indistinguishable_from_nonexistent() -> None:
+    """Principal B probing principal A's task id gets byte-for-byte the same
+    response (id masked) as probing an id that never existed — for both
+    GetTask and CancelTask. No existence oracle, no data, no state change."""
+    tasks = FakeTasks()
+    victim = uid("task")
+    _seeded_task(tasks, victim, owner="alice")
+    client = _client(_gateway(tasks, FakeReleases()), principals={"alice": "tok-a", "bob": "tok-b"})
+    ghost = uid("task")
+
+    for method in ("GetTask", "CancelTask"):
+        foreign = _rpc_as(client, method, victim, "tok-b")
+        missing = _rpc_as(client, method, ghost, "tok-b")
+        assert foreign.json()["error"]["code"] == -32001
+        assert _normalized_error(foreign, victim) == _normalized_error(missing, ghost)
+        assert "secret user input" not in foreign.text and "alice" not in foreign.text
+    assert tasks.tasks[victim].status == "working"  # the cancel probe changed nothing
+
+    own = _rpc_as(client, "GetTask", victim, "tok-a").json()
+    assert own["result"]["task"]["id"] == victim
+    canceled = _rpc_as(client, "CancelTask", victim, "tok-a").json()
+    assert canceled["result"]["task"]["status"]["state"] == "TASK_STATE_CANCELED"
+
+
+def test_legacy_anonymous_tasks_unreachable_once_auth_is_on() -> None:
+    """Pre-0015 rows are owned by 'anonymous'. With tokens configured no
+    caller resolves to that principal — not even one configured under the
+    reserved name — so legacy tasks fail closed instead of becoming shared."""
+    tasks = FakeTasks()
+    legacy = uid("task")
+    _seeded_task(tasks, legacy)  # owner defaults to anonymous
+    client = _client(
+        _gateway(tasks, FakeReleases()),
+        token="tok-default",
+        principals={"anonymous": "tok-anon", "alice": "tok-a"},
+    )
+    assert _rpc_as(client, "GetTask", legacy, "tok-default").json()["error"]["code"] == -32001
+    assert _rpc_as(client, "GetTask", legacy, "tok-a").json()["error"]["code"] == -32001
+    assert _rpc_as(client, "GetTask", legacy, "tok-anon").status_code == 401
+
+
+def test_principal_tokens_never_echoed_on_auth_failure() -> None:
+    """A wrong bearer is a detail-free 401: no principal names, no tokens."""
+    tasks = FakeTasks()
+    task_id = uid("task")
+    _seeded_task(tasks, task_id, owner="alice")
+    client = _client(_gateway(tasks, FakeReleases()), principals={"alice": "tok-a", "bob": "tok-b"})
+    resp = _rpc_as(client, "GetTask", task_id, "tok-a-but-longer")
+    assert resp.status_code == 401
+    assert resp.json()["error"] == {"code": -32000, "message": "Unauthorized"}
+    for secret in ("alice", "bob", "tok-a", "tok-b", "secret user input"):
+        assert secret not in resp.text

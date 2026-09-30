@@ -245,3 +245,43 @@ def test_cross_task_output_is_contract_violation_and_task_fails() -> None:
     violation_messages = tasks.list_messages("task-1")
     assert len(violation_messages) == 1
     assert "expected task-1" in violation_messages[0].content
+
+
+class RecordingTasks(FakeTasks):
+    """Keeps every state ``put_task`` stored, not just the latest."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.history: list[AgentTask] = []
+
+    def put_task(self, task: AgentTask) -> AgentTask:
+        self.history.append(task)
+        return super().put_task(task)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [ExecutorResult(status="completed"), ExecutorResult(status="failed", detail="x")],
+)
+def test_owner_survives_every_lifecycle_write(result: ExecutorResult) -> None:
+    """A2A isolation hinges on ``owner``: no runtime transition may drop or
+    reset it (advance_task copies; a rebuilt task would default to anonymous)."""
+    tasks = RecordingTasks()
+    runtime = ProfileDrivenAgentRuntime(
+        tasks=cast(TaskRepository, tasks),
+        releases=cast(ReleaseRepository, FakeReleases({"code-review"})),
+        executor=cast(AgentExecutor, FakeExecutor(result)),
+    )
+    task = _task().model_copy(update={"owner": "alice"})
+
+    final = runtime.delegate(task, _profile(), now=NOW)
+
+    assert final.owner == "alice"
+    assert len(tasks.history) >= 2
+    assert {t.owner for t in tasks.history} == {"alice"}
+
+
+def test_task_owner_defaults_to_anonymous() -> None:
+    """Pre-ownership constructors stay valid and land in the unauthenticated
+    principal — the same value migration 0015 gives existing rows."""
+    assert _task().owner == "anonymous"

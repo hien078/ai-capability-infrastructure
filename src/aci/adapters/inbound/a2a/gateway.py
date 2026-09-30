@@ -15,6 +15,13 @@ ROLE_USER); ``TaskArtifact`` -> A2A ``Artifact`` whose text part carries the
 content digest (artifact bytes live in the object store, §39 — the wire never
 carries raw bodies). This adapter ONLY translates; all lifecycle semantics
 live in the domain (``advance_task``) and the runtime.
+
+Principal isolation: the bearer token resolves a PRINCIPAL (``a2a_principals``
+name, or "default" for ``a2a_token``; "anonymous" when no token is configured
+at all). SendMessage stamps ``AgentTask.owner`` with it; every task-id lookup
+(GetTask, CancelTask) reports another principal's task exactly like an
+unknown id (-32001 TaskNotFound, same message) — never "forbidden", which
+would confirm the id exists.
 """
 
 import hmac
@@ -32,6 +39,7 @@ from aci.application.protocols import (
     TaskRepository,
 )
 from aci.domain.agent.models import (
+    ANONYMOUS_PRINCIPAL,
     AgentProfile,
     AgentTask,
     TaskArtifact,
@@ -44,6 +52,8 @@ from aci.domain.capability.errors import DomainError, ErrorCode
 A2A_VERSION = "1.0"
 #: JSON-RPC implementation-defined server error; auth is HTTP-level in A2A (401).
 _UNAUTHORIZED = -32000
+#: Principal of the single ``a2a_token`` (settings comment in ``aci.config``).
+DEFAULT_PRINCIPAL = "default"
 _STATE_WIRE = {
     "submitted": "TASK_STATE_SUBMITTED",
     "working": "TASK_STATE_WORKING",
@@ -140,16 +150,36 @@ class A2AGateway:
 
     # -- JSON-RPC (§9) ------------------------------------------------------
 
-    def dispatch(self, request_id: object, method: str, params: dict[str, object]) -> JSONResponse:
+    def dispatch(
+        self, request_id: object, method: str, params: dict[str, object], *, principal: str
+    ) -> JSONResponse:
+        """Route one JSON-RPC call on behalf of the authenticated ``principal``.
+
+        ``principal`` is required (no default): every task-id lookup below is
+        scoped to it, so a caller can never forget to pass one.
+        """
         if method == "SendMessage":
-            return self._send_message(request_id, params)
+            return self._send_message(request_id, params, principal)
         if method == "GetTask":
-            return self._get_task(request_id, params)
+            return self._get_task(request_id, params, principal)
         if method == "CancelTask":
-            return self._cancel_task(request_id, params)
+            return self._cancel_task(request_id, params, principal)
         return _rpc_error(request_id, -32601, f"Method not found: {method}")
 
-    def _send_message(self, request_id: object, params: dict[str, object]) -> JSONResponse:
+    def _owned_task(self, task_id: str, principal: str) -> AgentTask | None:
+        """The task iff it exists AND belongs to ``principal``; else None.
+
+        Callers map None to TASK_NOT_FOUND, so "not yours" and "does not
+        exist" are indistinguishable on the wire (no existence oracle).
+        """
+        task = self._tasks.get_task(task_id)
+        if task is None or not hmac.compare_digest(task.owner.encode(), principal.encode()):
+            return None
+        return task
+
+    def _send_message(
+        self, request_id: object, params: dict[str, object], principal: str
+    ) -> JSONResponse:
         message = params.get("message")
         if not isinstance(message, dict):
             return _rpc_error(request_id, -32602, "params.message is required")
@@ -179,6 +209,7 @@ class A2AGateway:
             profile_id=profile_id,
             capability_id=capability_id,
             input_text=text,
+            owner=principal,
             created_at=now,
             updated_at=now,
         )
@@ -188,21 +219,27 @@ class A2AGateway:
             return self._domain_error(request_id, exc)
         return _rpc_result(request_id, {"task": self._task_wire(final.task_id)})
 
-    def _get_task(self, request_id: object, params: dict[str, object]) -> JSONResponse:
+    def _get_task(
+        self, request_id: object, params: dict[str, object], principal: str
+    ) -> JSONResponse:
         task_id = params.get("id")
         if not isinstance(task_id, str) or not task_id:
             return _rpc_error(request_id, -32602, "params.id is required")
-        if self._tasks.get_task(task_id) is None:
+        if self._owned_task(task_id, principal) is None:
             return _rpc_error(request_id, -32001, f"Task not found: {task_id}")
         history_length = params.get("historyLength")
         limit = history_length if isinstance(history_length, int) and history_length >= 0 else None
         return _rpc_result(request_id, {"task": self._task_wire(task_id, history_limit=limit)})
 
-    def _cancel_task(self, request_id: object, params: dict[str, object]) -> JSONResponse:
+    def _cancel_task(
+        self, request_id: object, params: dict[str, object], principal: str
+    ) -> JSONResponse:
         task_id = params.get("id")
         if not isinstance(task_id, str) or not task_id:
             return _rpc_error(request_id, -32602, "params.id is required")
-        task = self._tasks.get_task(task_id)
+        # Ownership BEFORE the terminal check: -32002 on a foreign task would
+        # confirm it exists.
+        task = self._owned_task(task_id, principal)
         if task is None:
             return _rpc_error(request_id, -32001, f"Task not found: {task_id}")
         if is_terminal(task.status):
@@ -265,21 +302,65 @@ class A2AGateway:
         return _rpc_error(request_id, -32602, exc.code.value)
 
 
-def _configured_token(request: Request, token: str | None) -> str:
-    """Explicit router token, else the app container's ``a2a_token`` ("" = open)."""
-    if token is not None:
-        return token
-    container = getattr(request.app.state, "container", None)
-    return str(getattr(getattr(container, "settings", None), "a2a_token", "") or "")
+def _configured_credentials(
+    request: Request, token: str | None, principals: dict[str, str] | None
+) -> tuple[bool, list[tuple[str, str]]]:
+    """``(auth_required, [(principal, token), ...])`` for this request.
+
+    Explicit router arguments win (either one given = both explicit); else the
+    app container's ``a2a_token`` / ``a2a_principals``. Auth is required as
+    soon as ANY non-empty token is configured. Empty tokens never match
+    (``"Bearer "`` must not authenticate), and a configured principal named
+    ``anonymous`` never matches either — that name is reserved for the
+    unauthenticated mode and pre-0015 rows, so it can never be claimed.
+    """
+    if token is not None or principals is not None:
+        single, named = token or "", dict(principals or {})
+    else:
+        settings = getattr(getattr(request.app.state, "container", None), "settings", None)
+        single = str(getattr(settings, "a2a_token", "") or "")
+        named = dict(getattr(settings, "a2a_principals", None) or {})
+    required = bool(single) or any(named.values())
+    credentials = [
+        (str(p), str(t)) for p, t in named.items() if t and str(p) != ANONYMOUS_PRINCIPAL
+    ]
+    if single:
+        credentials.append((DEFAULT_PRINCIPAL, single))
+    return required, credentials
 
 
-def create_a2a_router(gateway: A2AGateway, *, token: str | None = None) -> APIRouter:
+def _resolve_principal(authorization: str, credentials: list[tuple[str, str]]) -> str | None:
+    """The principal whose token the bearer matches, else None.
+
+    Constant-time per token and NO early exit: every configured token is
+    compared on every request, so response timing does not reveal which (or
+    how many) principals exist or where a match sits in the list. A token
+    shared by two different principals is ambiguous ownership → None
+    (fail-closed, 401).
+    """
+    presented = authorization.encode()
+    matched: set[str] = set()
+    for principal, expected in credentials:
+        if hmac.compare_digest(presented, f"Bearer {expected}".encode()):
+            matched.add(principal)
+    return next(iter(matched)) if len(matched) == 1 else None
+
+
+def create_a2a_router(
+    gateway: A2AGateway,
+    *,
+    token: str | None = None,
+    principals: dict[str, str] | None = None,
+) -> APIRouter:
     """HTTP surface: the well-known Agent Card + one JSON-RPC endpoint.
 
-    ``/a2a`` requires ``Authorization: Bearer <token>`` when a token is
-    configured (``token`` here, else ``ACI_A2A_TOKEN`` via the app
-    container); empty = UNAUTHENTICATED, localhost-only by deployment. The
-    Agent Card stays public (discovery).
+    ``/a2a`` requires ``Authorization: Bearer <token>`` when any token is
+    configured (``token``/``principals`` here, else ``ACI_A2A_TOKEN`` /
+    ``ACI_A2A_PRINCIPALS`` via the app container). The matched token names
+    the caller's principal (``a2a_token`` = "default"), which owns the tasks
+    it creates. No token configured = UNAUTHENTICATED, principal
+    "anonymous", localhost-only by deployment. The Agent Card stays public
+    (discovery).
     """
     router = APIRouter()
 
@@ -289,12 +370,13 @@ def create_a2a_router(gateway: A2AGateway, *, token: str | None = None) -> APIRo
 
     @router.post("/a2a")
     async def rpc(request: Request) -> JSONResponse:
-        expected = _configured_token(request, token)
-        if expected:
-            presented = request.headers.get("Authorization", "").encode()
-            # Constant-time compare: != leaks the match position via timing.
-            if not hmac.compare_digest(presented, f"Bearer {expected}".encode()):
+        required, credentials = _configured_credentials(request, token, principals)
+        principal = ANONYMOUS_PRINCIPAL
+        if required:
+            resolved = _resolve_principal(request.headers.get("Authorization", ""), credentials)
+            if resolved is None:
                 return _rpc_error(None, _UNAUTHORIZED, "Unauthorized", status=401)
+            principal = resolved
         try:
             body = await request.json()
         except Exception:
@@ -310,6 +392,8 @@ def create_a2a_router(gateway: A2AGateway, *, token: str | None = None) -> APIRo
             return _rpc_error(body["id"], -32602, "method and params are required")
         # dispatch is sync and may block for minutes (model HTTP call, DB):
         # run it off the event loop so one delegation cannot stall the server.
-        return await run_in_threadpool(gateway.dispatch, body["id"], method, params)
+        return await run_in_threadpool(
+            gateway.dispatch, body["id"], method, params, principal=principal
+        )
 
     return router

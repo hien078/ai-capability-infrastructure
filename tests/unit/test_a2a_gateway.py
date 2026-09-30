@@ -205,7 +205,12 @@ class ForeignOutputExecutor:
         )
 
 
-def _app(executor: Any = None, *, token: str | None = None) -> tuple[FastAPI, FakeTasks]:
+def _app(
+    executor: Any = None,
+    *,
+    token: str | None = None,
+    principals: dict[str, str] | None = None,
+) -> tuple[FastAPI, FakeTasks]:
     tasks = FakeTasks()
     releases = FakeReleases()
     releases.add(
@@ -231,7 +236,7 @@ def _app(executor: Any = None, *, token: str | None = None) -> tuple[FastAPI, Fa
         service_url="http://testserver",
     )
     app = FastAPI()
-    app.include_router(create_a2a_router(gateway, token=token))
+    app.include_router(create_a2a_router(gateway, token=token, principals=principals))
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -240,8 +245,13 @@ def _app(executor: Any = None, *, token: str | None = None) -> tuple[FastAPI, Fa
     return app, tasks
 
 
-def _client(executor: Any = None, *, token: str | None = None) -> tuple[TestClient, FakeTasks]:
-    app, tasks = _app(executor, token=token)
+def _client(
+    executor: Any = None,
+    *,
+    token: str | None = None,
+    principals: dict[str, str] | None = None,
+) -> tuple[TestClient, FakeTasks]:
+    app, tasks = _app(executor, token=token, principals=principals)
     return TestClient(app), tasks
 
 
@@ -419,3 +429,136 @@ def test_domain_error_text_never_reaches_the_wire() -> None:
     body = _send(client).json()
     assert body["error"] == {"code": -32602, "message": "EXECUTOR_CONTRACT_VIOLATION"}
     assert "SECRET" not in str(body)
+
+
+# -- principal isolation ------------------------------------------------------
+
+PRINCIPALS = {"alice": "tok-alice", "bob": "tok-bob"}
+
+
+def _bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _call(client: TestClient, method: str, task_id: str, token: str | None) -> Any:
+    return client.post(
+        "/a2a",
+        json={"jsonrpc": "2.0", "id": 9, "method": method, "params": {"id": task_id}},
+        headers=_bearer(token) if token is not None else None,
+    )
+
+
+def _seed_working(tasks: FakeTasks, owner: str) -> str:
+    task = AgentTask(
+        task_id=f"task-{owner}-working",
+        profile_id="reviewer",
+        capability_id="code-reviewer-agent",
+        input_text="owner-only input",
+        owner=owner,
+        status="working",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    tasks.put_task(task)
+    return task.task_id
+
+
+def test_send_message_stamps_the_authenticated_principal_as_owner() -> None:
+    client, tasks = _client(principals=PRINCIPALS)
+    task_id = _send(client, headers=_bearer("tok-alice")).json()["result"]["task"]["id"]
+    assert tasks.tasks[task_id].owner == "alice"
+    assert "owner" not in str(_call(client, "GetTask", task_id, "tok-alice").json())
+
+
+def test_foreign_get_task_is_indistinguishable_from_unknown_id() -> None:
+    client, tasks = _client(principals=PRINCIPALS)
+    task_id = _send(client, headers=_bearer("tok-alice")).json()["result"]["task"]["id"]
+
+    foreign = _call(client, "GetTask", task_id, "tok-bob")
+    unknown = _call(client, "GetTask", "task-does-not-exist", "tok-bob")
+    assert foreign.status_code == unknown.status_code == 200
+    assert foreign.json()["error"] == {"code": -32001, "message": f"Task not found: {task_id}"}
+    assert unknown.json()["error"] == {
+        "code": -32001,
+        "message": "Task not found: task-does-not-exist",
+    }
+    assert "result" not in foreign.json() and "Review PR" not in foreign.text
+    # the owner still reads its own task
+    assert _call(client, "GetTask", task_id, "tok-alice").json()["result"]["task"]["id"] == task_id
+
+
+def test_foreign_cancel_is_not_found_and_leaves_the_task_alone() -> None:
+    client, tasks = _client(principals=PRINCIPALS)
+    working = _seed_working(tasks, "alice")
+
+    foreign = _call(client, "CancelTask", working, "tok-bob").json()
+    # -32001, not -32002: "not cancelable" would confirm the id exists.
+    assert foreign["error"] == {"code": -32001, "message": f"Task not found: {working}"}
+    assert tasks.tasks[working].status == "working"
+
+    own = _call(client, "CancelTask", working, "tok-alice").json()
+    assert own["result"]["task"]["status"]["state"] == "TASK_STATE_CANCELED"
+    assert tasks.tasks[working].status == "canceled"
+    assert tasks.tasks[working].owner == "alice"
+
+
+def test_foreign_terminal_task_cancel_is_not_found_not_uncancelable() -> None:
+    client, _ = _client(principals=PRINCIPALS)
+    done = _send(client, headers=_bearer("tok-alice")).json()["result"]["task"]["id"]
+    assert _call(client, "CancelTask", done, "tok-bob").json()["error"]["code"] == -32001
+    assert _call(client, "CancelTask", done, "tok-alice").json()["error"]["code"] == -32002
+
+
+def test_a2a_token_alone_is_principal_default() -> None:
+    client, tasks = _client(token="solo")
+    task_id = _send(client, headers=_bearer("solo")).json()["result"]["task"]["id"]
+    assert tasks.tasks[task_id].owner == "default"
+
+
+def test_token_and_principals_coexist() -> None:
+    client, tasks = _client(token="solo", principals=PRINCIPALS)
+    mine = _send(client, headers=_bearer("solo")).json()["result"]["task"]["id"]
+    theirs = _send(client, headers=_bearer("tok-bob")).json()["result"]["task"]["id"]
+    assert (tasks.tasks[mine].owner, tasks.tasks[theirs].owner) == ("default", "bob")
+    assert _call(client, "GetTask", theirs, "solo").json()["error"]["code"] == -32001
+
+
+def test_unauthenticated_mode_owner_is_anonymous() -> None:
+    client, tasks = _client()
+    task_id = _send(client).json()["result"]["task"]["id"]
+    assert tasks.tasks[task_id].owner == "anonymous"
+    assert _call(client, "GetTask", task_id, None).json()["result"]["task"]["id"] == task_id
+    # An anonymous caller cannot reach a named principal's task either.
+    other = _seed_working(tasks, "alice")
+    assert _call(client, "GetTask", other, None).json()["error"]["code"] == -32001
+
+
+def test_principals_wrong_or_missing_bearer_is_401() -> None:
+    client, tasks = _client(principals=PRINCIPALS)
+    for headers in (None, _bearer("tok-carol"), {"Authorization": "tok-alice"}, _bearer("")):
+        response = _send(client, headers=headers)
+        assert response.status_code == 401
+        assert response.json()["error"] == {"code": -32000, "message": "Unauthorized"}
+        assert "tok-" not in response.text and "alice" not in response.text
+    assert tasks.tasks == {}
+
+
+def test_empty_token_principal_never_authenticates() -> None:
+    """A principal configured with an empty token must not match 'Bearer '."""
+    client, _ = _client(principals={"alice": "tok-alice", "ghost": ""})
+    assert _send(client, headers={"Authorization": "Bearer "}).status_code == 401
+    assert _send(client).status_code == 401
+
+
+def test_reserved_anonymous_principal_cannot_be_claimed() -> None:
+    """'anonymous' owns unauthenticated-mode and pre-0015 tasks; a configured
+    principal of that name must never authenticate as it."""
+    client, tasks = _client(principals={"anonymous": "tok-anon", "alice": "tok-alice"})
+    legacy = _seed_working(tasks, "anonymous")
+    assert _call(client, "GetTask", legacy, "tok-anon").status_code == 401
+    assert _call(client, "GetTask", legacy, "tok-alice").json()["error"]["code"] == -32001
+
+
+def test_shared_token_between_principals_is_ambiguous_401() -> None:
+    client, _ = _client(principals={"alice": "same", "bob": "same"})
+    assert _send(client, headers=_bearer("same")).status_code == 401

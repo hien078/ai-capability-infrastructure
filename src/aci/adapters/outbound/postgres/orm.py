@@ -354,6 +354,8 @@ class AgentTaskRow(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # A2A principal that created the task (0015); pre-0015 rows are 'anonymous'.
+    owner: Mapped[str] = mapped_column(Text, nullable=False, server_default="anonymous")
 
 
 class TaskMessageRow(Base):
