@@ -113,7 +113,9 @@ class SourceRecordRow(Base):
     version: Mapped[str] = mapped_column(Text, nullable=False)
     #: Ingestion state machine (§22): quarantined/rejected/normalized/accepted.
     #: NOT a release channel — trust state lives on the provenance record.
-    ingestion_status: Mapped[str] = mapped_column(Text, nullable=False, default="quarantined")
+    ingestion_status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="quarantined", server_default="quarantined"
+    )
     source_type: Mapped[str] = mapped_column(Text, nullable=False)
     source_repository: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     source_path: Mapped[str] = mapped_column(Text, nullable=False)
@@ -352,6 +354,8 @@ class AgentTaskRow(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # A2A principal that created the task (0015); pre-0015 rows are 'anonymous'.
+    owner: Mapped[str] = mapped_column(Text, nullable=False, server_default="anonymous")
 
 
 class TaskMessageRow(Base):

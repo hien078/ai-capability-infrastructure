@@ -89,6 +89,9 @@ class FakeCapabilities:
     def get_version(self, capability_id: str, version: str) -> CapabilityVersion | None:
         return self.versions.get((capability_id, version))
 
+    def get_versions(self, pairs: list[tuple[str, str]]) -> list[CapabilityVersion]:
+        return [v for (p, v) in self.versions.items() if p in pairs]
+
 
 class FakeArtifacts:
     def __init__(self, artifacts: dict[tuple[str, str], CapabilityArtifact]) -> None:
@@ -96,6 +99,9 @@ class FakeArtifacts:
 
     def get_artifact(self, capability_id: str, version: str) -> CapabilityArtifact | None:
         return self.artifacts.get((capability_id, version))
+
+    def get_artifacts(self, pairs: list[tuple[str, str]]) -> list[CapabilityArtifact]:
+        return [a for (p, a) in self.artifacts.items() if p in pairs]
 
 
 class FakeObjects:

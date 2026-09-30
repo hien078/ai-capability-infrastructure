@@ -14,8 +14,8 @@ Two stages, both ending in PROPOSALS (never capabilities):
    LOW boundary confidence (the LLM detector refines these later).
 """
 
+import hashlib
 import re
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -67,9 +67,10 @@ def find_artifact_groups(
         rel = file.relative_to(tree).as_posix()
         if not file.is_file() or not _is_artifact(rel):
             continue
-        import hashlib
-
-        digest = hashlib.sha256(file.read_bytes()).hexdigest()
+        try:
+            digest = hashlib.sha256(file.read_bytes()).hexdigest()
+        except OSError:
+            continue  # one unreadable file never aborts the whole scan
         directory = rel.rsplit("/", 1)[0] if "/" in rel else ""
         groups.setdefault(directory, []).append(ArtifactFileRef(path=rel, sha256=digest))
 
@@ -107,7 +108,9 @@ class BoundaryDetector(Protocol):
 
     detector_version: str
 
-    def detect(self, group: ArtifactGroup, *, now: datetime) -> list[RawCandidate]: ...
+    def detect(
+        self, group: ArtifactGroup, *, tree: Path | None = None, now: datetime | None = None
+    ) -> list[RawCandidate]: ...
 
 
 class HeuristicBoundaryDetector:
@@ -122,10 +125,6 @@ class HeuristicBoundaryDetector:
     """
 
     detector_version = "heuristic-boundary-detector:1.0.0"
-
-    def __init__(self, *, read: Callable[[Path, str], str] | None = None) -> None:
-        # read(tree_root, rel_path) -> file text; injectable for tests.
-        self._read = read or _default_read
 
     def detect(
         self, group: ArtifactGroup, *, tree: Path | None = None, now: datetime | None = None
@@ -167,10 +166,6 @@ class HeuristicBoundaryDetector:
                 )
             )
         return out
-
-
-def _default_read(tree: Path, rel: str) -> str:
-    return (tree / rel).read_text(encoding="utf-8", errors="replace")
 
 
 def _capability_name(path: str) -> str:

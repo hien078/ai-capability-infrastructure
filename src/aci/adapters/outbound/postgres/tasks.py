@@ -29,6 +29,7 @@ class SqlAlchemyTaskRepository:
                     status=task.status,
                     created_at=task.created_at,
                     updated_at=task.updated_at,
+                    owner=task.owner,
                 )
             )
         return task
@@ -47,6 +48,7 @@ class SqlAlchemyTaskRepository:
                     "status": row.status,
                     "created_at": row.created_at,
                     "updated_at": row.updated_at,
+                    "owner": row.owner,
                 }
             )
 

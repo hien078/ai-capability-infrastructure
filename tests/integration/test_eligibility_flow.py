@@ -75,6 +75,7 @@ def ctx() -> RoutingRequestContext:
     return RoutingRequestContext(
         client=ClientDescriptor(type="opencode", supported_features=["skills"]),
         scope=ScopeContext(principal_id="p-1", organization_id="org-1", workspace_id="ws-1"),
+        request_id="req-1",
     )
 
 

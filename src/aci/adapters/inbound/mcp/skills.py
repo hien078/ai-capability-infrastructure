@@ -149,10 +149,31 @@ class SkillCatalog:
         self._objects = objects
 
     def entries(self) -> list[SkillEntry]:
-        """All exposed skills — one atomic page (V1 serves the full set)."""
+        """All exposed skills — one atomic page (V1 serves the full set).
+
+        Batch reads (one query per kind, not per release) — the catalog
+        page is the hot path for every MCP client listing skills.
+        """
+        releases = self._releases.list_channel("production", status="active")
+        versions = {
+            v.capability_id: v
+            for v in self._capabilities.get_versions(
+                [(r.capability_id, r.version) for r in releases]
+            )
+        }
+        artifacts = {
+            a.capability_id: a
+            for a in self._artifacts.get_artifacts([(r.capability_id, r.version) for r in releases])
+        }
         out: list[SkillEntry] = []
-        for release in self._releases.list_channel("production", status="active"):
-            entry = self._entry(release)
+        for release in releases:
+            version = versions.get(release.capability_id)
+            if version is None or version.kind != "skill":
+                continue
+            artifact = artifacts.get(release.capability_id)
+            if artifact is None:
+                continue
+            entry = self._entry_of(release, artifact)
             if entry is not None:
                 out.append(entry)
         return out
@@ -216,6 +237,12 @@ class SkillCatalog:
         artifact = self._artifact(release)
         if artifact is None:
             return None
+        return self._entry_of(release, artifact)
+
+    def _entry_of(
+        self, release: CapabilityRelease, artifact: CapabilityArtifact
+    ) -> SkillEntry | None:
+        """Entry from an already-loaded artifact (the batch path)."""
         entry_file = next((f for f in artifact.files if f.path == "SKILL.md"), None)
         if entry_file is None:
             return None

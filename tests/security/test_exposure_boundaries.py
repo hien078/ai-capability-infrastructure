@@ -210,6 +210,7 @@ def test_cross_workspace_access_blocked() -> None:
             {
                 "client": {"type": "test", "supported_features": ["skills"]},
                 "scope": {"principal_id": "p-1", "workspace_id": workspace_id},
+                "request_id": "req-1",
             }
         )
 

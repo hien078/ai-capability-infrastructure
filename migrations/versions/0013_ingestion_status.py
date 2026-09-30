@@ -14,6 +14,13 @@ The `raw` release channel conflated two state machines: ingestion trust
    `raw` pointers were quarantine markers; the equivalent state is now
    `ingestion_status='quarantined'` on the source record.
 
+Downgrade is LOSSY. The upgrade's DELETE discards the raw rows' status,
+promoted_at, approved_by and policy_snapshot_id; the downgrade can only
+reconstruct one raw pointer per capability from `source_records`
+(status='active', NULL promoted_at/approved_by/policy_snapshot_id). When a
+capability has several quarantined versions, the newest one (by
+`ingested_at`) wins — raw's PK is (capability_id, channel).
+
 `candidate`/`canonical` channels were never populated in this database
 (the promotion service only ever wrote raw/production). The domain
 ReleaseChannel type is now Literal['staging', 'production'].
@@ -54,14 +61,23 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Restore the legacy raw pointers for still-quarantined records.
+    # Restore the legacy raw pointers for still-quarantined records (lossy —
+    # see module docstring). One raw row per capability (PK is
+    # (capability_id, channel)): policy choice — the newest quarantined
+    # version wins. The join skips records whose version row is gone (FK).
     op.execute(
         """
         INSERT INTO capability_releases
             (capability_id, channel, version, status, promoted_at, approved_by,
              policy_snapshot_id)
-        SELECT capability_id, 'raw', version, 'active', NULL, NULL, NULL
-        FROM source_records WHERE ingestion_status = 'quarantined'
+        SELECT DISTINCT ON (sr.capability_id)
+               sr.capability_id, 'raw', sr.version, 'active', NULL, NULL, NULL
+        FROM source_records sr
+        JOIN capability_versions cv
+          ON cv.capability_id = sr.capability_id AND cv.version = sr.version
+        WHERE sr.ingestion_status = 'quarantined'
+        ORDER BY sr.capability_id, sr.ingested_at DESC, sr.record_id DESC
+        ON CONFLICT (capability_id, channel) DO NOTHING
         """
     )
     op.drop_column("source_records", "ingestion_status")

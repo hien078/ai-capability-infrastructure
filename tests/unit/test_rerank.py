@@ -47,6 +47,7 @@ def context() -> RoutingRequestContext:
         {
             "client": {"type": "opencode", "supported_features": ["skills"]},
             "scope": {"principal_id": "p-1"},
+            "request_id": "req-1",
         }
     )
 

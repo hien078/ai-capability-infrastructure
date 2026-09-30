@@ -1,5 +1,6 @@
 """App entry: health/readiness (Phase 1) + REST runtime API (Phase 9, §43)
-+ OpenCode skill catalog (Phase 10, §28.2, ADR-005)."""
++ OpenCode skill catalog (Phase 10, §28.2, ADR-005) + A2A protocol gateway
+(V3-4 §56: agent card + JSON-RPC task lifecycle)."""
 
 import logging
 from collections.abc import AsyncIterator
@@ -12,6 +13,7 @@ from starlette.staticfiles import StaticFiles
 
 from aci.adapters.inbound.a2a.gateway import A2AGateway, create_a2a_router
 from aci.adapters.inbound.opencode import catalog as opencode_catalog
+from aci.adapters.inbound.rest import agent_runs as rest_agent_runs
 from aci.adapters.inbound.rest import bundles as rest_bundles
 from aci.adapters.inbound.rest import capabilities as rest_capabilities
 from aci.adapters.inbound.rest import evaluations as rest_evaluations
@@ -46,6 +48,7 @@ def create_app(container: Container | None = None) -> FastAPI:
     app.include_router(rest_bundles.router)
     app.include_router(rest_outcomes.router)
     app.include_router(rest_evaluations.router)
+    app.include_router(rest_agent_runs.router)
     app.include_router(rest_ui.router)
     app.include_router(opencode_catalog.router)
     app.mount(

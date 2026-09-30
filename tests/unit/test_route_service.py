@@ -174,7 +174,9 @@ def test_route_runs_pipeline_and_persists_telemetry() -> None:
     result = service.route(
         RouteCapabilitiesCommand(task_text="debug python tracebacks"),
         RoutingRequestContext(
-            client=ClientDescriptor(type="rest-client"), scope=ScopeContext(principal_id="p-1")
+            client=ClientDescriptor(type="rest-client"),
+            scope=ScopeContext(principal_id="p-1"),
+            request_id="req_1",
         ),
         request=request_context(),
         now=NOW,
@@ -226,7 +228,9 @@ def test_route_uses_latest_policy_snapshot() -> None:
     result = service.route(
         RouteCapabilitiesCommand(task_text="debug python"),
         RoutingRequestContext(
-            client=ClientDescriptor(type="rest-client"), scope=ScopeContext(principal_id="p-1")
+            client=ClientDescriptor(type="rest-client"),
+            scope=ScopeContext(principal_id="p-1"),
+            request_id="req_1",
         ),
         request=request_context(),
         now=NOW,
@@ -251,7 +255,9 @@ def test_route_policy_rules_exclude_low_trust() -> None:
     result = service.route(
         RouteCapabilitiesCommand(task_text="debug python"),
         RoutingRequestContext(
-            client=ClientDescriptor(type="rest-client"), scope=ScopeContext(principal_id="p-1")
+            client=ClientDescriptor(type="rest-client"),
+            scope=ScopeContext(principal_id="p-1"),
+            request_id="req_1",
         ),
         request=request_context(),
         now=NOW,
@@ -272,7 +278,9 @@ def test_route_disallowed_kind_excluded_before_retrieval() -> None:
     result = service.route(
         RouteCapabilitiesCommand(task_text="debug python", allowed_kinds=["skill"]),
         RoutingRequestContext(
-            client=ClientDescriptor(type="rest-client"), scope=ScopeContext(principal_id="p-1")
+            client=ClientDescriptor(type="rest-client"),
+            scope=ScopeContext(principal_id="p-1"),
+            request_id="req_1",
         ),
         request=request_context(),
         now=NOW,
@@ -292,7 +300,9 @@ def test_route_empty_registry_is_valid_success() -> None:
     result = service.route(
         RouteCapabilitiesCommand(task_text="anything"),
         RoutingRequestContext(
-            client=ClientDescriptor(type="rest-client"), scope=ScopeContext(principal_id="p-1")
+            client=ClientDescriptor(type="rest-client"),
+            scope=ScopeContext(principal_id="p-1"),
+            request_id="req_1",
         ),
         request=request_context(),
         now=NOW,

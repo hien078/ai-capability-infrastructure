@@ -18,10 +18,12 @@ ensemble (§18) — never production directly.
 """
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
 
 #: §11.2 context budget: files selected for deep analysis.
 MAX_CONTEXT_FILES = 25
@@ -53,7 +55,7 @@ def map_repository(tree: Path) -> dict[str, Any]:
         if not f.is_file():
             continue
         rel = f.relative_to(tree).as_posix()
-        if any(part in (".git", "__pycache__", "node_modules", ".venf") for part in rel.split("/")):
+        if any(part in (".git", "__pycache__", "node_modules") for part in rel.split("/")):
             continue
         if any(part.startswith(".venv") for part in rel.split("/")):
             continue
@@ -188,6 +190,7 @@ class ArchitectureAnalyst:
             headers=headers,
             timeout=180,
         )
+        resp.raise_for_status()
         data, _ = json.JSONDecoder().raw_decode(resp.text.lstrip())
         content = data["choices"][0]["message"]["content"]
         return str(content)
@@ -202,6 +205,11 @@ class CapabilityMiner:
         self._model = model
 
     def mine(self, selected: list[dict[str, str]]) -> list[dict[str, Any]]:
+        """Mine capabilities; every output is validated through the
+        MinedCapability domain contract (§12.2) — raw dicts that violate
+        the schema raise, they never flow downstream silently."""
+        from aci.domain.acquisition.demand import MinedCapability
+
         user = "\n".join(
             f"=== FILE: {f['path']} ===\n{f['content']}" for f in selected[:MAX_CONTEXT_FILES]
         )
@@ -210,7 +218,28 @@ class CapabilityMiner:
             data, _ = json.JSONDecoder().raw_decode(_strip_fence(raw))
             if not isinstance(data, list):
                 raise RepositoryUnderstandingError("miner returned a non-array")
-            return list(data)
+            validated: list[dict[str, Any]] = []
+            for i, item in enumerate(data):
+                if not isinstance(item, dict):
+                    raise RepositoryUnderstandingError(f"miner item {i} is not an object")
+                m = item
+                if not m.get("mined_id"):
+                    m = {**item, "mined_id": f"mine-{self.miner_version.split(':')[0]}-{i:03d}"}
+                if not m.get("mined_at"):
+                    m = {**m, "mined_at": datetime.now(UTC).isoformat()}
+                if not m.get("mined_by"):
+                    m = {**m, "mined_by": self.miner_version}
+                # source_refs is NEVER defaulted: grounding the miner did
+                # not claim would fabricate evidence (§60.9) — a missing
+                # source_refs raises through the contract below.
+                try:
+                    cap = MinedCapability.model_validate(m)
+                except ValidationError as exc:
+                    raise RepositoryUnderstandingError(
+                        f"miner item {i} violates the MinedCapability contract: {exc}"
+                    ) from exc
+                validated.append(cap.model_dump())
+            return validated
         except json.JSONDecodeError as exc:
             raise RepositoryUnderstandingError(f"unparseable mining output: {exc}") from exc
 
@@ -230,6 +259,7 @@ class CapabilityMiner:
             headers=headers,
             timeout=180,
         )
+        resp.raise_for_status()
         data, _ = json.JSONDecoder().raw_decode(resp.text.lstrip())
         content = data["choices"][0]["message"]["content"]
         return str(content)

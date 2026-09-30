@@ -1,4 +1,5 @@
 """Alembic environment. Migrations from day one (plan §41)."""
+
 import os
 import sys
 from logging.config import fileConfig
@@ -7,9 +8,11 @@ from alembic import context
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from aci.adapters.outbound.postgres.base import Base  # noqa: E402
+from aci.adapters.outbound import (
+    pgvector as _pgvector_orm,  # noqa: E402,F401  # register vector tables
+)
 from aci.adapters.outbound.postgres import orm as _orm  # noqa: E402,F401  # register tables
-from aci.adapters.outbound import pgvector as _pgvector_orm  # noqa: E402,F401  # register vector tables
+from aci.adapters.outbound.postgres.base import Base  # noqa: E402
 
 config = context.config
 if config.config_file_name is not None:
@@ -32,7 +35,11 @@ def _database_url() -> str:
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=_database_url(), target_metadata=target_metadata, literal_binds=True
+        url=_database_url(),
+        target_metadata=target_metadata,
+        literal_binds=True,
+        compare_type=True,
+        compare_server_default=True,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -43,7 +50,12 @@ def run_migrations_online() -> None:
 
     engine = create_engine(_database_url())
     with engine.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            compare_server_default=True,
+        )
         with context.begin_transaction():
             context.run_migrations()
 

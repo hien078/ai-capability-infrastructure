@@ -14,6 +14,7 @@ and never leaves a task stuck.
 
 import hashlib
 import json
+import logging
 from datetime import datetime
 from uuid import uuid4
 
@@ -57,6 +58,8 @@ instructions where they apply:
 ---
 
 """
+
+log = logging.getLogger(__name__)
 
 
 class OpenAICompatExecutor:
@@ -140,14 +143,19 @@ class OpenAICompatExecutor:
                 client.close()
 
         if response.status_code != 200:
+            # The provider body stays in the server log: task history (and so
+            # the A2A wire) only carries the status (§61).
+            log.warning("model endpoint returned %s: %s", response.status_code, response.text[:300])
             return ExecutorResult(
-                status="failed",
-                detail=f"model endpoint returned {response.status_code}: {response.text[:300]}",
+                status="failed", detail=f"model endpoint returned {response.status_code}"
             )
         try:
             content = self._completion_content(response)
         except (KeyError, IndexError, TypeError, ValueError) as exc:
-            return ExecutorResult(status="failed", detail=f"malformed model response: {exc}")
+            log.warning("malformed model response: %s", exc)
+            return ExecutorResult(
+                status="failed", detail=f"malformed model response ({type(exc).__name__})"
+            )
         if not content.strip():
             return ExecutorResult(status="failed", detail="model returned an empty completion")
         return ExecutorResult(

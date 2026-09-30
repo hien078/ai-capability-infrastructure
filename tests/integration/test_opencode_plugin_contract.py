@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import Engine
 
 from aci.adapters.inbound.rest.wiring import Container
 from aci.config import Settings
@@ -28,9 +29,12 @@ DB_URL = "postgresql+psycopg://aci:aci@localhost:5432/aci"
 
 
 @pytest.fixture()
-def plugin_client(tmp_path: Path) -> TestClient:
+def plugin_client(tmp_path: Path, engine: Engine) -> TestClient:
     """App whose object store matches the ingestion fixture's tmp root, so
-    catalog lazy loads resolve the very blobs this test ingested."""
+    catalog lazy loads resolve the very blobs this test ingested.
+
+    Depends on the conftest ``engine`` fixture so this suite SKIPS (never
+    errors) when PostgreSQL is down — the app talks to the real DB."""
     settings = Settings(database_url=DB_URL, object_store_root=str(tmp_path / "objects"))
     with TestClient(create_app(Container(settings))) as client:
         yield client

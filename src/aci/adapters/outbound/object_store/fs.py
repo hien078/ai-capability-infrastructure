@@ -2,12 +2,16 @@
 
 Keys are SHA-256 hex digests; layout is `<root>/<key[:2]>/<key>`. Writes are
 idempotent: identical content is never rewritten, so ingestion can retry.
+`put` enforces key == sha256(data) and repairs a corrupt object in place.
 """
 
+import hashlib
 import os
 import re
 import tempfile
 from pathlib import Path
+
+from aci.domain.capability.errors import DomainError, ErrorCode
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -23,8 +27,16 @@ class FsObjectStore:
         return self._root / key[:2] / key
 
     def put(self, key: str, data: bytes) -> None:
+        """Store `data` under `key`; raise ARTIFACT_INTEGRITY_ERROR unless
+        sha256(data) == key. An existing object with the right digest is a
+        no-op; a corrupt one is atomically replaced with the verified data."""
         path = self._path(key)
-        if path.exists():
+        if hashlib.sha256(data).hexdigest() != key:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_ERROR,
+                f"object content does not match its key {key}",
+            )
+        if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == key:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         # write via temp file + fsync + atomic rename so readers never see
@@ -43,6 +55,8 @@ class FsObjectStore:
             os.close(dir_fd)
 
     def get(self, key: str) -> bytes | None:
+        """Raw stored bytes, unverified: every reader re-checks the digest
+        itself, and ingestion's repair path must see corrupt bytes to fix them."""
         path = self._path(key)
         if not path.exists():
             return None

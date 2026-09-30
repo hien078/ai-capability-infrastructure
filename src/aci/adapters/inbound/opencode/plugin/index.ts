@@ -16,6 +16,10 @@
  * admission metadata under `aci` so the client can report real evidence via
  * POST /v1/outcomes when the work finishes.
  *
+ * Auth: when the platform sets ACI_API_TOKEN, export the same value as
+ * ACI_API_TOKEN in OpenCode's environment; the plugin then sends
+ * `Authorization: Bearer <token>` (and no header when it is unset).
+ *
  * Install: see README.md. Verified against @opencode/plugin@2 (§77):
  * `ctx.session.hook("prompt", …)` receives a mutable draft whose
  * `prompt.skills` entries are `{ id }` (Skill.ID) and follow normal
@@ -61,6 +65,12 @@ const DEFAULTS = {
   failClosed: false,
 }
 
+/** Bearer header from ACI_API_TOKEN; empty when unset (unauthenticated mode). */
+function authHeaders(): Record<string, string> {
+  const token = process.env.ACI_API_TOKEN
+  return token ? { authorization: `Bearer ${token}` } : {}
+}
+
 /** Options after defaults are applied. */
 type ResolvedOptions = RouterOptions & typeof DEFAULTS
 
@@ -73,7 +83,7 @@ async function routeCapabilities(
   try {
     const response = await fetch(new URL("/v1/routes", options.baseUrl), {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...authHeaders() },
       signal: controller.signal,
       body: JSON.stringify({
         task: { text: taskText },

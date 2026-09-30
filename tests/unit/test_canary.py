@@ -114,3 +114,16 @@ def test_canary_exclusion_is_traceable() -> None:
         if decision.excluded:
             excluded_ids.add(decision.excluded[0].reason)
     assert excluded_ids <= {"CAPABILITY_NOT_ELIGIBLE"}
+
+
+def test_canary_without_percent_is_fail_closed() -> None:
+    """§27: a canary release missing its percentage is a broken record —
+    it routes NOTHING (fail-closed), never full traffic."""
+    policy = DefaultEligibilityPolicy()
+    rules = PolicyRules()
+    for i in range(20):
+        decision = policy.filter(
+            [_candidate("canary", None)], _context(f"req-{i}"), rules, allowed_kinds=["skill"]
+        )
+        assert len(decision.kept) == 0
+        assert "fail-closed" in decision.excluded[0].detail

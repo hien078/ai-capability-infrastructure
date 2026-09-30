@@ -5,9 +5,11 @@ from pydantic import ValidationError
 
 from aci.domain.capability.models import Compatibility
 from aci.domain.policy.models import (
+    ClientDescriptor,
     EligibleCandidate,
     PolicyRules,
     RoutingRequestContext,
+    ScopeContext,
 )
 from aci.domain.taxonomy.models import validate_facets
 from aci.routing.eligibility import DefaultEligibilityPolicy
@@ -32,6 +34,7 @@ def context(**overrides: object) -> RoutingRequestContext:
     base: dict = {
         "client": {"type": "opencode", "supported_features": ["skills"]},
         "scope": {"principal_id": "p-1", "organization_id": "org-1", "workspace_id": "ws-1"},
+        "request_id": "req-1",
     }
     base.update(overrides)
     return RoutingRequestContext.model_validate(base)
@@ -287,3 +290,32 @@ def test_capability_version_rejects_bad_facets() -> None:
             facets={"unknown-facet": ["x"]},
             spec=SkillSpec(),
         )
+
+
+def test_supported_clients_any_wildcard_routes_every_client() -> None:
+    """§48: a version declaring supported_clients=["any"] is compatible
+    with EVERY client at routing time — the same semantics as
+    evaluate_compatibility (the two must never drift apart)."""
+    policy = DefaultEligibilityPolicy()
+    rules = PolicyRules()
+    for client_type in ("opencode", "mcp", "rest", "web-app"):
+        candidate = EligibleCandidate(
+            capability_id="cap-w",
+            version="1.0.0",
+            digest="sha256:" + "a" * 64,
+            kind="skill",
+            channel="production",
+            status="active",
+            compatibility=Compatibility(supported_clients=["any"]),
+        )
+        decision = policy.filter(
+            [candidate],
+            RoutingRequestContext(
+                client=ClientDescriptor(type=client_type),
+                scope=ScopeContext(principal_id="p"),
+                request_id="req-1",
+            ),
+            rules,
+            allowed_kinds=["skill"],
+        )
+        assert len(decision.kept) == 1, client_type

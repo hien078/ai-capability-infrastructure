@@ -268,8 +268,11 @@ def outcome_service(
 
 
 @pytest.fixture()
-def rest_client() -> Iterator[TestClient]:
-    """Second client over plain HTTP (§52 Phase 9 acceptance): no OpenCode."""
+def rest_client(engine: Engine) -> Iterator[TestClient]:
+    """Second client over plain HTTP (§52 Phase 9 acceptance): no OpenCode.
+
+    Depends on ``engine`` so the suite SKIPS (never errors) when
+    PostgreSQL is down — this client talks to the real DB."""
     from aci.main import app  # noqa: PLC0415
 
     with TestClient(app) as client:

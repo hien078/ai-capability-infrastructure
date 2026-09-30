@@ -11,8 +11,10 @@ approve() is the human's call and goes through PromotionService.promote
 — the deterministic pointer move (§25, ADR-012).
 """
 
+import re
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from aci.application.evaluate_compatibility import (
     CompatibilityReport,
@@ -41,7 +43,7 @@ class PromotionProposalBuilder:
         capability_id: str,
         version: str,
         *,
-        benchmark_evidence: dict[str, str] | None = None,
+        benchmark_evidence: dict[str, Any] | None = None,
         now: datetime | None = None,
     ) -> PromotionProposal:
         """Aggregate every evidence source into one proposal (§24).
@@ -95,17 +97,32 @@ class PromotionProposalBuilder:
             )
 
         # Benchmark / regression: caller-supplied evidence, informational
-        # when absent (never faked — §27).
+        # when absent (never faked — §27). A supplied run is a pass/fail
+        # verdict read from the evidence — never an automatic pass.
         bench = benchmark_evidence or {}
+        bench_passed: bool | None = None
+        if bench:
+            verdict = bench.get("passed")
+            if verdict is not None:
+                # callers may pass bool (JSON) or string — both are verdicts
+                bench_passed = str(verdict).lower() not in {"false", "0", "no", "f"}
+            else:
+                # §41 benchmark store shape: "major_regressions: N" (or a
+                # bare count) — 0 = pass, >0 = fail. No verdict field and
+                # no count = informational (None), never a faked pass.
+                reg = bench.get("regression", bench.get("major_regressions", ""))
+                m = re.search(r"major_regressions:?\s*(\d+)", reg)
+                if m:
+                    bench_passed = int(m.group(1)) == 0
         benchmark = ProposalSection(
             name="benchmark",
-            passed=None if not bench else True,
+            passed=bench_passed,
             detail=bench.get("summary", "no benchmark run recorded (informational)"),
             checks=[],
         )
         regression = ProposalSection(
             name="regression",
-            passed=None if not bench else True,
+            passed=bench_passed,
             detail=bench.get("regression", "no regression comparison recorded (informational)"),
             checks=[],
         )

@@ -22,10 +22,11 @@ OpenCode V2 catalog semantics (verified against the V2 docs, §77):
 
 import hashlib
 import re
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Header, Request, Response
 
+from aci.adapters.inbound.rest.auth import verify_bearer
 from aci.application.protocols import (
     ArtifactStore,
     CapabilityRepository,
@@ -45,7 +46,20 @@ _MEDIA_TYPES: dict[str, str] = {
     ".yml": "text/yaml",
 }
 
-router = APIRouter(prefix="/opencode/skills", tags=["opencode-catalog"])
+
+def _require_api_token(
+    request: Request, authorization: Annotated[str | None, Header()] = None
+) -> None:
+    """ACI_API_TOKEN gate: the catalog serves every production skill's bytes.
+    Reads app.state like the handlers below (wiring imports this module)."""
+    verify_bearer(authorization, request.app.state.container.settings.api_token)
+
+
+router = APIRouter(
+    prefix="/opencode/skills",
+    tags=["opencode-catalog"],
+    dependencies=[Depends(_require_api_token)],
+)
 
 
 def _safe_relative(path: str) -> bool:
@@ -73,12 +87,23 @@ class CatalogProjection:
         self._objects = objects
 
     def index(self) -> dict[str, list[dict[str, Any]]]:
+        releases = self._releases.list_channel("production", status="active")
+        versions = {
+            v.capability_id: v
+            for v in self._capabilities.get_versions(
+                [(r.capability_id, r.version) for r in releases]
+            )
+        }
+        artifacts = {
+            a.capability_id: a
+            for a in self._artifacts.get_artifacts([(r.capability_id, r.version) for r in releases])
+        }
         entries: list[dict[str, Any]] = []
-        for release in self._releases.list_channel("production", status="active"):
-            version = self._capabilities.get_version(release.capability_id, release.version)
+        for release in releases:
+            version = versions.get(release.capability_id)
             if version is None or version.kind != "skill":
                 continue
-            artifact = self._artifacts.get_artifact(release.capability_id, release.version)
+            artifact = artifacts.get(release.capability_id)
             if artifact is None:
                 continue
             entries.append(

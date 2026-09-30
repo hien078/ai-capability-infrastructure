@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115",
+  "httpx>=0.27",
   "jinja2>=3.1",
   "pydantic>=2.7",
   "pydantic-settings>=2.0",
@@ -20,9 +21,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8",
+  "pytest-timeout>=2.3",
   "ruff>=0.8",
   "mypy>=1.11",
-  "httpx>=0.27",
   "uvicorn>=0.30",
   "types-pyyaml>=6.0",
 ]
@@ -43,6 +44,12 @@ packages = ["src/aci"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# A hung test (blocking network call, deadlocked subprocess) must fail CI,
+# not stall it. "thread" works everywhere (incl. tests that run their own
+# threads/subprocesses); on expiry it dumps every thread's stack and aborts
+# the run (a hard, visible failure).
+timeout = 300
+timeout_method = "thread"
 markers = [
   "integration: requires live PostgreSQL (docker compose up -d db)",
 ]
@@ -55,9 +62,30 @@ line-length = 100
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
-# 3.12: numpy (a fastembed dependency) ships stubs using `type` statements,
-# which mypy rejects when targeting 3.11. The runtime venv is 3.13.
-python_version = "3.12"
+# The supported floor (requires-python >=3.11); CI runs 3.11 + 3.12 + 3.13.
+python_version = "3.11"
 strict = true
 explicit_package_bases = true
 mypy_path = "src"
+
+[[tool.mypy.overrides]]
+# numpy (pulled in transitively via fastembed) ships .pyi stubs using PEP 695
+# `type` statements, which mypy rejects as a syntax error when targeting 3.11.
+# src/ never imports numpy directly (semantic.py holds the fastembed model as
+# Any), so skip numpy's stubs rather than raise the checked floor to 3.12.
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
+[tool.bandit]
+# Run as `bandit -c pyproject.toml -r src`. Each skip is a reviewed, by-design
+# finding — never add a skip without a justification line here.
+# B404/B603: runtime/workspace.py runs the kernel's workspace commands via
+#   subprocess.Popen with an argv list (never shell=True), a scrubbed env and
+#   a confined cwd; executing that command is the feature, not an injection.
+# B112: providers/security/scanner.py's base64 heuristic treats any decode
+#   failure as "not a payload" and continues — intended.
+# B608 (the one medium, low-confidence hit) is NOT skipped globally: CI runs
+#   bandit at -ii (medium+ confidence), and the only B608 hit (rest/ui.py
+#   /routes) splices a constant WHERE fragment with a bound :principal param.
+skips = ["B404", "B603", "B112"]

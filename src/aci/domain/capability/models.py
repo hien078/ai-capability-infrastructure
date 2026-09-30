@@ -149,7 +149,7 @@ class CapabilityRelease(BaseModel):
     status: ReleaseStatus = "active"
     #: §27 canary: 0-100 percent of eligible traffic that may select this
     #: release while in canary; None = full (active semantics).
-    canary_percent: int | None = None
+    canary_percent: int | None = Field(default=None, ge=0, le=100)
     promoted_at: datetime | None = None
     approved_by: str | None = None
     policy_snapshot_id: str | None = None

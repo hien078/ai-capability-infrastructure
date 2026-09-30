@@ -14,11 +14,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
+from aci.adapters.inbound.rest.auth import api_token, bearer_gate
 from aci.adapters.inbound.rest.schemas import EvaluationRequestIn
 from aci.adapters.inbound.rest.wiring import Container, get_container
 from aci.domain.evaluation.models import EvaluationRubric
 
-router = APIRouter(prefix="/v1/evaluations", tags=["evaluations"])
+router = APIRouter(
+    prefix="/v1/evaluations", tags=["evaluations"], dependencies=[Depends(bearer_gate(api_token))]
+)
 
 
 @router.post("", status_code=201)

@@ -94,3 +94,14 @@ def test_signature_from_mined_only_takes_structural_fields() -> None:
     sig = signature_from_mined(mined)
     assert sig.state_transitions == ["try", "fail", "backoff", "retry"]
     assert not hasattr(sig, "mechanism")  # prose is not on the signature
+
+
+def test_unknown_placeholder_identity_never_shortcircuits_to_1() -> None:
+    """§60.9: two nameless signatures both defaulting to "unknown" must
+    NOT hit the identity shortcut — missing evidence is never a match."""
+    a = signature_from_mined({"name": "unknown"})
+    b = signature_from_mined({"name": "unknown"})
+    a = a.model_copy(update={"mined_id": "unknown"})
+    b = b.model_copy(update={"mined_id": "unknown"})
+    assert signature_similarity(a, b) == 0.0
+    assert dedupe_mechanisms([a, b]) == []

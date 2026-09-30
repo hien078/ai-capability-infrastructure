@@ -1,0 +1,129 @@
+"""Migration round-trips and ORM <-> migration drift, each on a throwaway DB.
+
+Never runs against the shared ``aci`` database: every test creates its own
+``aci_mig_<hex>`` database on the same server and drops it afterwards.
+Skips (via the ``engine`` fixture) when PostgreSQL is down.
+"""
+
+import os
+import uuid
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.engine import make_url
+
+pytestmark = pytest.mark.integration
+
+DB_URL = os.environ.get("ACI_DATABASE_URL", "postgresql+psycopg://aci:aci@localhost:5432/aci")
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture()
+def scratch_db_url(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """A fresh empty database; ``ACI_DATABASE_URL`` points at it (env.py reads it)."""
+    name = f"aci_mig_{uuid.uuid4().hex[:12]}"
+    base = make_url(DB_URL)
+    admin = create_engine(
+        base.set(database="postgres"),
+        isolation_level="AUTOCOMMIT",
+        connect_args={"connect_timeout": 2},
+    )
+    try:
+        with admin.connect() as conn:
+            conn.execute(text(f'CREATE DATABASE "{name}"'))
+    except Exception as exc:  # no CREATEDB privilege etc.
+        admin.dispose()
+        pytest.skip(f"cannot create scratch database: {exc}")
+    url = base.set(database=name).render_as_string(hide_password=False)
+    monkeypatch.setenv("ACI_DATABASE_URL", url)
+    try:
+        yield url
+    finally:
+        with admin.connect() as conn:
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+def _alembic_config() -> Config:
+    # No config file: env.py skips fileConfig (keeps pytest logging intact)
+    # and takes the URL from ACI_DATABASE_URL.
+    cfg = Config()
+    cfg.set_main_option("script_location", str(REPO_ROOT / "migrations"))
+    return cfg
+
+
+def test_downgrade_0013_with_two_quarantined_versions_round_trips(scratch_db_url: str) -> None:
+    cfg = _alembic_config()
+    command.upgrade(cfg, "head")
+
+    eng = create_engine(scratch_db_url)
+    try:
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO capabilities (id, kind, created_at, owner_scope) "
+                    "VALUES ('cap.mig', 'skill', now(), 'global')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO capability_versions (capability_id, version, kind, "
+                    "schema_version, content_digest, created_at, display_name, description, "
+                    "facets, spec) VALUES "
+                    "('cap.mig', '1.0.0', 'skill', 1, 'd1', now(), 'm', 'm', '{}', '{}'), "
+                    "('cap.mig', '1.1.0', 'skill', 1, 'd2', now(), 'm', 'm', '{}', '{}')"
+                )
+            )
+            # ingestion_status omitted on purpose: the server default applies.
+            conn.execute(
+                text(
+                    "INSERT INTO source_records (record_id, capability_id, version, "
+                    "source_type, source_path, raw_snapshot_digest, ingested_at, "
+                    "ingestion_tool_version, local_transformations) VALUES "
+                    "('r-old', 'cap.mig', '1.0.0', 'local', 'p', 's', "
+                    " now() - interval '1 day', 't', '[]'), "
+                    "('r-new', 'cap.mig', '1.1.0', 'local', 'p', 's', now(), 't', '[]')"
+                )
+            )
+            statuses = conn.execute(
+                text("SELECT DISTINCT ingestion_status FROM source_records")
+            ).scalars()
+            assert set(statuses) == {"quarantined"}
+
+        command.downgrade(cfg, "0012")
+
+        with eng.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT channel, version, status FROM capability_releases "
+                    "WHERE capability_id = 'cap.mig'"
+                )
+            ).all()
+        # Exactly one raw pointer; the newest quarantined version wins.
+        assert [tuple(r) for r in rows] == [("raw", "1.1.0", "active")]
+
+        command.upgrade(cfg, "head")
+
+        with eng.connect() as conn:
+            releases = conn.execute(
+                text("SELECT count(*) FROM capability_releases WHERE capability_id = 'cap.mig'")
+            ).scalar_one()
+            statuses = conn.execute(
+                text("SELECT DISTINCT ingestion_status FROM source_records")
+            ).scalars()
+            assert releases == 0
+            assert set(statuses) == {"quarantined"}
+    finally:
+        eng.dispose()
+
+
+def test_orm_matches_migrations_at_head(scratch_db_url: str) -> None:
+    """`alembic check` with env.py's own compare settings: no diffs at head."""
+    cfg = _alembic_config()
+    command.upgrade(cfg, "head")
+    command.check(cfg)  # raises AutogenerateDiffsDetected on any drift

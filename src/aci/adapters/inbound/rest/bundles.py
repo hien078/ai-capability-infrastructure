@@ -4,11 +4,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
+from aci.adapters.inbound.rest.auth import api_token, bearer_gate
 from aci.adapters.inbound.rest.wiring import Container, get_container
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.capability.models import CapabilityBundle
 
-router = APIRouter(prefix="/v1/bundles", tags=["bundles"])
+router = APIRouter(
+    prefix="/v1/bundles", tags=["bundles"], dependencies=[Depends(bearer_gate(api_token))]
+)
 
 
 @router.get("/{bundle_id}")

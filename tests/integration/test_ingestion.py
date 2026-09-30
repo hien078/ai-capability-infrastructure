@@ -193,22 +193,24 @@ def test_invalid_package_rejected_nothing_persisted(
     source_records: SqlAlchemySourceRecordRepository,
     tmp_path: Path,
 ) -> None:
-    empty = tmp_path / "empty"
+    empty_id = uid("empty")
+    empty = tmp_path / empty_id
     empty.mkdir()
     with pytest.raises(DomainError) as exc:
         ingestion.ingest_local(empty, now=NOW)
     assert exc.value.code == ErrorCode.SKILL_PACKAGE_INVALID
 
-    bad = tmp_path / "bad"
+    bad_id = uid("bad")
+    bad = tmp_path / bad_id
     bad.mkdir()
     (bad / "SKILL.md").write_text("no frontmatter here\n", encoding="utf-8")
     with pytest.raises(DomainError) as exc:
         ingestion.ingest_local(bad, now=NOW)
     assert exc.value.code == ErrorCode.SKILL_PACKAGE_INVALID
 
-    assert capability_repo.get_capability("empty") is None
-    assert capability_repo.get_capability("bad") is None
-    assert source_records.list_source_records("empty") == []
+    assert capability_repo.get_capability(empty_id) is None
+    assert capability_repo.get_capability(bad_id) is None
+    assert source_records.list_source_records(empty_id) == []
 
 
 def test_ingest_defaults_version_and_records_transformations(

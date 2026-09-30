@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACI — Sơ đồ hệ thống tổng thể</title>
+<style>
+  :root{
+    --bg:#141414; --chrome:#1a1a1a; --surface:#1e1e1e; --elevated:#242424;
+    --text:#f0f0f0; --text2:#b4b4b4; --text3:#8f8f8f; --text4:#565656;
+    --stroke:#333333; --stroke2:#2a2a2a; --stroke3:#242424;
+    --fill1:#2e2e2e; --fill2:#262626; --fill3:#202020; --fill4:#1d1d1d;
+    --accent:#4e9cff; --link:#5592fc;
+    --green:#1f8a65; --orange:#d29922; --red:#f85149; --blue:#4e9cff;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;margin:0 auto;max-width:1240px;padding:36px 28px 90px}
+  h1{font-size:24px;font-weight:700;margin:0 0 6px}
+  h2{font-size:17px;font-weight:700;margin:0 0 10px}
+  h3{font-size:13.5px;font-weight:600;margin:0 0 8px}
+  p{margin:6px 0}
+  .sub{color:var(--text2);font-size:13px}
+  .small{font-size:12px}
+  .tiny{font-size:11px;color:var(--text3)}
+  code{font:0.92em ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--fill2);border:1px solid var(--stroke3);border-radius:4px;padding:1px 5px;color:#d8d8d8}
+  .muted code{background:none;border:none;padding:0;color:var(--text3)}
+  hr{border:none;border-top:1px solid var(--stroke2);margin:26px 0}
+  section{margin:34px 0}
+  .pillrow{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0}
+  .pill{border:1px solid var(--stroke);border-radius:20px;padding:3px 11px;font-size:11.5px;color:var(--text2);white-space:nowrap}
+  .pill.on{background:var(--accent);border-color:var(--accent);color:#0d1b2a;font-weight:600}
+  .stats{display:flex;flex-wrap:wrap;gap:26px;margin:14px 0 4px}
+  .stat b{display:block;font-size:21px;font-weight:700}
+  .stat span{font-size:11px;color:var(--text3)}
+  .card{background:var(--surface);border:1px solid var(--stroke2);border-radius:10px;padding:14px 16px}
+  .card h4{margin:0 0 8px;font-size:12px;font-weight:600;color:var(--text2)}
+  .card p{font-size:12px;color:var(--text2);margin:6px 0}
+  .card b{color:var(--text)}
+  .ctxgrid{display:grid;grid-template-columns:1fr 26px 1.12fr 26px 1fr;gap:0;align-items:stretch}
+  .arrowcell{display:flex;align-items:center;justify-content:center}
+  .callout{border:1px solid var(--stroke2);border-radius:8px;padding:10px 13px;font-size:12px;color:var(--text2);margin:0}
+  .callout b{display:block;color:var(--text);font-size:12px;margin-bottom:4px}
+  .callout.info{border-left:3px solid var(--blue)}
+  .callout.warn{border-left:3px solid var(--orange)}
+  .callout.danger{border-left:3px solid var(--red)}
+  .callout.neutral{border-left:3px solid var(--stroke)}
+  .callout.success{border-left:3px solid var(--green)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+  .layer{display:flex;gap:14px;padding:9px 12px;border:1px solid var(--stroke3);border-radius:8px;background:var(--fill4)}
+  .layer+.layer{margin-top:0}
+  .layer .lname{width:205px;flex-shrink:0}
+  .layer .lname b{font-size:12.5px;display:block}
+  .layer .lname span{font-size:10.5px;color:var(--text4);font-family:ui-monospace,Menlo,monospace}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;align-content:center}
+  .chip{background:var(--fill2);border:1px solid var(--stroke3);border-radius:6px;padding:2.5px 8px;font-size:10.5px;color:var(--text2);font-family:ui-monospace,Menlo,monospace;white-space:nowrap}
+  .vconn{width:1px;height:11px;background:var(--stroke3);margin-left:103px}
+  table{border-collapse:collapse;width:100%;font-size:12.5px}
+  th{color:var(--text3);font-weight:600;text-align:left;padding:8px 12px;border-bottom:1px solid var(--stroke);font-size:11.5px}
+  td{padding:8px 12px;border-bottom:1px solid var(--stroke3);color:var(--text2);vertical-align:top}
+  tr:nth-child(even) td{background:var(--fill4)}
+  td:first-child{color:var(--text)}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:1px}
+  .flowwrap{overflow-x:auto;border:1px solid var(--stroke3);border-radius:10px;background:var(--fill4);padding:14px}
+  .kernelgrid{display:grid;grid-template-columns:590px 1fr;gap:18px;align-items:start}
+  @media (max-width:1000px){.kernelgrid{grid-template-columns:1fr}.ctxgrid{grid-template-columns:1fr}.arrowcell{display:none}.grid2,.grid3{grid-template-columns:1fr}}
+  .foot{color:var(--text4);font-size:11px}
+  .bar{height:4px;width:110px;background:var(--accent);border-radius:2px;margin-top:10px}
+</style>
+</head>
+<body>
+
+<h1>ACI — Sơ đồ hệ thống tổng thể</h1>
+<p class="sub">AI Capability Infrastructure · modular monolith (ADR-011) · cập nhật 2026-09-30 · nguồn chân truth: <code>plan_v2_revised.md</code> + <code>AGENTS.md</code> + 14 ADR</p>
+<div class="pillrow">
+  <span class="pill on">V1 + V2 hoàn tất (9/9)</span>
+  <span class="pill">V3 alive — A2A + aci-coder</span>
+  <span class="pill">V4-1 Evaluation live</span>
+  <span class="pill">HarnessKernel UNFROZEN (ADR-014)</span>
+  <span class="pill">Real-client era: OpenCode + Antigravity</span>
+  <span class="pill">957 tests · 238 modules</span>
+</div>
+<div class="stats">
+  <div class="stat"><b>38</b><span>capabilities thật (aci_bench, 2026-09-29)</span></div>
+  <div class="stat"><b>14</b><span>migrations (0001–0014)</span></div>
+  <div class="stat"><b>14</b><span>ADRs accepted</span></div>
+  <div class="stat"><b>33</b><span>outcome events §32 đã ghi (§80)</span></div>
+</div>
+
+<hr>
+
+<!-- ================= 1. CONTEXT ================= -->
+<section>
+<h2>1. Bối cảnh hệ thống (system context)</h2>
+<div class="ctxgrid">
+  <div class="card">
+    <h4>Clients (inbound)</h4>
+    <p><b>OpenCode</b> — real client #1: plugin <code>aci-router.ts</code> (prompt hook → POST /v1/routes → inject skills) + catalog <code>index.json</code></p>
+    <p><b>Antigravity</b> — real client #2: MCP stdio, 3 tools + <code>skill://</code> resources (tool-based flow, không parse Skills extension)</p>
+    <p><b>A2A clients</b> — JSON-RPC <code>SendMessage / GetTask / CancelTask</code></p>
+    <p><b>Ops scripts (REST)</b> — proof_loop · run_hbench · run_benchmark · delegation_probe · dashboard · register_agent</p>
+    <p><b>Human gates</b> — capctl · review_queue · weekly_cycle (cron do user cài)</p>
+  </div>
+  <div class="arrowcell"><svg width="22" height="22"><line x1="2" y1="11" x2="14" y2="11" stroke="#4a4a4a" stroke-width="1.5"/><polygon points="20,11 13,7.5 13,14.5" fill="#4a4a4a"/></svg></div>
+  <div class="card">
+    <h4>ACI platform — FastAPI aci.main:app</h4>
+    <p><b>REST /v1</b> — routes · capabilities · bundles · outcomes · evaluations · agent-runs</p>
+    <p><b>A2A gateway</b> — POST /a2a + <code>/.well-known/agent-card.json</code></p>
+    <p><b>OpenCode catalog</b> — GET <code>/opencode/skills/*</code> (projection từ active production releases)</p>
+    <p><b>MCP stdio</b> — <code>python -m aci.adapters.inbound.mcp</code></p>
+    <p><b>Console UI</b> — /ui · /ui/routes · /ui/corpus · /ui/try</p>
+    <p><b>Container</b> — rest/wiring.py: composition root, 1 container/process, mọi service phụ thuộc Protocols</p>
+  </div>
+  <div class="arrowcell"><svg width="22" height="22"><line x1="2" y1="11" x2="14" y2="11" stroke="#4a4a4a" stroke-width="1.5"/><polygon points="20,11 13,7.5 13,14.5" fill="#4a4a4a"/></svg></div>
+  <div class="card">
+    <h4>Hạ tầng (outbound)</h4>
+    <p><b>PostgreSQL 16 + pgvector</b> (docker <code>aci-db-1</code>) — 2 DB trong 1 container: <code>aci</code> (dev/test) · <code>aci_bench</code> (operational). Alembic 0001–0014</p>
+    <p><b>Object store</b> — <code>data/objects</code>, content-addressed sha256, re-verify khi đọc (§39)</p>
+    <p><b>Model gateway</b> — OpenAI-compat <code>ACI_AGENT_MODEL_*</code> (glm-5.3 qua local gateway :20128)</p>
+    <p><b>Embedder</b> — FastEmbed ONNX <code>bge-small-en-v1.5</code> 384d (local) · HashingEmbedder baseline offline</p>
+    <p><b>Agent workspaces</b> — <code>data/agent-runs/</code> (bản copy workspace mỗi run)</p>
+  </div>
+</div>
+</section>
+
+<!-- ================= 2. LAYERS ================= -->
+<section>
+<h2>2. Kiến trúc phân tầng (modular monolith, ADR-011)</h2>
+<p class="sub small">Request chảy từ trên xuống; phụ thuộc chỉ đi một chiều — domain/application không import FastAPI / SQLAlchemy / MCP / OpenCode, chỉ phụ thuộc Protocols (§28.5, ADR-004). Boundary tests + test_contracts chặn vi phạm.</p>
+<div id="layers"></div>
+</section>
+
+<!-- ================= 3. ROUTING ================= -->
+<section>
+<h2>3. Routing pipeline (§14) — luồng chính của platform</h2>
+<p class="sub small">Mỗi stage phát trace data. Client nhận bundle (0–5 skills, pin version + digest), thực thi local, rồi báo lại outcome + evaluation — vòng feedback của routing.</p>
+<div class="flowwrap"><div id="flow-routing"></div></div>
+<div class="grid3" style="margin-top:12px">
+  <div class="callout info"><b>Bundle rỗng = success hợp lệ</b>Composer không bao giờ nhét skill có độ tin cậy thấp (ADR-008) — 0 item là một kết quả đúng.</div>
+  <div class="callout warn"><b>Reranker không rescue được</b>HeuristicReranker chỉ xếp lại hạng ứng viên đã eligible — không thêm/rescue nội dung (ADR-009). Embed + rerank chỉ trên trusted metadata; raw SKILL.md không bao giờ vào prompt (§16.1).</div>
+  <div class="callout neutral"><b>Embedder hoán đổi được</b><code>ACI_EMBEDDER=hashing</code> (offline, mặc định CI) | <code>fastembed</code> (semantic 384d — dev-31 recall 0.712).</div>
+</div>
+</section>
+
+<!-- ================= 4. INGESTION ================= -->
+<section>
+<h2>4. Ingestion &amp; governance — từ nguồn tới production</h2>
+<p class="sub small">Re-ingest giống hệt = idempotent; cùng version khác content = CAPABILITY_ALREADY_EXISTS. Production luôn cần con người (ADR-012/013) — automation tối đa chỉ tới staging/canary.</p>
+<div class="flowwrap"><div id="flow-ingest"></div></div>
+<div class="grid2" style="margin-top:12px">
+  <div class="callout warn"><b>Unknown license chặn mặc định (§24)</b>Không đoán được license → quarantined, không vào catalog/routing. Human override qua <code>review_queue approve-license</code> — append-only, không xoá finding tự động.</div>
+  <div class="callout neutral"><b>Acquisition era — FROZEN (ADR-013)</b>Crawler/scout/refinery/judges/canary vẫn mounted nhưng ngừng mở rộng: automation chỉ được đẩy tới staging + canary (split deterministic), production human-only. <code>weekly_cycle.sh</code> đã verify end-to-end.</div>
+</div>
+</section>
+
+<!-- ================= 5. KERNEL ================= -->
+<section>
+<h2>5. HarnessKernel — agent execution plane (ADR-014, UNFROZEN 2026-09-30)</h2>
+<div class="kernelgrid">
+  <div class="flowwrap"><div id="flow-kernel"></div></div>
+  <div>
+    <p class="sub small">Vòng thực thi verifier-gated: model hành động → authority + guardrails chặn trước/sau → tool chạy trên <b>bản copy workspace</b> (<code>data/agent-runs/</code>) → pytest quyết định → fail thì repair turn (mũi tên đứt quay lại model). 3 run thật đầu tiên: 3/3 verifier-gated <code>succeeded</code> (glm-5.3, pytest làm verification).</p>
+    <h3>Kernel managers (src/aci/runtime)</h3>
+    <div class="chips" id="kmanagers"></div>
+    <div class="grid2" style="margin-top:14px">
+      <div class="callout warn"><b>Honest-fail, không sandbox</b>Không cấu hình gateway (<code>ACI_AGENT_MODEL_BASE_URL</code> rỗng) = fail caller-visible, không bao giờ im lặng dùng model mặc định. Tool chạy dưới user của server — <code>ACI_AGENT_PROCESS_PREFIXES</code> là whitelist lệnh; SandboxWorkspace là non-goal v2.</div>
+      <div class="callout info"><b>Exposure gate</b><code>ACI_AGENT_RUNS_TOKEN</code> đặt = mọi route cần Bearer token (401 nếu sai); rỗng = unauthenticated + warning khi khởi động. Guardrails chuẩn (ShellInjection, PathTraversal pre-tool; SecretLeak post-tool) là tuyến phòng thủ hai sau authority + workspace path checks.</div>
+    </div>
+    <div class="callout neutral" style="margin-top:12px"><b>Gap đã ghi nhận (chưa làm)</b>Runs RAM-only (chưa có bảng DB — restart mất); CapabilityRuntime chưa wire trên REST path (agent chạy WITHOUT registry skills); không resume từ checkpoint; tool error chưa qua RecoveryManager (không retry-block cho tool non-idempotent); approval flow chưa wire (REQUIRE_APPROVAL → denied); <code>command_passed_after_last_change</code> chấp nhận MỌI lệnh exit-0 (không chỉ test); không sandbox (theo thiết kế v2). H-bench runner đã MET (<code>run_hbench.py</code> — round 1 xong).</div>
+  </div>
+</div>
+</section>
+
+<!-- ================= 6. DATA ================= -->
+<section>
+<h2>6. Mô hình dữ liệu (PostgreSQL, migrations 0001–0014)</h2>
+<table>
+<tr><th style="width:170px">Nhóm</th><th style="width:44%">Bảng</th><th>Vai trò</th></tr>
+<tr><td>Registry (§10)</td><td class="muted"><code>capabilities</code> · <code>capability_versions</code> · <code>capability_releases</code> · <code>capability_bindings</code> · <code>capability_facets</code> · <code>capability_relations</code> · <code>capability_artifacts</code></td><td>Version immutable; release chỉ là con trỏ (staging/production/canary); relations = requires / conflicts_with / checks</td></tr>
+<tr><td>Provenance &amp; governance</td><td class="muted"><code>provenance_events</code> · <code>source_records</code> · <code>license_assessments</code> · <code>security_assessments</code> · <code>policy_snapshots</code></td><td>Chuỗi bằng chứng + cổng license/scan; ingestion_status tách khỏi release channel (0013)</td></tr>
+<tr><td>Embeddings (§16)</td><td class="muted"><code>embedding_documents</code> · <code>embedding_vectors</code></td><td>pgvector vector(384) (0011), key (document_id, model_id) — cache re-derivable</td></tr>
+<tr><td>Telemetry (§36)</td><td class="muted"><code>route_runs</code> · <code>bundles</code> · <code>bundle_items</code></td><td>Mỗi route phát trace; bundle_items FK exact version + digest</td></tr>
+<tr><td>Outcomes (§33)</td><td class="muted"><code>outcome_events</code> · <code>outcome_verdicts</code></td><td>Multi-source verdicts (test_harness / external_evaluator / human_review / …) + evidence envelope (0009)</td></tr>
+<tr><td>Benchmark (§41)</td><td class="muted"><code>benchmark_cases</code> · <code>benchmark_runs</code> · <code>benchmark_results</code></td><td>Smoke-10 + dev-31; cases upsert idempotent</td></tr>
+<tr><td>Agent (V3, 0012)</td><td class="muted"><code>agent_tasks</code> · <code>task_messages</code> · <code>task_artifacts</code></td><td>Task lifecycle validated ở domain (advance_task), repo chỉ upsert</td></tr>
+<tr><td>Canary (0014)</td><td class="muted"><code>capability_releases.status='canary'</code> + <code>canary_percent</code></td><td>ADR-013: split deterministic, fail-closed, rollback = pointer flip</td></tr>
+</table>
+<div class="callout danger" style="margin-top:12px"><b>aci_bench hiện không có trong container đang chạy</b>AGENTS.md ghi nhận 2 DB trong 1 container (aci dev/test + aci_bench operational — corpus thật ~38 capabilities + toàn bộ lịch sử route_runs/outcomes/benchmark). Container <code>aci-db-1</code> + volume <code>aci_pgdata</code> được tạo lại 2026-09-30 21:52 (+07) và hiện chỉ có DB <code>aci</code> (733 capabilities = fixture test tích luỹ). Nếu không có dump/backup khác, corpus thật + lịch sử đo lường đã mất cùng volume cũ — cần kiểm tra ngay.</div>
+</section>
+
+<!-- ================= 7. API ================= -->
+<section>
+<h2>7. Các mặt API (mounted trong aci.main:app)</h2>
+<table>
+<tr><th style="width:110px">Surface</th><th style="width:42%">Endpoint</th><th>Chức năng</th></tr>
+<tr><td>REST</td><td class="muted"><code>POST /v1/routes</code></td><td>Chạy toàn bộ pipeline §14 → bundle + telemetry (201)</td></tr>
+<tr><td>REST</td><td class="muted"><code>GET /v1/routes/{id}</code> · <code>GET /v1/bundles/{id}</code></td><td>Đọc lại telemetry / bundle</td></tr>
+<tr><td>REST</td><td class="muted"><code>POST /v1/capabilities/search</code></td><td>Discovery-only (không eligibility đầy đủ)</td></tr>
+<tr><td>REST</td><td class="muted"><code>GET /v1/capabilities/{id}</code> · <code>/{id}/versions/{v}</code></td><td>Chi tiết capability / version</td></tr>
+<tr><td>REST</td><td class="muted"><code>POST /v1/outcomes</code></td><td>Báo outcome multi-source §33 (chỉ cho bundle đã route)</td></tr>
+<tr><td>REST</td><td class="muted"><code>POST /v1/evaluations</code></td><td>V4-1: rubric → verdict external_evaluator</td></tr>
+<tr><td>REST</td><td class="muted"><code>POST /v1/agent-runs</code> · <code>GET /{id}</code> · <code>POST /{id}/cancel</code> · <code>POST /{id}/revise</code></td><td>HarnessKernel (ADR-014): objective → verifier-gated run</td></tr>
+<tr><td>A2A</td><td class="muted"><code>POST /a2a</code> · <code>GET /.well-known/agent-card.json</code></td><td>JSON-RPC SendMessage / GetTask / CancelTask + agent card</td></tr>
+<tr><td>OpenCode</td><td class="muted"><code>GET /opencode/skills/index.json</code> · <code>/opencode/skills/{id}/{file}</code></td><td>Projection catalog native OpenCode V2</td></tr>
+<tr><td>MCP (stdio)</td><td class="muted">tools: <code>route_capabilities</code> · <code>search_capabilities</code> · <code>report_outcome</code></td><td><code>skills/list</code> · <code>skills/get</code> · resource <code>skill://{id}/{+path}</code></td></tr>
+<tr><td>Console</td><td class="muted"><code>/ui</code> · <code>/ui/routes</code> · <code>/ui/corpus</code> · <code>/ui/try</code></td><td>Ops UI đọc trực tiếp DB (không thêm nguồn chân lý)</td></tr>
+<tr><td>Health</td><td class="muted"><code>/health</code> · <code>/ready</code></td><td>Liveness + SELECT 1 against live DB</td></tr>
+</table>
+</section>
+
+<!-- ================= 8. STATUS ================= -->
+<section>
+<h2>8. Bản đồ trạng thái freeze (2026-09-30)</h2>
+<table>
+<tr><th style="width:44%">Khu</th><th style="width:200px">Trạng thái</th><th>Ghi chú</th></tr>
+<tr><td><span class="dot" style="background:var(--green)"></span>Routing pipeline + REST + OpenCode catalog/plugin + MCP + outcomes + V4-1 Evaluation</td><td>KEEP — đang vận hành</td><td>2 real clients (OpenCode, Antigravity); vòng feedback outcome/evaluation sống</td></tr>
+<tr><td><span class="dot" style="background:var(--green)"></span>Governance V2 (license detector, pattern scanner, review_queue, check_upstream, dashboards, benchmark arena)</td><td>KEEP</td><td>Đã đo: rerank v3 +0.048 ± 0.023 trên dev-31; judge phân biệt adversarial (BAD 4/5 reject)</td></tr>
+<tr><td><span class="dot" style="background:var(--green)"></span>capctl + detect_gaps + detect_deprecation</td><td>KEEP</td><td>Human gates + detector proposal-only (14 evidence-gap proposals thật)</td></tr>
+<tr><td><span class="dot" style="background:var(--orange)"></span>V3 surfaces (A2A gateway, OpenAICompatExecutor, aci-coder, task persistence)</td><td>FROZEN — giữ nguyên, không mở rộng</td><td>Vẫn mounted; không xoá (churn + rủi ro bằng 0 lợi ích); không thêm streaming/multi-turn</td></tr>
+<tr><td><span class="dot" style="background:var(--orange)"></span>Acquisition era (crawler, scout, refinery, judges, canary, auto-approve)</td><td>FROZEN (ADR-013)</td><td>Automation tối đa tới staging/canary; production human-only; weekly_cycle đã verify</td></tr>
+<tr><td><span class="dot" style="background:var(--blue)"></span>HarnessKernel (agent execution plane)</td><td>UNFROZEN (ADR-014, option A 2026-09-30)</td><td>Ngoại lệ theo quyết định user; H-bench arena là cổng bắt buộc cho mọi thay đổi kernel</td></tr>
+</table>
+<p class="tiny">Nguyên tắc evidence: "có thứ gì thật chạy qua nó không?" — frozen ≠ deleted; unfreeze = bắt đầu dùng lại, không phải xây lại.</p>
+</section>
+
+<!-- ================= 9. MEASUREMENT ================= -->
+<section>
+<h2>9. Đo lường đã ghi (§34 caveat: n nhỏ, author fixtures — directional)</h2>
+<div class="kernelgrid">
+  <div class="card">
+    <h4>Tỷ lệ chấp nhận (acceptance) theo arm — %</h4>
+    <div id="chart"></div>
+    <p class="tiny">Nguồn: data/proof-loop/*.json (§80, 7 rounds) + data/hbench/hbench-20260930-232757.json (H-bench round 1, glm-5.3, 8 fixtures multi/long, max_turns=12). Hai thí nghiệm khác nhau — không so trực tiếp K/N với A/E.</p>
+  </div>
+  <div>
+    <div class="stats" style="gap:22px">
+      <div class="stat"><b>33/33</b><span>§80: A = E (không delta outcome)</span></div>
+      <div class="stat"><b style="color:var(--green)">6/8 vs 4/8</b><span>H-bench: K vs N — delta harness dương đầu tiên</span></div>
+    </div>
+    <div class="stats" style="gap:22px;margin-top:14px">
+      <div class="stat"><b>0.00</b><span>false_success cả 2 arm (glm-5.3 không claim sai)</span></div>
+      <div class="stat"><b>31s vs 42s</b><span>wall K vs N (confound: N skip verification)</span></div>
+    </div>
+    <div class="callout info" style="margin-top:14px"><b>Đọc kết quả thế nào</b>§80 (7 rounds, n=33): không value nào đo được trên single-bug acceptance — model giải được naked. H-bench round 1: kernel rescue 2 case multi/long bằng vòng verifier-gated trong budget; 2 case dài cả hai arm đều LIMIT_TURNS. Delta thật nhưng budget-sensitive; trục tiếp theo = model yếu hơn (H008 false-success chưa demonstrate được ở tier này).</div>
+  </div>
+</div>
+</section>
+
+<hr>
+<p class="foot">Sơ đồ vẽ từ code thật (src/aci/**, wiring.py, main.py) + hồ sơ đo lường trong data/ — không phải từ tài liệu suông. Mọi con số có nguồn ở AGENTS.md hoặc file JSON tương ứng.</p>
+<div class="bar"></div>
+
+<script>
+/* ---------- flow diagram renderer ---------- */
+const C = {
+  edge:"#4a4a4a", edgeD:"#3a3a3a", box:"#242424", boxMuted:"#202020",
+  stroke:"#3a3a3a", accent:"#4e9cff", text:"#f0f0f0", text3:"#8f8f8f", text4:"#565656"
+};
+function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;")}
+function arrow(x1,y1,x2,y2,dashed){
+  const dx=x2-x1,dy=y2-y1,len=Math.hypot(dx,dy)||1,ux=dx/len,uy=dy/len;
+  const bx=x2-ux*8,by=y2-uy*8,ox=-uy,oy=ux,w=4.5;
+  const col=dashed?C.edgeD:C.edge;
+  return `<line x1="${x1}" y1="${y1}" x2="${bx}" y2="${by}" stroke="${col}" stroke-width="1.5" ${dashed?'stroke-dasharray="4 4"':''}/>`+
+    `<polygon points="${x2},${y2} ${bx+ox*w},${by+oy*w} ${bx-ox*w},${by-oy*w}" fill="${col}"/>`;
+}
+function nodeBox(n){
+  const acc=n.accent, mut=n.muted;
+  const stroke=acc?C.accent:C.stroke, sw=acc?1.5:1;
+  const fill=mut?C.boxMuted:C.box;
+  const tcol=mut?C.text3:C.text;
+  let s=`<rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" rx="8" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>`;
+  const cx=n.x+n.w/2, hasSub=!!n.sub;
+  s+=`<text x="${cx}" y="${n.y+(hasSub?n.h/2-5:n.h/2+4)}" text-anchor="middle" font-size="12" font-weight="600" fill="${tcol}">${esc(n.label)}</text>`;
+  if(n.sub) s+=`<text x="${cx}" y="${n.y+n.h/2+11}" text-anchor="middle" font-size="9.5" fill="${C.text3}">${esc(n.sub)}</text>`;
+  return s;
+}
+function render(id,spec){
+  let s=`<svg width="${spec.w}" height="${spec.h}" style="display:block">`;
+  for(const e of spec.edges){
+    if(e.pts){
+      const p=e.pts;
+      s+=`<path d="M ${p[0][0]} ${p[0][1]} ${p.slice(1).map(q=>`L ${q[0]} ${q[1]}`).join(" ")}" fill="none" stroke="${C.edgeD}" stroke-width="1.5" stroke-dasharray="4 4"/>`;
+      const n=p.length, tx=p[n-1][0], ty=p[n-1][1], px=p[n-2][0], py=p[n-2][1];
+      const dx=tx-px, dy=ty-py, len=Math.hypot(dx,dy)||1, ux=dx/len, uy=dy/len;
+      const bx=tx-ux*8, by=ty-uy*8, ox=-uy, oy=ux, w=4.5;
+      s+=`<polygon points="${tx},${ty} ${bx+ox*w},${by+oy*w} ${bx-ox*w},${by-oy*w}" fill="${C.edgeD}"/>`;
+      continue;
+    }
+    const a=spec.nodes.find(n=>n.id===e.from), b=spec.nodes.find(n=>n.id===e.to);
+    const sx=e.sx!==undefined?e.sx:(spec.vertical?a.x+a.w/2:a.x+a.w);
+    const sy=e.sy!==undefined?e.sy:(spec.vertical?a.y+a.h:a.y+a.h/2);
+    const tx=e.tx!==undefined?e.tx:(spec.vertical?b.x+b.w/2:b.x);
+    const ty=e.ty!==undefined?e.ty:(spec.vertical?b.y:b.y+b.h/2);
+    s+=arrow(sx,sy,tx,ty,e.dashed);
+  }
+  for(const n of spec.nodes) s+=nodeBox(n);
+  s+="</svg>";
+  document.getElementById(id).innerHTML=s;
+}
+
+/* ---------- 3. routing pipeline ---------- */
+const RN=["RequestContext|§11.1 hints + principal","Policy snapshot|rules §36","Eligibility|ADR-009 · trust/license/scope","Retrieval|pgvector 10–30 · trusted docs","Rerank v3|min-max 4 signals","Dependency resolve|REQUIRES · CONFLICTS · CHECKS","Composer|0–5 items · token budget","Bundle + telemetry|§36 route_run","Outcome §33|multi-source verdicts","Evaluation V4-1|rubric → external_evaluator"];
+render("flow-routing",{
+  w:9*208+168, h:56,
+  nodes:RN.map((t,i)=>{const [label,sub]=t.split("|");return {id:"n"+i,x:i*208,y:0,w:168,h:56,label,sub,accent:i===7}}),
+  edges:Array.from({length:9},(_,i)=>({from:"n"+i,to:"n"+(i+1)}))
+});
+
+/* ---------- 4. ingestion ---------- */
+const IW=168,IH=56;
+const ing=[
+ ["src",0,0,"Nguồn SKILL.md","GitHub pin (repo, sha)"],
+ ["parse",204,0,"Parse + hash","frontmatter → spec"],
+ ["blob",408,0,"Blobs","object store sha256"],
+ ["ver",612,0,"CapabilityVersion","immutable + manifest"],
+ ["srec",816,0,"SourceRecord","ingestion=quarantined"],
+ ["prov",1020,0,"Provenance","chuỗi bằng chứng §23"],
+ ["lic",1224,0,"License detect","SPDX per-skill"],
+ ["sec",1428,0,"Security scan","pattern CRITICAL/WARNING"],
+ ["gate",1632,0,"PromotionService","cổng ADR-012",1],
+ ["rel",1836,0,"Release","staging → production"],
+ ["cat",2040,0,"Catalog + routing","index.json · eligibility"],
+ ["held",1428,76,"HELD / quarantine","unknown license · scan fail",0,1],
+ ["human",1632,76,"Human review","review_queue · capctl"]
+];
+render("flow-ingest",{
+  w:2208, h:132,
+  nodes:ing.map(a=>({id:a[0],x:a[1],y:a[2],w:IW,h:IH,label:a[3],sub:a[4],accent:a[5],muted:a[6]})),
+  edges:[
+    ...["src>parse","parse>blob","blob>ver","ver>srec","srec>prov","prov>lic","lic>sec","sec>gate","gate>rel","rel>cat"].map(s=>{const[f,t]=s.split(">");return{from:f,to:t}}),
+    {from:"lic",to:"held",dashed:true,sx:1224+IW,sy:28,tx:1428,ty:104},
+    {from:"sec",to:"held",dashed:true,sx:1428+84,sy:56,tx:1428+84,ty:76},
+    {from:"held",to:"human",sx:1428+IW,sy:104,tx:1632,ty:104},
+    {from:"human",to:"gate",dashed:true,sx:1632+84,sy:76,tx:1632+84,ty:56}
+  ]
+});
+
+/* ---------- 5. kernel (vertical) ---------- */
+const KW=240,KH=50,KG=80;
+const ker=[
+ ["api","POST /v1/agent-runs","objective + workspace + verify cmd"],
+ ["svc","AgentRunService","một kernel mỗi run"],
+ ["rc","RunController","vòng turn"],
+ ["ctxe","ContextEngine","budget 60k tokens"],
+ ["mg","Model gateway","OpenAICompat · glm-5.3"],
+ ["auth","AuthorityManager","ExecutionEnvelope"],
+ ["guard","GuardrailManager","pre: shell-inject / path-traversal"],
+ ["tool","ToolRuntime","read/write/edit/bash · workspace copy"],
+ ["verif","VerificationManager","pytest gate (cmd client)"],
+ ["check","CheckpointCoordinator","events append-only"],
+ ["done","Terminal","succeeded/failed + evidence"],
+ ["rec","RecoveryManager","repair turn"]
+];
+const kn=ker.map((a,i)=>({id:a[0],x:0,y:i*KG,w:KW,h:KH,label:a[1],sub:a[2],accent:a[0]==="done"}));
+kn[10].y=10*KG; /* done rank 10 */
+kn[11]={id:"rec",x:254,y:9*KG,w:KW,h:KH,label:"RecoveryManager",sub:"repair turn"};
+const kedges=[
+ ...["api>svc","svc>rc","rc>ctxe","ctxe>mg","mg>auth","auth>guard","guard>tool","tool>verif","verif>check","check>done"].map(s=>{const[f,t]=s.split(">");return{from:f,to:t}}),
+ {from:"verif",to:"rec",dashed:true,sx:120,sy:8*KG+KH,tx:254+120,ty:9*KG},
+ {from:"rec",to:"mg",dashed:true,pts:[[254+KW,9*KG+25],[540,9*KG+25],[540,4*KG+25],[KW+8,4*KG+25]]}
+];
+render("flow-kernel",{w:560,h:10*KG+KH+8,vertical:true,nodes:kn,edges:kedges});
+
+/* ---------- 2. layers ---------- */
+const layers=[
+ ["Inbound adapters","src/aci/adapters/inbound",["rest (routes · capabilities · bundles · outcomes · evaluations · agent_runs · ui)","a2a gateway","mcp (skills · tools · server)","opencode (catalog + plugin TS)"]],
+ ["Application services","src/aci/application",["protocols","route_capabilities","search_capabilities","resolve_capability","report_outcome","evaluate_bundle (V4-1)","delegate_task (V3)","run_agent_task (ADR-014)","list_candidates"]],
+ ["Routing pipeline","src/aci/routing",["eligibility (ADR-009)","retrieval (pgvector)","rerankers/heuristic v3","dependencies","composer (ADR-008)"]],
+ ["Control plane","src/aci/control_plane",["promotion (cổng ADR-012)","ingestion_gates"]],
+ ["Providers","src/aci/providers",["skills","licensing (SPDX detect)","security (pattern scanner)","evaluation (rubric · llm_reviewer · judges)"]],
+ ["Domain (thuần túy, không framework)","src/aci/domain",["capability","skills","provenance","policy","taxonomy","routing","agent","evaluation","runtime (ADR-014 contracts)","acquisition (FROZEN)"]],
+ ["Outbound adapters","src/aci/adapters/outbound",["postgres (13 repos + ORM)","pgvector","model_provider (Hashing/FastEmbed · OpenAICompatExecutor · OpenAICompatGateway)","object_store/fs"]],
+ ["Agent runtime plane + evaluation","src/aci/runtime · src/aci/evaluation",["run_controller","state_manager","tool_runtime","authority","guardrails","verification","checkpoints","recovery","delegation","context_engine","model_gateway","workspace","harness","cases (smoke · dev-31)","hbench (H001–H020)","metrics"]]
+];
+document.getElementById("layers").innerHTML=layers.map((l,i)=>
+  (i>0?`<div class="vconn"></div>`:"")+
+  `<div class="layer"><div class="lname"><b>${l[0]}</b><span>${l[1]}</span></div><div class="chips">${l[2].map(c=>`<span class="chip">${esc(c)}</span>`).join("")}</div></div>`
+).join("");
+
+/* ---------- kernel managers chips ---------- */
+document.getElementById("kmanagers").innerHTML=["run_controller","state_manager","tool_runtime","authority","guardrails","verification","checkpoints","recovery","delegation","context_engine","model_gateway","workspace","workspace_tools","planning","event_bus","capability_runtime","cancellation","profiles"].map(m=>`<span class="chip">${m}</span>`).join("");
+
+/* ---------- 9. bar chart ---------- */
+(function(){
+  const data=[["§80 A naked",100,"#8888a8"],["§80 E routed",100,"#8888a8"],["H-bench K kernel",75,"#1f8a65"],["H-bench N naive",50,"#c06028"]];
+  const W=470,H=210,pad=34,bw=64,gap=38;
+  let s=`<svg width="${W}" height="${H}">`;
+  s+=`<line x1="${pad}" y1="${H-34}" x2="${W-8}" y2="${H-34}" stroke="#333"/>`;
+  data.forEach((d,i)=>{
+    const x=pad+14+i*(bw+gap), bh=d[1]*1.42, y=H-34-bh;
+    s+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" rx="4" fill="${d[2]}"/>`;
+    s+=`<text x="${x+bw/2}" y="${y-7}" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f0f0f0">${d[1]}%</text>`;
+    s+=`<text x="${x+bw/2}" y="${H-18}" text-anchor="middle" font-size="10" fill="#8f8f8f">${esc(d[0])}</text>`;
+  });
+  [0,50,100].forEach(v=>{const y=H-34-v*1.42;s+=`<text x="${pad-6}" y="${y+4}" text-anchor="end" font-size="9" fill="#565656">${v}</text>`;});
+  s+="</svg>";
+  document.getElementById("chart").innerHTML=s;
+})();
+</script>
+</body>
+</html>

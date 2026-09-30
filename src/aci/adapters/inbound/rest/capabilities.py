@@ -4,12 +4,15 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
+from aci.adapters.inbound.rest.auth import api_token, bearer_gate
 from aci.adapters.inbound.rest.schemas import CapabilityDetail, SearchRequest
 from aci.adapters.inbound.rest.wiring import Container, get_container
 from aci.domain.capability.models import SearchCapabilitiesQuery
 from aci.domain.routing.models import CapabilitySearchResult, ResolvedVersion
 
-router = APIRouter(prefix="/v1/capabilities", tags=["capabilities"])
+router = APIRouter(
+    prefix="/v1/capabilities", tags=["capabilities"], dependencies=[Depends(bearer_gate(api_token))]
+)
 
 
 @router.post("/search")

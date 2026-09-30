@@ -28,6 +28,8 @@ ExecutionMode = Literal["client_applied", "remote_call", "delegated_task", "read
 SideEffectClass = Literal["none", "read_only", "local_write", "remote_write", "external_effect"]
 TaskStatus = Literal["submitted", "working", "needs_input", "completed", "failed", "canceled"]
 MessageAuthor = Literal["agent", "caller"]
+#: Owner of tasks created without authentication (and of pre-0015 rows).
+ANONYMOUS_PRINCIPAL = "anonymous"
 
 
 class ProfileBudget(BaseModel):
@@ -104,6 +106,14 @@ class AgentTask(BaseModel):
 
     Frozen: state changes go through :func:`advance_task`, which validates the
     lifecycle edges and returns a new instance — never mutate a task in place.
+
+    ``owner`` is the authenticated principal that created the task; the A2A
+    gateway reports another principal's task exactly like an unknown id
+    (TASK_NOT_FOUND). It defaults to :data:`ANONYMOUS_PRINCIPAL` — the
+    principal of the unauthenticated (no tokens configured) mode and the
+    ``server_default`` of migration 0015 for pre-existing rows — so
+    in-process constructors (scripts, the kernel probe) that never cross the
+    A2A wire stay valid. No authenticated caller ever resolves to it.
     """
 
     model_config = {"frozen": True}
@@ -112,6 +122,7 @@ class AgentTask(BaseModel):
     profile_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,63}$")
     capability_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,63}$")
     input_text: str = Field(min_length=1)
+    owner: str = Field(default=ANONYMOUS_PRINCIPAL, min_length=1)
     status: TaskStatus = "submitted"
     created_at: datetime
     updated_at: datetime

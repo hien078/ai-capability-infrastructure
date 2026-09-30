@@ -82,6 +82,23 @@ options, publish it as an npm package and use the config tuple form
 `["package-name", {"baseUrl": ..., "language": ...}]`, or edit the
 defaults in the installed copy.
 
+## Authentication (`ACI_API_TOKEN`)
+
+When the platform runs with `ACI_API_TOKEN` set, `/v1/routes`,
+`/v1/outcomes` and `/opencode/skills/*` require
+`Authorization: Bearer <token>`. Export the same value as `ACI_API_TOKEN`
+in the environment OpenCode (and its `opencode serve` service) runs in: the
+plugin then sends the header on `POST /v1/routes`; with the variable unset
+it sends no header (unauthenticated mode, the default). A wrong or missing
+token is a routing failure, so the fail-open/fail-closed policy applies.
+
+The skill catalog (step 3) is fetched by OpenCode itself, not by this
+plugin, and this repo has not verified that OpenCode's `skills` URL can
+carry an auth header. Until it is, a token-gated catalog does not resolve
+the injected skill IDs — keep the platform on localhost with the token
+unset for the OpenCode flow, or front the catalog with a proxy that adds
+the header.
+
 ## Options
 
 | Option             | Default                | Meaning                                                       |

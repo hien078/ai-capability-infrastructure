@@ -300,3 +300,41 @@ def test_binding_and_artifact_roundtrip(
     artifact_store.put_artifact(artifact)
     assert artifact_store.get_artifact(cap_id, "1.0.0") == artifact
     assert artifact_store.get_artifact(cap_id, "2.0.0") is None
+
+
+def test_list_channel_filters_channel_and_status(
+    capability_repo: SqlAlchemyCapabilityRepository,
+    release_repo: SqlAlchemyReleaseRepository,
+) -> None:
+    """The production-active filter every client surface consumes
+    (OpenCode catalog, MCP skills, A2A agent card, list_candidates):
+    only THIS channel's rows, only the requested status — staging rows,
+    other statuses, and other capabilities never leak in."""
+    cap_a, cap_b = uid("cap"), uid("cap")
+    seed_two_versions(capability_repo, cap_a)
+    seed_two_versions(capability_repo, cap_b)
+
+    release_repo.set_release(
+        CapabilityRelease(
+            capability_id=cap_a, version="1.0.0", channel="production", status="active"
+        )
+    )
+    release_repo.set_release(
+        CapabilityRelease(capability_id=cap_b, version="1.0.0", channel="staging", status="active")
+    )
+    release_repo.set_release(
+        CapabilityRelease(
+            capability_id=cap_b, version="2.0.0", channel="production", status="revoked"
+        )
+    )
+
+    active_prod = release_repo.list_channel("production", status="active")
+    ids = {r.capability_id for r in active_prod}
+    assert cap_a in ids
+    assert cap_b not in ids  # staging row and revoked row both excluded
+
+    all_prod = release_repo.list_channel("production")
+    assert {r.capability_id for r in all_prod} >= {cap_a, cap_b}
+    assert all(r.channel == "production" for r in all_prod)
+    statuses = {(r.capability_id, r.status) for r in all_prod}
+    assert (cap_b, "revoked") in statuses  # unfiltered keeps non-active rows
