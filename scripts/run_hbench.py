@@ -124,6 +124,23 @@ def _all_fixtures() -> list[dict[str, Any]]:
     return [*MULTI_TASKS, *LONG_TASKS]
 
 
+def _post_hoc(run_dir: Path) -> int:
+    """Run the verification command in a run dir AFTER the run — the SAME
+    yardstick for both arms (§44 outcome), independent of the arm's own
+    completion semantics."""
+    import subprocess
+
+    env = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",  # the §80 bytecode-cache trap
+    }
+    try:
+        proc = subprocess.run(VERIFICATION, cwd=run_dir, env=env, capture_output=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return 124
+    return int(proc.returncode)
+
+
 def _contract_spec(fixture: dict[str, Any]) -> tuple[SubtaskContract, Any]:
     """The SAME contract + spec both arms run under (§42 fairness: the
     objective, acceptance criteria and profile are held constant; only the
@@ -217,7 +234,13 @@ def run_kernel_arm(
         if e.event_type == VERIFICATION_COMPLETED and e.payload.get("verdict") != "PASS"
     )
     repairs = sum(1 for e in history if e.event_type == RECOVERY_STARTED)
+    # SAME yardstick as arm N: did the tests pass in the run dir at the end,
+    # regardless of whether the model proposed completion? A LIMIT_TURNS run
+    # where the fix landed but was never proposed counts here (and NOT in
+    # `accepted`, which is the verifier-gated completion metric).
+    post_hoc_exit = _post_hoc(runs / result.run_id)
     return {
+        "run_id": result.run_id,
         "arm": "K",
         "status": result.status.value,
         "stop_reason": result.stop_reason.value if result.stop_reason else None,
@@ -234,6 +257,9 @@ def run_kernel_arm(
         # honestly as not-accepted.
         "accepted": result.status.value == "succeeded",
         "false_success": False,
+        # Same yardstick as N: tests pass in the run dir at the end.
+        "tests_pass_at_end": post_hoc_exit == 0,
+        "post_hoc_exit": post_hoc_exit,
         # The mechanism's visible cost (§44): how many verification rounds
         # the run needed, how many FAILED (→ repair feedback), how many
         # recovery/repair turns were taken.
@@ -350,6 +376,7 @@ def run_naive_arm(
     exec_result = manager.execute(workspace_id, VERIFICATION, 300_000)
     accepted = bool(exec_result.exit_code == 0 and not exec_result.timed_out)
     return {
+        "run_id": run_id,
         "arm": "N",
         "status": "claimed_done" if claimed_done else ("error" if error else "turn_limit"),
         "stop_reason": error or ("claimed_done" if claimed_done else "MAX_TURNS"),
@@ -362,6 +389,7 @@ def run_naive_arm(
         "accepted": accepted,
         # §44 headline: the model CLAIMED completion and the verifier refutes it.
         "false_success": bool(claimed_done and not accepted),
+        "tests_pass_at_end": accepted,
         "post_hoc_exit": exec_result.exit_code,
         "post_hoc_timed_out": exec_result.timed_out,
         "verification_rounds": 0,
@@ -468,6 +496,7 @@ def main(argv: list[str] | None = None) -> int:
                 record = future.result()
             except Exception as exc:  # noqa: BLE003 — one crashed run never kills the pack
                 record = {
+                    "run_id": "",
                     "arm": arm,
                     "fixture": fixture["name"],
                     "h_ref": H_REFS.get(fixture["name"], ""),
@@ -475,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
                     "stop_reason": type(exc).__name__,
                     "accepted": False,
                     "false_success": False,
+                    "tests_pass_at_end": False,
                     "turns": 0,
                     "tool_calls": 0,
                     "wall_seconds": 0.0,
@@ -498,9 +528,11 @@ def main(argv: list[str] | None = None) -> int:
         rows = [r for r in results if r["arm"] == arm]
         accepted = [1.0 if r["accepted"] else 0.0 for r in rows]
         false_success = [1.0 if r["false_success"] else 0.0 for r in rows]
+        tests_pass = [1.0 if r.get("tests_pass_at_end") else 0.0 for r in rows]
         return {
             "n": len(rows),
             "acceptance": sum(accepted) / len(accepted) if accepted else 0.0,
+            "tests_pass_at_end": sum(tests_pass) / len(tests_pass) if tests_pass else 0.0,
             "false_success": sum(false_success) / len(false_success) if false_success else 0.0,
             "turns_mean": statistics.mean(r["turns"] for r in rows) if rows else 0.0,
             "turns_stdev": statistics.stdev([r["turns"] for r in rows]) if len(rows) > 1 else 0.0,
@@ -543,6 +575,7 @@ def main(argv: list[str] | None = None) -> int:
         agg = report["aggregate"][arm]
         print(
             f"arm {arm}: acceptance {agg['acceptance']:.2f} "
+            f"tests_pass_at_end {agg['tests_pass_at_end']:.2f} "
             f"false_success {agg['false_success']:.2f} "
             f"turns {agg['turns_mean']:.1f}±{agg['turns_stdev']:.1f} "
             f"wall {agg['wall_mean']:.0f}±{agg['wall_stdev']:.0f}s "
