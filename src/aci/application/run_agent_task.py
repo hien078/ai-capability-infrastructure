@@ -25,6 +25,7 @@ from aci.domain.runtime.authority import (
 from aci.domain.runtime.spec import RuntimeSpec
 from aci.domain.runtime.subtask import RunResult, SubtaskContract
 from aci.runtime.cancellation import CancelToken
+from aci.runtime.event_bus import EventBus
 from aci.runtime.run_controller import (
     CapabilityHandler,
     ContextAssembler,
@@ -111,6 +112,7 @@ class AgentRunService:
         process_prefixes: Sequence[str] = (),
         command_timeout_seconds: float = 120.0,
         verification_timeout_seconds: float = 300.0,
+        event_bus: EventBus | None = None,
     ) -> None:
         self._model_factory = model_gateway_factory
         self._tools_factory = tool_executor_factory
@@ -121,6 +123,7 @@ class AgentRunService:
         self._process_prefixes = [p for p in process_prefixes if p.strip()]
         self._command_timeout_ms = int(command_timeout_seconds * 1000)
         self._verification_timeout_ms = int(verification_timeout_seconds * 1000)
+        self._event_bus = event_bus
         self._cancel_tokens: dict[str, CancelToken] = {}
         self._results: dict[str, RunResult] = {}
         self._records: dict[str, _RunRecord] = {}
@@ -344,6 +347,7 @@ class AgentRunService:
             verifier=VerificationManager(checks),
             recovery=RecoveryManager(),
             capability_runtime=cast(CapabilityHandler, self._capability_factory.build()),
+            event_bus=self._event_bus,
         )
         token = CancelToken(run_id=contract.task_id)
         self._cancel_tokens[contract.task_id] = token

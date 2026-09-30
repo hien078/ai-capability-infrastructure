@@ -14,7 +14,6 @@ sys.path.insert(0, str(SCRIPTS))
 import run_hbench  # noqa: E402
 
 from aci.evaluation.harness_cases import HARNESS_CASE_IDS  # noqa: E402
-from aci.runtime.run_controller import _ACTION_PROTOCOL  # noqa: E402
 from aci.runtime.workspace import command_within_prefixes  # noqa: E402
 
 
@@ -51,11 +50,14 @@ class TestHbenchRunner:
         and every `accepted` in every report is a lie."""
         assert command_within_prefixes(run_hbench.VERIFICATION, run_hbench.PROCESS_PREFIXES)
 
-    def test_naive_arm_uses_the_kernel_action_protocol(self) -> None:
-        """§42: same model interface in both arms — the A/B measures harness
-        mechanisms (verification gate, recovery, context), not prompts."""
+    def test_naive_arm_uses_the_kernel_system_prompt(self) -> None:
+        """§42: same model interface in both arms — N gets the kernel's own
+        _system_prompt over the same contract/spec/grants (identity +
+        objective + authority summary + action protocol), so the A/B
+        measures harness mechanisms (verification gate, recovery, context),
+        not prompts."""
         import inspect
 
         source = inspect.getsource(run_hbench.run_naive_arm)
-        assert "_ACTION_PROTOCOL" in source
-        assert _ACTION_PROTOCOL.startswith("Work on the workspace ONLY")
+        assert "_system_prompt" in source
+        assert "task_state_from(contract)" in source

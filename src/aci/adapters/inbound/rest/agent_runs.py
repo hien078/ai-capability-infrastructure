@@ -4,6 +4,7 @@ Thin edge: request → SubtaskContract + RuntimeSpec (from the AgentProfile) →
 AgentRunService → RunResult projected as compact typed state (§29A: status,
 verdict, checks, evidence refs, artifacts — never the transcript)."""
 
+import hmac
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -32,7 +33,10 @@ def _require_run_token(
     token = container.settings.agent_runs_token
     if not token:
         return
-    if authorization != f"Bearer {token}":
+    # Constant-time compare: a plain != leaks the match position through
+    # response timing (standard practice for secrets on the wire).
+    expected = f"Bearer {token}".encode()
+    if not hmac.compare_digest((authorization or "").encode(), expected):
         raise HTTPException(status_code=401, detail="invalid or missing agent-run token")
 
 
