@@ -9,4 +9,5 @@ build/
 .mypy_cache/
 .ruff_cache/
 data/
+.claude/
 .opencode/node_modules/

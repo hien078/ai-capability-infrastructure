@@ -39,6 +39,8 @@ jobs:
 
       - run: ruff format --check src tests
 
+      - run: python -m mypy src
+
       - run: alembic upgrade head
 
       - run: python -m pytest -q
