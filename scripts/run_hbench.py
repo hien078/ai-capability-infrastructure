@@ -226,7 +226,13 @@ def apply_ablations(ablations: list[str]) -> None:
             def _append_no_empty_user(
                 self: object, r: object, turn: int, *, assistant: str, user: str | None
             ) -> None:
-                _orig_append(self, r, turn, assistant=assistant, user=user if user else None)  # type: ignore[arg-type]
+                _orig_append(
+                    self,  # type: ignore[arg-type]
+                    r,
+                    turn,
+                    assistant=assistant,
+                    user=user if user else None,
+                )
 
             rc.HarnessKernel._append = _append_no_empty_user  # type: ignore[assignment]
 
