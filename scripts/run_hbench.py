@@ -210,6 +210,7 @@ def apply_ablations(ablations: list[str]) -> None:
     code)."""
     import aci.runtime.run_controller as rc
 
+    _orig_append = rc.HarnessKernel._append
     for ab in ablations:
         if ab == "progress":
             rc._progress_summary = lambda snapshot: ""  # type: ignore[assignment]
@@ -221,12 +222,17 @@ def apply_ablations(ablations: list[str]) -> None:
             # (measured: 0.21 tests_pass, 38 model recoveries, runs dying at
             # turn ~4 — an artifact, not an ablation).
             rc._CONTINUE_PROMPT = ""  # type: ignore[assignment]
-            _orig_append = rc.HarnessKernel._append
 
             def _append_no_empty_user(
-                self: object, r: object, turn: int, *, assistant: str, user: str | None
+                self: object,
+                r: object,
+                turn: int,
+                *,
+                assistant: str,
+                user: str | None,
+                _orig: Any = _orig_append,
             ) -> None:
-                _orig_append(
+                _orig(
                     self,  # type: ignore[arg-type]
                     r,
                     turn,
