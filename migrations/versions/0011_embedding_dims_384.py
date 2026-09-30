@@ -14,7 +14,6 @@ The trusted routing documents themselves are model-independent and stay.
 
 from collections.abc import Sequence
 
-import sqlalchemy as sa
 from alembic import op
 from pgvector.sqlalchemy import Vector
 

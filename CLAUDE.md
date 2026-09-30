@@ -18,7 +18,9 @@ The acquisition era (judges, refinery, crawler, canary) is **FROZEN**: built, te
 ```bash
 .venv/bin/python -m pytest -q            # all tests (integration/security live-DB ones skip without Postgres)
 pytest -q tests/unit/test_foo.py::test_bar  # single test (pythonpath=src is set in pyproject.toml)
-ruff check src tests && ruff format --check src tests   # both must be clean (line-length 100, rules E,F,I,UP,B)
+ruff check src tests migrations scripts && ruff format --check src tests scripts   # both clean (line-length 100, rules E,F,I,UP,B; migrations lint-only)
+uv pip install --python .venv/bin/python -r requirements-lock.txt   # deps are locked (hashed, universal 3.11-3.13); pyproject keeps >= ranges
+uv pip compile pyproject.toml --extra dev --extra semantic --universal --python-version 3.11 --generate-hashes -o requirements-lock.txt   # regenerate after any dep change
 .venv/bin/python -m mypy src             # strict, clean required
 docker compose up -d db                  # pgvector/pgvector:pg16
 .venv/bin/alembic upgrade head           # needs .venv on PATH; env.py reads ACI_DATABASE_URL first
@@ -26,7 +28,7 @@ alembic check                            # must stay clean (ORM ↔ migrations i
 .venv/bin/uvicorn aci.main:app --reload  # /health liveness, /ready readiness (SELECT 1)
 ```
 
-CI (`.github/workflows/ci.yml`): ruff → format-check → mypy (strict) → `alembic upgrade head` → `pytest -q` on a pgvector service.
+CI (`.github/workflows/ci.yml`): `verify` job on a Python 3.11/3.12/3.13 matrix — install from `requirements-lock.txt` + `pip check` → ruff → format-check → mypy (strict, `python_version = "3.11"` floor) → `alembic upgrade head` → `alembic check` → `pytest -q` (pytest-timeout 300s/test) on a pgvector service; `security` job — `pip-audit` on the lock (fails on known vulns; ignore only via `--ignore-vuln <ID>` + justification), `bandit -c pyproject.toml -r src -ii` (justified skips in `[tool.bandit]`), gitleaks over full history.
 
 ## Architecture
 
