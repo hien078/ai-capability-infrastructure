@@ -1,29 +1,59 @@
+{% from "_macros.html" import icon %}
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
   <title>{% block title %}aci console{% endblock %}</title>
   <link rel="stylesheet" href="/ui/static/ui.css">
 </head>
 <body>
-<header>
-  <span class="brand">aci<span class="dim">·</span>console</span>
-  <nav>
-    <a href="/ui/">overview</a>
-    <a href="/ui/routes">routes</a>
-    <a href="/ui/corpus">corpus</a>
-    <a href="/ui/try">try</a>
-  </nav>
-  <span class="dim right">db {{ env.db }}</span>
-</header>
-<main>
-{% block main %}{% endblock %}
-</main>
-<footer>
-  aci console — {{ env.date }} · db {{ env.db }} ·
-  <a class="dim" href="/docs">openapi</a> ·
-  <span class="dim">read-only; governance stays in capctl</span>
-</footer>
+<div class="shell">
+  <aside class="side">
+    <a class="brand" href="/ui/">
+      <span class="brand-mark">{{ icon('routes', 15) }}</span>
+      <span class="brand-text">aci <span class="dim">console</span></span>
+    </a>
+
+    {% set nav = [
+      ('/ui/',       'overview', 'Overview', 'corpus · telemetry · eras'),
+      ('/ui/routes', 'routes',   'Routes',   'route runs and traces'),
+      ('/ui/corpus', 'corpus',   'Corpus',   'production capabilities'),
+      ('/ui/try',    'try',      'Try',      'run a real route'),
+    ] %}
+    <nav class="nav">
+      {% for href, ic, label, hint in nav %}
+      {% set active = (env.path == href) if href == '/ui/' else env.path.startswith(href) %}
+      <a href="{{ href }}" class="nav-item{% if active %} active{% endif %}"{% if active %} aria-current="page"{% endif %}>
+        {{ icon(ic) }}<span class="nav-label">{{ label }}</span><span class="nav-hint">{{ hint }}</span>
+      </a>
+      {% endfor %}
+    </nav>
+
+    <div class="side-foot">
+      <div class="side-kv">
+        <span class="side-k">{{ icon('database', 13) }} db</span>
+        <span class="side-v mono">{{ env.db }}</span>
+      </div>
+      <div class="side-kv">
+        <span class="side-k">{{ icon('cpu', 13) }} embedder</span>
+        <span class="side-v mono">{{ env.embedder }}</span>
+      </div>
+      <a class="side-link" href="/docs">{{ icon('book', 13) }} openapi<span class="right">{{ icon('external', 12) }}</span></a>
+      <p class="side-note">{{ icon('lock', 12) }} read-only · governance stays in <span class="mono">capctl</span></p>
+    </div>
+  </aside>
+
+  <div class="page">
+    <main>
+      {% block main %}{% endblock %}
+    </main>
+    <footer>
+      <span>aci console · {{ env.date }}</span>
+      <span class="dim">no build step · no javascript · one stylesheet</span>
+    </footer>
+  </div>
+</div>
 </body>
 </html>
