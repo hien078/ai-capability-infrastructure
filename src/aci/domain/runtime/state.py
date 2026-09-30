@@ -1,0 +1,112 @@
+"""Runtime state contracts (harness.md §8): one authoritative state model.
+
+StateManager is the ONLY owner of mutable runtime state (INV-01); everything
+else reads immutable snapshots and emits events. Snapshots are frozen —
+mutation goes through versioned commits (§8.5).
+"""
+
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from aci.domain.runtime.authority import GrantEnvelope
+from aci.domain.runtime.stop_reason import RunStatus, StopReason
+
+
+class BudgetLedger(BaseModel):
+    """§22.2 — limits/consumed/reserved/remaining per dimension."""
+
+    model_config = {"frozen": True}
+
+    max_turns: int = Field(default=40, ge=1)
+    max_total_tokens: int = Field(default=180_000, ge=1)
+    max_output_tokens: int = Field(default=30_000, ge=1)
+    max_tool_calls: int = Field(default=100, ge=1)
+    max_wall_time_seconds: int = Field(default=1_800, ge=1)
+    max_cost_usd: float = Field(default=2.50, ge=0.0)
+    max_recoveries: int = Field(default=8, ge=0)
+
+    consumed_turns: int = Field(default=0, ge=0)
+    consumed_input_tokens: int = Field(default=0, ge=0)
+    consumed_output_tokens: int = Field(default=0, ge=0)
+    consumed_tool_calls: int = Field(default=0, ge=0)
+    consumed_wall_time_seconds: float = Field(default=0.0, ge=0.0)
+    consumed_cost_usd: float = Field(default=0.0, ge=0.0)
+    consumed_recoveries: int = Field(default=0, ge=0)
+    reserved_tokens: int = Field(default=0, ge=0)
+    reserved_cost_usd: float = Field(default=0.0, ge=0.0)
+
+
+class RunState(BaseModel):
+    """§8.2 — the run's lifecycle record."""
+
+    model_config = {"frozen": True}
+
+    run_id: str = Field(min_length=1)
+    parent_run_id: str | None = None
+    status: RunStatus = RunStatus.CREATED
+    stop_reason: StopReason | None = None
+    detail_code: str | None = None
+    current_turn: int = Field(default=0, ge=0)
+    version: int = Field(default=1, ge=1)
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class TaskState(BaseModel):
+    """§8.4 — the delegated objective + acceptance criteria."""
+
+    model_config = {"frozen": True}
+
+    task_id: str = Field(min_length=1)
+    objective: str = Field(min_length=1)
+    constraints: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    current_phase: str = "understand"
+    progress: list[str] = Field(default_factory=list)
+    unresolved_questions: list[str] = Field(default_factory=list)
+    completion_claim: str | None = None
+
+
+class PlanItem(BaseModel):
+    """§10.3 — planner proposes; StateManager commits."""
+
+    model_config = {"frozen": True}
+
+    item_id: str = Field(min_length=1)
+    objective: str = Field(min_length=1)
+    status: Literal["pending", "running", "blocked", "done", "failed"] = "pending"
+    dependencies: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class CapabilityActivation(BaseModel):
+    """§49.3 CapabilityHandle — pinned immutable version per run (§11.7)."""
+
+    model_config = {"frozen": True}
+
+    capability_id: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    digest: str = Field(min_length=1)
+    activation_id: str = Field(min_length=1)
+    status: str = "ACTIVE"  # §49.1 lifecycle states
+    loaded_tools: list[str] = Field(default_factory=list)
+    context_tokens: int = Field(default=0, ge=0)
+    activated_at: datetime | None = None
+
+
+class RuntimeStateSnapshot(BaseModel):
+    """The read-only view other components receive (INV-01)."""
+
+    model_config = {"frozen": True}
+
+    run: RunState
+    task: TaskState
+    budget: BudgetLedger
+    grants: GrantEnvelope
+    plan: list[PlanItem] = Field(default_factory=list)
+    active_capabilities: list[CapabilityActivation] = Field(default_factory=list)
+    workspace_id: str | None = None
+    depth: int = Field(default=0, ge=0)

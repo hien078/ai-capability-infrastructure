@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     agent_model_base_url: str = ""
     #: API key for the executor endpoint ("" = no Authorization header).
     agent_model_api_key: str = ""
+    #: Model id the HarnessKernel model gateway requests (ADR-014).
+    agent_model_id: str = ""
+    #: Per-request timeout for the HarnessKernel model gateway (seconds).
+    agent_model_timeout_seconds: float = 120.0
     #: JSON file holding AgentProfile records (deployment DATA, §56.1) — a
     #: bare list or {"profiles": [...]}. Empty = no profiles configured.
     agent_profiles_path: str = ""

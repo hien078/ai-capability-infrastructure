@@ -27,6 +27,9 @@
 - ADR-013 — Automation đến staging + canary; human giữ production →
   `013-acquisition-tiers-and-canary.md` (plans auto/auto2/crawl; user decision
   2026-09-29; refines ADR-012 — bất biến production-via-human giữ nguyên).
+- ADR-014 — HarnessKernel: service-side agent runtime →
+  `014-harness-kernel.md` (plan `docs/plans/harness.md`; refines ADR-011 —
+  kernel là module monolith mới, không phải service riêng).
 
-Toàn bộ 13 ADR đã Accepted. Mọi ADR có Context/Decision/Consequences/Rejected/Verification
+Toàn bộ 14 ADR đã Accepted. Mọi ADR có Context/Decision/Consequences/Rejected/Verification
 và test tương ứng trong `tests/`.

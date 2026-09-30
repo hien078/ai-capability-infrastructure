@@ -42,6 +42,7 @@ from aci.application.protocols import AgentExecutor
 from aci.application.report_outcome import ReportOutcomeService
 from aci.application.resolve_capability import ResolveCapabilityService
 from aci.application.route_capabilities import RouteCapabilitiesService
+from aci.application.run_agent_task import AgentRunService
 from aci.application.search_capabilities import SearchCapabilitiesService
 from aci.config import Settings
 from aci.domain.agent.models import AgentProfile
@@ -102,6 +103,14 @@ def _build_executor(
             objects=objects,
         )
     return UnconfiguredExecutor()
+
+
+def _build_agent_run_service(settings: Settings) -> AgentRunService:
+    """HarnessKernel wiring (ADR-014): a real model gateway when configured,
+    else the run fails caller-visibly — never a silent default model."""
+    from aci.adapters.inbound.rest.agent_run_wiring import build_agent_run_service
+
+    return build_agent_run_service(settings)
 
 
 class Container:
@@ -182,6 +191,11 @@ class Container:
         self.agent_profiles: dict[str, AgentProfile] = _load_agent_profiles(
             settings.agent_profiles_path
         )
+        # HarnessKernel surface (ADR-014): the service-side agent runtime.
+        # The model gateway is a real provider client when
+        # ACI_AGENT_MODEL_BASE_URL is set; otherwise the run fails
+        # caller-visibly (the honest default, same rule as the A2A executor).
+        self.agent_run_service = _build_agent_run_service(settings)
         # Raw protocol handles, for inbound adapters that project the registry
         # directly (MCP skills extension reads releases/artifacts/objects).
         self.releases = releases
