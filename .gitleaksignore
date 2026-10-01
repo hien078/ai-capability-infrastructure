@@ -1,0 +1,3 @@
+# Fake fixture literal that tripped generic-api-key inside the CI allowlist itself
+# (commit 2574bec; superseded by a pattern allowlist in the next commit).
+2574bec59c21682c6f5347407c439ab230fa7384:.github/workflows/ci.yml:generic-api-key:144
