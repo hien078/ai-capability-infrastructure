@@ -1230,3 +1230,20 @@ def test_opencode_session_id_is_read_from_events() -> None:
     log = '{"type":"text","sessionID":"ses_123","part":{}}\n'
     session, is_error = q.parse_run_log_text(log)
     assert session == "ses_123" and not is_error
+
+
+def test_resource_overrides_are_validated_and_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "MAX_CONCURRENT_WORKERS",
+        "ADMIT_MEM_AVAILABLE_GIB",
+        "ADMIT_SINGLE_MEM_AVAILABLE_GIB",
+        "PRESSURE_MEM_AVAILABLE_GIB",
+    ):
+        monkeypatch.setattr(q, name, getattr(q, name))
+    q.apply_resource_overrides(3, 3.0, 1.5)
+    assert q.MAX_CONCURRENT_WORKERS == 3
+    assert q.ADMIT_MEM_AVAILABLE_GIB == q.ADMIT_SINGLE_MEM_AVAILABLE_GIB == 3.0
+    assert q.PRESSURE_MEM_AVAILABLE_GIB == 1.5
+    for bad in ((9, None, None), (None, 1.0, None), (None, None, 0.5), (None, 3.0, 3.5)):
+        with pytest.raises(q.QueueError):
+            q.apply_resource_overrides(*bad)

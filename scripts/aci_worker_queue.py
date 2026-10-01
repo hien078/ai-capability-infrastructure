@@ -1165,7 +1165,35 @@ def _default_state_path(manifest: Path | None) -> Path:
     return Path("data/aci-improvement/queue-state.json")
 
 
+def apply_resource_overrides(
+    max_workers: int | None, admit_gib: float | None, pressure_gib: float | None
+) -> None:
+    """Operator overrides for one supervisor process (validated, fail closed).
+    The per-worker cgroup limits are NOT overridable — they are the hard cap."""
+    global MAX_CONCURRENT_WORKERS, ADMIT_MEM_AVAILABLE_GIB, ADMIT_SINGLE_MEM_AVAILABLE_GIB
+    global PRESSURE_MEM_AVAILABLE_GIB
+    if max_workers is not None:
+        if not 1 <= max_workers <= 4:
+            raise QueueError("--max-workers must be 1..4")
+        MAX_CONCURRENT_WORKERS = max_workers
+    if admit_gib is not None:
+        if admit_gib < 2.0:
+            raise QueueError("--admit-gib must be >= 2.0 (one worker may use up to 2 GiB)")
+        ADMIT_MEM_AVAILABLE_GIB = ADMIT_SINGLE_MEM_AVAILABLE_GIB = admit_gib
+    if pressure_gib is not None:
+        if pressure_gib < 1.0:
+            raise QueueError("--pressure-gib must be >= 1.0")
+        PRESSURE_MEM_AVAILABLE_GIB = pressure_gib
+    if PRESSURE_MEM_AVAILABLE_GIB >= ADMIT_MEM_AVAILABLE_GIB:
+        raise QueueError("pressure floor must stay below the admission floor")
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    apply_resource_overrides(
+        getattr(args, "max_workers", None),
+        getattr(args, "admit_gib", None),
+        getattr(args, "pressure_gib", None),
+    )
     manifest_path = Path(args.manifest).resolve()
     jobs = load_manifest(manifest_path)
     state_path = Path(args.state) if args.state else _default_state_path(manifest_path)
@@ -1317,6 +1345,22 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("manifest")
     p_run.add_argument("--state", help="state file path (default: alongside manifest)")
     p_run.add_argument("--dry-run", action="store_true", help="admission + plan only, no launch")
+    p_run.add_argument(
+        "--max-workers", type=int, default=None, help=f"override (default {MAX_CONCURRENT_WORKERS})"
+    )
+    p_run.add_argument(
+        "--admit-gib",
+        type=float,
+        default=None,
+        help=f"MemAvailable floor for any admission (default {ADMIT_SINGLE_MEM_AVAILABLE_GIB}/"
+        f"{ADMIT_MEM_AVAILABLE_GIB} for first/additional workers)",
+    )
+    p_run.add_argument(
+        "--pressure-gib",
+        type=float,
+        default=None,
+        help=f"sustained-pressure MemAvailable floor (default {PRESSURE_MEM_AVAILABLE_GIB})",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_status = sub.add_parser("status", help="show persisted queue status")
