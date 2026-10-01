@@ -13,6 +13,7 @@ from aci.domain.runtime.evidence import (
     VerificationResult,
 )
 from aci.domain.runtime.state import RuntimeStateSnapshot
+from aci.runtime.scrub import scrub_paths
 
 
 class VerificationCheckError(Exception):
@@ -91,12 +92,16 @@ class VerificationManager:
 
     @staticmethod
     def to_pack(result: VerificationResult) -> EvidencePack:
-        """§0.2 — compact client-facing projection of the bundle."""
+        """§0.2 — compact client-facing projection of the bundle. ADV-2 (m9):
+        the summary is scrubbed of absolute server paths — the repair hints
+        carry the verifier's raw command output, and a client-facing surface
+        must not echo it verbatim (the model keeps the full hints as repair
+        feedback; its transcript is server-side)."""
         return EvidencePack(
             verification_verdict=result.verdict,
             checks=[f"{'PASS' if c.passed else 'FAIL'}:{c.name}" for c in result.checks],
             evidence_refs=[i.ref for i in result.evidence.items],
-            summary="; ".join(result.repair_hints[:3]),
+            summary=scrub_paths("; ".join(result.repair_hints[:3])),
         )
 
 

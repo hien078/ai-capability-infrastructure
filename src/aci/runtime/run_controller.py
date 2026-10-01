@@ -91,6 +91,7 @@ from aci.runtime.recovery import (
     classify_tool_failure,
     tool_retry_safe,
 )
+from aci.runtime.scrub import scrub_paths
 from aci.runtime.state_manager import (
     StateCommitConflict,
     StateEvent,
@@ -1073,7 +1074,15 @@ class HarnessKernel:
                 r,
                 StopReason.VERIFICATION_FAILED,
                 evidence=pack,
-                summary="; ".join(verification.repair_hints[:3]),
+                # ADV-2 (m9): the repair hints carry the verifier's RAW command
+                # output — the MODEL needs it as repair feedback (appended
+                # below, into the server-side transcript), but this summary is
+                # CALLER-visible and the client picked the command, so its
+                # output is a read-back channel for server paths (sys.prefix,
+                # the repo). Absolute paths are scrubbed; workspace-relative
+                # ones (the run dir is rewritten to "." by the check) stay
+                # readable.
+                summary=scrub_paths("; ".join(verification.repair_hints[:3])),
             )
         # §19.6 "no → RECOVERING": the model gets the verifier's evidence back.
         self._state.transition(r.run_id, RunStatus.RECOVERING)

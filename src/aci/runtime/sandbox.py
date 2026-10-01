@@ -28,7 +28,6 @@ execution. `NoSandbox` is the explicit opt-out (`ACI_AGENT_SANDBOX=none`).
 """
 
 import os
-import re
 import resource
 import shutil
 import subprocess
@@ -41,6 +40,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from aci.domain.capability.errors import DomainError, ErrorCode
+from aci.runtime.scrub import scrub_paths
 
 #: Where the run workspace appears inside the sandbox.
 WORKSPACE_MOUNT = "/workspace"
@@ -51,16 +51,6 @@ _SYSTEM_LINKS: tuple[str, ...] = ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "
 #: there is no network and no other user to look up).
 _ETC_FILES: tuple[str, ...] = ("/etc/ld.so.cache", "/etc/localtime")
 _PROBE_TIMEOUT_SECONDS = 15.0
-#: Absolute paths scrubbed from CALLER-VISIBLE sandbox diagnostics: bwrap's
-#: own stderr can name server paths (a failed bind source, the probe
-#: tempdir), and the refusal text reaches the client verbatim (403).
-_ABSOLUTE_PATH = re.compile(r"(?<![\w.-])/(?:[^\s\"']*)")
-
-
-def _scrub_paths(text: str) -> str:
-    """Replace every absolute path in ``text`` with ``<path>`` (ADV-1: the
-    probe's bwrap-stderr hint is caller-visible — no server paths on it)."""
-    return _ABSOLUTE_PATH.sub("<path>", text)
 
 
 def minimal_process_env(home: str | Path) -> dict[str, str]:
@@ -330,7 +320,7 @@ class BwrapSandbox:
             # a caller-visible 403, so absolute paths are scrubbed (ADV-1).
             detail = proc.stderr.decode("utf-8", errors="replace").strip().splitlines()
             hint = detail[-1][:200] if detail else f"exit {proc.returncode}"
-            reason = f"bwrap probe failed ({_scrub_paths(hint)})"
+            reason = f"bwrap probe failed ({scrub_paths(hint)})"
             return f"{reason} — unprivileged user namespaces blocked?"
         return None
 
