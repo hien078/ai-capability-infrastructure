@@ -293,6 +293,37 @@ class TestAgentRunsRest:
         assert again.status_code == 200
         assert again.json() == {"cancelled": False}
 
+    def test_resumed_approval_that_succeeds_carries_no_pause_detail(self, tmp_path: Path) -> None:
+        """2026-10-01 real-model finding: the resumed SUCCEEDED run still said
+        detail_code=APPROVAL_REQUIRED (response AND GET)."""
+        service = _service(
+            [_read("notes.txt"), FinalCandidate(summary="found it", claims=["notes.txt: cause X"])],
+            **_workspace(tmp_path),
+        )
+        client = _client(service)
+        paused = client.post(
+            "/v1/agent-runs",
+            json=_body(
+                requested_profile="researcher",
+                workspace="proj",
+                approval_required_tools=["read_file"],
+            ),
+        ).json()
+        assert paused["status"] == "interrupted_approval", paused
+        assert paused["detail_code"] == "APPROVAL_REQUIRED"
+        resumed = client.post(
+            f"/v1/agent-runs/{paused['run_id']}/resume",
+            json={"approval_id": paused["approval_id"], "approve": True},
+        )
+        assert resumed.status_code == 200, resumed.text
+        data = resumed.json()
+        assert data["status"] == "succeeded", data
+        assert data["stop_reason"] == "SUCCESS"
+        assert data["detail_code"] is None
+        got = client.get(f"/v1/agent-runs/{paused['run_id']}").json()
+        assert got["status"] == "succeeded"
+        assert got["detail_code"] is None
+
     def test_revise_of_a_paused_run_supersedes_its_pause(self, tmp_path: Path) -> None:
         service = _service([_read("notes.txt"), _read("notes.txt")], **_workspace(tmp_path))
         client = _client(service)

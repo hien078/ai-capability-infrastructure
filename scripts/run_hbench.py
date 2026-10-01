@@ -185,6 +185,10 @@ class _Factory:
 
 
 class _NullHandler:
+    #: No registry in the bench: capability_request is not offered to arm K
+    #: (arm N has no such action either — the protocols stay identical).
+    advertised = False
+
     def handle_request(self, request: object, snapshot: object) -> list[object]:
         return []
 

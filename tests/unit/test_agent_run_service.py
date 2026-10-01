@@ -478,6 +478,19 @@ class TestCancelAndReviseOfAPausedRun:
         assert self._fresh(tmp_path, store).cancel(paused.run_id) is False
         assert store.runs[paused.run_id].status == "succeeded"
 
+    def test_resumed_success_row_carries_no_pause_detail(self, tmp_path: Path) -> None:
+        """The persisted row follows the RunResult: a SUCCEEDED resume of an
+        approval pause is stored without detail_code=APPROVAL_REQUIRED."""
+        store = _CheckpointStore()
+        service, paused, _ = self._paused(tmp_path, [_read(), _done()], store=store)
+        assert store.runs[paused.run_id].detail_code == "APPROVAL_REQUIRED"
+        resumed = service.resume(paused.run_id, approval_id=paused.approval_id, approve=True)
+        assert resumed.status is RunStatus.SUCCEEDED, resumed
+        assert resumed.detail_code is None
+        row = store.runs[paused.run_id]
+        assert row.status == "succeeded" and row.stop_reason == "SUCCESS"
+        assert row.detail_code is None
+
     def test_a_resume_that_claimed_the_pause_first_wins(self, tmp_path: Path) -> None:
         """Another process claimed the pause (its resume is executing): this
         process's cancel loses the atomic claim — False, nothing written."""

@@ -219,6 +219,45 @@ APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
 #: Observation code for a call whose approval the delegating client denied.
 APPROVAL_REJECTED = "APPROVAL_REJECTED"
 
+#: The synthetic function tool through which the model asks the capability
+#: plane for a skill. 2026-10-01 real-model finding (glm-5.3): a model that
+#: works through function calls never emits the text-JSON capability_request
+#: action, so registry skills never loaded. Offered only when the capability
+#: handler is advertised; the kernel routes it to the capability path — it
+#: NEVER reaches ToolRuntime/AuthorityManager, needs no grants, and grants
+#: nothing (it loads instructions, never tools or permissions). Reserved id.
+CAPABILITY_TOOL_ID = "request_capability"
+CAPABILITY_TOOL = ToolSpec(
+    tool_id=CAPABILITY_TOOL_ID,
+    version="1",
+    description=(
+        "Ask the ACI capability registry for a vetted skill (domain-specific instructions) "
+        "matching a need; the matching skill's instructions are added to your context on the "
+        "next turn. Call it ALONE (no other tool call in the same message). It never grants "
+        "extra tools or permissions."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "objective": {
+                "type": "string",
+                "description": "What the skill should help with, in one sentence.",
+            },
+            "constraints": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional constraints (language, framework, environment).",
+            },
+        },
+        "required": ["objective"],
+    },
+    side_effect_class="READ_ONLY",
+)
+#: Observation code for a request_capability call the kernel did not process.
+CAPABILITY_REQUEST_NOT_PROCESSED = "CAPABILITY_REQUEST_NOT_PROCESSED"
+#: Observation code for a request_capability call with unusable arguments.
+CAPABILITY_ARGUMENTS_INVALID = "CAPABILITY_ARGUMENTS_INVALID"
+
 
 class HarnessKernel:
     """§5 composition root. Business logic lives in the managers; the kernel
@@ -247,6 +286,13 @@ class HarnessKernel:
         self._verifier = verifier
         self._recovery = recovery
         self._capabilities = capability_runtime
+        # A handler that can never load anything (no capability plane wired)
+        # declares advertised=False: the model is then not told about
+        # capability_request at all, rather than offered a dead action.
+        # A handler without ``handle_request`` cannot load anything either.
+        self._capabilities_advertised = bool(
+            getattr(capability_runtime, "advertised", True)
+        ) and callable(getattr(capability_runtime, "handle_request", None))
         self._events = event_bus or EventBus()
         self._checkpoints = checkpoints
         self._checkpoint_interval = checkpoint_interval_turns
@@ -714,15 +760,25 @@ class HarnessKernel:
     def _run_tools(
         self, r: _Run, action: ToolCallBatchAction, raw: str, turn: int
     ) -> RunResult | None:
+        """A function-call batch. ``request_capability`` calls never reach
+        ToolRuntime: a batch of ONLY such calls goes to the capability path;
+        in a MIXED batch the real tools execute normally and every
+        request_capability call is answered "not processed — call it alone"
+        (deterministic, no refresh budget spent, one CAS commit). Every
+        tool_call id gets a role="tool" result (OpenAI wire validity)."""
+        capability_calls = [c for c in action.calls if self._is_capability_call(c)]
+        if capability_calls and len(capability_calls) == len(action.calls):
+            return self._capability_tool_call(r, action, raw, turn)
+        calls = [c for c in action.calls if not self._is_capability_call(c)]
         self._emit(
             TOOL_REQUESTED,
             r.run_id,
-            payload={"calls": [c.tool_id for c in action.calls]},
+            payload={"calls": [c.tool_id for c in calls]},
             turn_id=f"turn-{turn}",
         )
         # §7.6: the model call just consumed budget, and the batch must fit whole.
         pre = self._state.snapshot(r.run_id)
-        stop = self._budget_stop_reason(pre) or _tool_call_stop(pre, len(action.calls))
+        stop = self._budget_stop_reason(pre) or _tool_call_stop(pre, len(calls))
         if stop is not None:
             return self._fail(r, stop)
         envelope = _envelope(pre)
@@ -733,8 +789,20 @@ class HarnessKernel:
             role="assistant", content=raw, tool_calls=list(action.calls), turn=turn
         )
         return self._execute_and_commit(
-            r, list(action.calls), pre, envelope, turn, lead=[assistant], approved=frozenset()
+            r,
+            calls,
+            pre,
+            envelope,
+            turn,
+            lead=[assistant],
+            approved=frozenset(),
+            answered=[
+                _capability_not_processed(c, _CAPABILITY_NOT_ALONE) for c in capability_calls
+            ],
         )
+
+    def _is_capability_call(self, call: ToolCall) -> bool:
+        return self._capabilities_advertised and call.tool_id == CAPABILITY_TOOL_ID
 
     def _execute_and_commit(
         self,
@@ -746,8 +814,13 @@ class HarnessKernel:
         *,
         lead: list[TranscriptEntry],
         approved: frozenset[str],
+        answered: list[ToolObservation] | None = None,
     ) -> RunResult | None:
+        """``answered``: results for calls the kernel answered WITHOUT
+        executing (request_capability in a mixed batch) — committed with the
+        batch, so every tool_call id of the assistant entry gets its result."""
         batch = self._execute_with_recovery(r, calls, pre, envelope, turn, approved)
+        batch.observations.extend(answered or [])
         return self._commit_batch(r, pre, turn, lead, batch)
 
     def _commit_batch(
@@ -1005,25 +1078,107 @@ class HarnessKernel:
     def _handle_capability_request(
         self, r: _Run, request: CapabilityRequest, raw: str, turn: int
     ) -> RunResult | None:
-        snapshot = self._state.snapshot(r.run_id)
+        """The text-JSON capability_request action (§47.1)."""
+        pre = self._state.snapshot(r.run_id)
+        outcome = self._acquire_capabilities(r, request, pre)
+        if isinstance(outcome, RunResult):
+            return outcome
+        content = raw if raw.strip() else request.model_dump_json()
+        entries = [
+            TranscriptEntry(role="assistant", content=content, turn=turn),
+            TranscriptEntry(role="user", content=_capability_note(outcome), turn=turn),
+        ]
+        self._commit_capabilities(r, pre, outcome, entries)
+        return None
+
+    def _capability_tool_call(
+        self, r: _Run, action: ToolCallBatchAction, raw: str, turn: int
+    ) -> RunResult | None:
+        """``request_capability`` as a function call (a batch of only such
+        calls): the FIRST is processed exactly like the text-JSON action
+        (same handler, same failure handling, same result note); any further
+        one is answered "not processed — one per message". Unusable arguments
+        are answered as such without spending the refresh budget. One CAS
+        commit: activations + the assistant entry carrying the tool_calls +
+        one role="tool" result per tool_call id (wire-valid transcript)."""
+        first, *rest = action.calls
+        pre = self._state.snapshot(r.run_id)
+        request = _capability_request_from(first.arguments)
+        activations: list[CapabilityActivation] = []
+        if request is None:
+            result_text = _render_observation(
+                _capability_not_processed(
+                    first, _CAPABILITY_ARGS_HINT, CAPABILITY_ARGUMENTS_INVALID
+                )
+            )
+        else:
+            outcome = self._acquire_capabilities(r, request, pre)
+            if isinstance(outcome, RunResult):
+                return outcome
+            activations = outcome
+            result_text = _capability_note(activations)
+        entries = [
+            TranscriptEntry(
+                role="assistant", content=raw, tool_calls=list(action.calls), turn=turn
+            ),
+            TranscriptEntry(
+                role="tool", content=result_text, tool_call_id=first.call_id, turn=turn
+            ),
+            *(
+                TranscriptEntry(
+                    role="tool",
+                    content=_render_observation(
+                        _capability_not_processed(c, _CAPABILITY_ONE_PER_MESSAGE)
+                    ),
+                    tool_call_id=c.call_id,
+                    turn=turn,
+                )
+                for c in rest
+            ),
+        ]
+        self._commit_capabilities(r, pre, activations, entries)
+        return None
+
+    def _acquire_capabilities(
+        self, r: _Run, request: CapabilityRequest, snapshot: RuntimeStateSnapshot
+    ) -> list[CapabilityActivation] | RunResult:
+        """CapabilityRuntime.handle_request (refresh budget + max_loaded
+        apply there); a failure ends the run CAPABILITY_UNAVAILABLE with the
+        exception TYPE only as detail. Writes no state."""
         try:
-            activations = self._capabilities.handle_request(request, snapshot)
+            return list(self._capabilities.handle_request(request, snapshot))
         except Exception as exc:  # noqa: BLE001 — capability gaps are failures, not crashes
             return self._fail(r, StopReason.CAPABILITY_UNAVAILABLE, detail=type(exc).__name__)
+
+    def _commit_capabilities(
+        self,
+        r: _Run,
+        pre: RuntimeStateSnapshot,
+        activations: list[CapabilityActivation],
+        entries: list[TranscriptEntry],
+    ) -> None:
+        """One CAS commit (§8.5): the activations (StateManager-owned,
+        INV-01) + the transcript of this turn; CAPABILITY_LOADED after it."""
+        self._state.commit(
+            r.run_id,
+            expected_version=pre.run.version,
+            events=[
+                *(
+                    StateEvent(
+                        event_type="capability.activated",
+                        payload={"activation": a.model_dump(mode="json")},
+                    )
+                    for a in activations
+                ),
+                transcript_event(entries),
+            ],
+        )
         for activation in activations:
-            self._state.activate_capability(r.run_id, activation)
             self._emit(
                 CAPABILITY_LOADED,
                 r.run_id,
                 payload={"capability_id": activation.capability_id, "version": activation.version},
             )
-        if activations:
-            loaded = ", ".join(f"{a.capability_id}@{a.version}" for a in activations)
-            note = f"Capability request result: loaded {loaded}; its instructions are in context."
-        else:
-            note = "Capability request result: nothing matched; continue with the available tools."
-        self._append(r, turn, assistant=raw or request.model_dump_json(), user=note)
-        return None
 
     def _record_plan(self, r: _Run, action: PlanUpdateRequest, raw: str, turn: int) -> None:
         """§10.3 — the planner proposes, StateManager commits; the plan then
@@ -1070,7 +1225,7 @@ class HarnessKernel:
         context, ContextEngine items, harness-observed progress) + the newest
         transcript groups that fit the remaining context budget."""
         assembled = self._context.build(snapshot, turn=turn)
-        system = [_system_prompt(snapshot, r.spec)]
+        system = [_system_prompt(snapshot, r.spec, capabilities=self._capabilities_advertised)]
         if r.contract.constraints:
             system.append("Constraints: " + "; ".join(r.contract.constraints))
         if r.contract.global_context:
@@ -1123,7 +1278,7 @@ class HarnessKernel:
         )
         return ModelRequest(
             messages=messages,
-            tools=self._advertised_tools(),
+            tools=self._model_tools(),
             model_class=r.spec.model_policy.default_class,
             token_limit=max(1, min(_MAX_TOKENS_PER_REQUEST, remaining_output)),
         )
@@ -1133,6 +1288,16 @@ class HarnessKernel:
         calling); a ToolExecutor without the seam advertises nothing."""
         getter = getattr(self._tools, "available_tools", None)
         return [] if getter is None else list(getter())
+
+    def _model_tools(self) -> list[ToolSpec]:
+        """What the model is offered: the executor's tools, plus the
+        synthetic ``request_capability`` when a capability plane is
+        advertised (the id is reserved — an executor tool of that id is
+        never offered, so the wire carries no duplicate function name)."""
+        tools = self._advertised_tools()
+        if not self._capabilities_advertised:
+            return tools
+        return [t for t in tools if t.tool_id != CAPABILITY_TOOL_ID] + [CAPABILITY_TOOL]
 
     def _append(self, r: _Run, turn: int, *, assistant: str, user: str | None) -> None:
         entries: list[TranscriptEntry] = []
@@ -1455,6 +1620,43 @@ def _failure(cls: FailureClass, component: str, evidence: list[str]) -> FailureE
     )
 
 
+def _capability_request_from(arguments: dict[str, object]) -> CapabilityRequest | None:
+    """request_capability arguments → CapabilityRequest, or None when they
+    are unusable (no non-empty ``objective``). A bare-string ``constraints``
+    is one constraint; non-string entries are dropped."""
+    objective = arguments.get("objective")
+    if not isinstance(objective, str) or not objective.strip():
+        return None
+    raw = arguments.get("constraints")
+    items = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
+    constraints = [c for c in items if isinstance(c, str) and c.strip()]
+    try:
+        return CapabilityRequest(objective=objective.strip(), constraints=constraints)
+    except ValidationError:
+        return None
+
+
+def _capability_note(activations: list[CapabilityActivation]) -> str:
+    if activations:
+        loaded = ", ".join(f"{a.capability_id}@{a.version}" for a in activations)
+        return f"Capability request result: loaded {loaded}; its instructions are in context."
+    return "Capability request result: nothing matched; continue with the available tools."
+
+
+def _capability_not_processed(
+    call: ToolCall, message: str, code: str = CAPABILITY_REQUEST_NOT_PROCESSED
+) -> ToolObservation:
+    """The result of a request_capability call the kernel did NOT process
+    (nothing was searched, no refresh budget spent)."""
+    return ToolObservation(
+        tool_call_id=call.call_id,
+        tool_id=call.tool_id,
+        status="error",
+        summary=message,
+        error_class=code,
+    )
+
+
 def _render_observation(obs: ToolObservation) -> str:
     """The tool result as the model sees it: status first, then the message
     that explains a non-success (denials, unknown tools), then the output."""
@@ -1537,6 +1739,31 @@ Other JSON actions: {"type": "plan_update", "items": [{"objective": "...", "stat
 "pending"}]} records a plan; {"type": "clarification", "question": "..."} stops the run to \
 ask the delegating client."""
 
+_CAPABILITY_PROTOCOL = (
+    f"Skills: call the {CAPABILITY_TOOL_ID} function ALONE (no other tool call in that "
+    'message), or reply with {"type": "capability_request", "objective": "...", '
+    '"constraints": [...]}, to ask the ACI capability registry for a vetted skill '
+    "(instructions) matching that need; the matching skills' instructions are added to your "
+    "context on the next turn. Use it when a domain-specific procedure would help; it never "
+    "grants extra tools or permissions."
+)
+
+_CAPABILITY_NOT_ALONE = (
+    f"NOT processed: {CAPABILITY_TOOL_ID} must be called ALONE (no other tool call in the "
+    "same message); the other calls of this message were handled normally. Call it again "
+    "by itself if you still need a skill."
+)
+
+_CAPABILITY_ONE_PER_MESSAGE = (
+    f"NOT processed: only the first {CAPABILITY_TOOL_ID} call of a message is handled; "
+    "combine the needs into one request if the result above does not cover them."
+)
+
+_CAPABILITY_ARGS_HINT = (
+    f'{CAPABILITY_TOOL_ID} needs {{"objective": "<non-empty string>"}} and optionally '
+    '{"constraints": ["..."]}; nothing was searched.'
+)
+
 _CLARIFICATION_ANSWER = "Answer from the delegating client to your question: {answer}"
 
 _CONTINUE_PROMPT = (
@@ -1560,7 +1787,9 @@ _VERIFICATION_FEEDBACK = (
 )
 
 
-def _system_prompt(snapshot: RuntimeStateSnapshot, spec: RuntimeSpec) -> str:
+def _system_prompt(
+    snapshot: RuntimeStateSnapshot, spec: RuntimeSpec, *, capabilities: bool = False
+) -> str:
     """Tier-0 context (§9.2): identity + objective + authority summary + protocol."""
     from aci.runtime.profiles import PROFILES
 
@@ -1580,4 +1809,6 @@ def _system_prompt(snapshot: RuntimeStateSnapshot, spec: RuntimeSpec) -> str:
             "Commands you may run (argv prefixes): " + "; ".join(grants.process.allowed_prefixes)
         )
     parts.append(_ACTION_PROTOCOL)
+    if capabilities:
+        parts.append(_CAPABILITY_PROTOCOL)
     return "\n".join(parts)

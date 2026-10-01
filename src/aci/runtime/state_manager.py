@@ -162,6 +162,13 @@ class StateManager:
             "status": status,
             "version": run.version + 1,
         }
+        if status is RunStatus.RUNNING:
+            # A live run has no stop: re-entering RUNNING (a resumed pause, a
+            # recovery) clears the previous stop's reason + detail, so a pause's
+            # APPROVAL_REQUIRED / CLARIFICATION_REQUIRED never leaks into the
+            # terminal result (2026-10-01 real-model finding).
+            update["stop_reason"] = None
+            update["detail_code"] = None
         if stop_reason is not None:
             update["stop_reason"] = stop_reason
         if detail_code is not None:

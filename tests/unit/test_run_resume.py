@@ -17,6 +17,7 @@ import pytest
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.actions import (
     ClarificationRequest,
+    DelegationRequest,
     FinalCandidate,
     ToolCall,
     ToolCallBatchAction,
@@ -502,6 +503,91 @@ class TestRestart:
         types = [e.event_type for e in events.history(RUN_ID)]
         assert types.index(CHECKPOINT_RESTORED) < types.index(RUN_RESUMED)
         assert types.index(RUN_RESUMED) < types.index(TOOL_APPROVAL_DECIDED)
+
+
+class TestPauseDetailDoesNotLeak:
+    """2026-10-01 real-model finding: a run resumed from an approval pause
+    that ended SUCCEEDED still carried detail_code="APPROVAL_REQUIRED".
+    Re-entering RUNNING clears the pause's stop reason + detail, so the
+    terminal result names its OWN outcome only."""
+
+    def test_approved_resume_that_succeeds_has_no_detail(self) -> None:
+        kernel, state, _, _, result = _paused(
+            [_batch(("w1", "fs.write", "src/a.py")), FinalCandidate(summary="done")]
+        )
+
+        assert result.detail_code == "APPROVAL_REQUIRED"
+        checkpoint = kernel.pending_checkpoint(RUN_ID)
+        assert checkpoint is not None
+        resumed = kernel.resume(checkpoint, approval=_decision(result.approval_id))
+        assert resumed.status is RunStatus.SUCCEEDED
+        assert resumed.stop_reason is StopReason.SUCCESS
+        assert resumed.detail_code is None
+        run = state.snapshot(RUN_ID).run
+        assert (run.stop_reason, run.detail_code) == (StopReason.SUCCESS, None)
+
+    def test_resumed_segment_runs_without_the_pause_stop(self) -> None:
+        """While the resumed run is live, the state carries no stop at all."""
+        seen: list[tuple[Any, Any]] = []
+        state_ref: list[StateManager] = []
+
+        def _observe(request: ModelRequest) -> FinalCandidate:
+            run = state_ref[0].snapshot(RUN_ID).run
+            seen.append((run.stop_reason, run.detail_code))
+            return FinalCandidate(summary="done")
+
+        kernel, state, _, _, result = _paused([_batch(("w1", "fs.write", "src/a.py")), _observe])
+        state_ref.append(state)
+        checkpoint = kernel.pending_checkpoint(RUN_ID)
+        assert checkpoint is not None
+        kernel.resume(checkpoint, approval=_decision(result.approval_id))
+        assert seen == [(None, None)]
+
+    def test_denied_resume_that_succeeds_has_no_detail(self) -> None:
+        kernel, _, _, _, result = _paused(
+            [_batch(("w1", "fs.write", "src/a.py")), FinalCandidate(summary="gave up")]
+        )
+        checkpoint = kernel.pending_checkpoint(RUN_ID)
+        assert checkpoint is not None
+        resumed = kernel.resume(checkpoint, approval=_decision(result.approval_id, approved=False))
+        assert resumed.status is RunStatus.SUCCEEDED
+        assert resumed.detail_code is None
+
+    def test_a_later_failure_gets_its_own_detail(self) -> None:
+        kernel, _, _, _, result = _paused(
+            [_batch(("w1", "fs.write", "src/a.py")), DelegationRequest(subtask_objective="x")]
+        )
+        checkpoint = kernel.pending_checkpoint(RUN_ID)
+        assert checkpoint is not None
+        resumed = kernel.resume(checkpoint, approval=_decision(result.approval_id))
+        assert resumed.status is RunStatus.FAILED
+        assert resumed.stop_reason is StopReason.AUTHORITY_DENIED
+        assert resumed.detail_code == "DELEGATION_DISABLED"
+
+    def test_a_later_failure_without_detail_does_not_inherit_the_pause(self) -> None:
+        """LIMIT_TURNS sets no detail of its own: None, never APPROVAL_REQUIRED."""
+        dispatcher = RecordingDispatcher()
+        model = ScriptedModel([_batch(("w1", "fs.write", "src/a.py"))])
+        kernel, _ = _kernel(model, dispatcher)
+        paused = kernel.run(_contract(), _spec(), max_turns=1)
+        checkpoint = kernel.pending_checkpoint(RUN_ID)
+        assert checkpoint is not None
+        resumed = kernel.resume(checkpoint, approval=_decision(paused.approval_id))
+        assert resumed.stop_reason is StopReason.LIMIT_TURNS
+        assert resumed.detail_code is None
+
+    def test_clarification_resume_that_succeeds_has_no_detail(self) -> None:
+        model = ScriptedModel(
+            [ClarificationRequest(question="which file?"), FinalCandidate(summary="done")]
+        )
+        kernel, _ = _kernel(model, RecordingDispatcher())
+        paused = kernel.run(_contract(), _spec(), max_turns=10)
+        assert paused.detail_code == "CLARIFICATION_REQUIRED"
+        checkpoint = kernel.pending_checkpoint(RUN_ID)
+        assert checkpoint is not None
+        resumed = kernel.resume(checkpoint, answer="src/a.py")
+        assert resumed.status is RunStatus.SUCCEEDED
+        assert resumed.detail_code is None
 
 
 class TestCancelPaused:

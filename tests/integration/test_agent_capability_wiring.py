@@ -32,7 +32,12 @@ from aci.domain.provenance.models import (
     LicensePermissions,
     SecurityAssessment,
 )
-from aci.domain.runtime.actions import CapabilityRequest, FinalCandidate
+from aci.domain.runtime.actions import (
+    CapabilityRequest,
+    FinalCandidate,
+    ToolCall,
+    ToolCallBatchAction,
+)
 from aci.domain.runtime.authority import GrantEnvelope
 from aci.domain.runtime.events import EventEnvelope
 from aci.domain.runtime.state import BudgetLedger, RunState, RuntimeStateSnapshot, TaskState
@@ -44,6 +49,7 @@ from aci.runtime.context_engine import ContextBudget, ContextEngine
 from aci.runtime.event_bus import CAPABILITY_LOADED, EventBus
 from aci.runtime.model_gateway import FakeModelGateway
 from aci.runtime.profiles import runtime_spec_for
+from aci.runtime.run_controller import CAPABILITY_TOOL_ID
 
 pytestmark = pytest.mark.integration
 
@@ -175,7 +181,9 @@ def test_registry_client_routes_resolves_and_activates_production_skill(
     assert f"steps for {token}" in loaded.instructions
 
 
+@pytest.mark.parametrize("via", ["json_action", "function_call"])
 def test_kernel_run_emits_capability_loaded_from_registry(
+    via: str,
     clients: RegistryCapabilityClientFactory,
     ingestion: SkillIngestionService,
     promotion: PromotionService,
@@ -183,8 +191,10 @@ def test_kernel_run_emits_capability_loaded_from_registry(
     security_repo: SqlAlchemySecurityAssessmentRepository,
     tmp_path: Path,
 ) -> None:
-    """End to end through the kernel: a scripted model asks for a capability;
-    the REST wiring's capability factory serves it from the registry."""
+    """End to end through the kernel: a scripted model asks for a capability
+    — as the text-JSON action, or (what real function-calling models do,
+    2026-10-01) by calling the request_capability tool; the REST wiring's
+    capability factory serves it from the registry."""
     token = uid("quibbleflux")
     cap = ingest_and_promote(ingestion, promotion, license_repo, security_repo, tmp_path, token)
 
@@ -199,9 +209,20 @@ def test_kernel_run_emits_capability_loaded_from_registry(
         def handle_request(self, request: object, snapshot: object) -> list[object]:
             return []
 
-    model = FakeModelGateway(
-        [CapabilityRequest(objective=f"{token} recalibration"), FinalCandidate(summary="done")]
+    ask: CapabilityRequest | ToolCallBatchAction = CapabilityRequest(
+        objective=f"{token} recalibration"
     )
+    if via == "function_call":
+        ask = ToolCallBatchAction(
+            calls=[
+                ToolCall(
+                    call_id="call_cap",
+                    tool_id=CAPABILITY_TOOL_ID,
+                    arguments={"objective": f"{token} recalibration"},
+                )
+            ]
+        )
+    model = FakeModelGateway([ask, FinalCandidate(summary="done")])
     bus = EventBus()
     seen: list[EventEnvelope] = []
     bus.subscribe(seen.append)  # the service frees bus history at run end
@@ -246,3 +267,10 @@ def test_kernel_run_emits_capability_loaded_from_registry(
     assert f"steps for {token}" not in "\n".join(m.content for m in model.requests[0].messages)
     block = next(m.content for m in model.requests[1].messages if f"steps for {token}" in m.content)
     assert f"<<<BEGIN SKILL REFERENCE {cap}@1.0.0" in block
+    # The registry plane is wired, so the function tool is offered.
+    assert CAPABILITY_TOOL_ID in {t.tool_id for t in model.requests[0].tools}
+    if via == "function_call":
+        tool_results = {
+            m.tool_call_id: m.content for m in model.requests[1].messages if m.role == "tool"
+        }
+        assert tool_results["call_cap"].startswith(f"Capability request result: loaded {cap}")

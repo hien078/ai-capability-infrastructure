@@ -54,6 +54,9 @@ class _NullDispatcher:
 class _NullCapabilityRuntime:
     """No capability plane wired: a request honestly loads nothing."""
 
+    #: The kernel does not offer capability_request to the model (dead action).
+    advertised = False
+
     def handle_request(self, request: object, snapshot: object) -> list[object]:  # noqa: ARG002
         return []
 
