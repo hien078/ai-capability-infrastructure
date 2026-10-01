@@ -48,6 +48,7 @@ from aci.domain.routing.models import (
     TaskDescriptor,
     TrustedRoutingDocument,
 )
+from aci.domain.runtime.persistence import AgentRunEventRecord, AgentRunRecord
 from aci.domain.skills.models import SourceProvenance
 
 
@@ -283,3 +284,21 @@ class AgentExecutor(Protocol):
         *,
         now: datetime,
     ) -> ExecutorResult: ...
+
+
+class AgentRunStore(Protocol):
+    """Durable storage for finished agent runs (§41.1, the §36-equivalent for
+    the HarnessKernel plane). Honest-null: a service built without a store
+    stays RAM-only — restart loses runs, exactly as before the store existed.
+
+    Rows are written ONCE at terminal state from the frozen RunResult; the
+    store is never a source of truth for a live run (StateManager is, INV-01).
+    """
+
+    def record_run(self, record: AgentRunRecord) -> None: ...
+
+    def record_events(self, events: list[AgentRunEventRecord]) -> None: ...
+
+    def get_run(self, run_id: str) -> AgentRunRecord | None: ...
+
+    def list_recent(self, limit: int = 50) -> list[AgentRunRecord]: ...

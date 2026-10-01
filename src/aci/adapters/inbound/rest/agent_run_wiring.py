@@ -43,7 +43,9 @@ class _NullCapabilityRuntime:
         return []
 
 
-def build_agent_run_service(settings: Settings) -> AgentRunService:
+def build_agent_run_service(
+    settings: Settings, *, run_store: object | None = None
+) -> AgentRunService:
     if not settings.agent_runs_token:
         # Honest-default log, once per process: the surface is reachable by
         # anyone with network access to the port and a run executes under
@@ -88,4 +90,5 @@ def build_agent_run_service(settings: Settings) -> AgentRunService:
         process_prefixes=settings.agent_process_prefixes,
         command_timeout_seconds=settings.agent_command_timeout_seconds,
         verification_timeout_seconds=settings.agent_verification_timeout_seconds,
+        run_store=run_store,  # type: ignore[arg-type]
     )

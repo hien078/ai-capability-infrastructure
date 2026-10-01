@@ -6,6 +6,7 @@ an AgentProfile and, when the client names a workspace (§16), provisions a
 per-run working copy whose grants never exceed the server ceiling (INV-02).
 """
 
+import logging
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Protocol, cast
 from uuid import uuid4
 
+from aci.application.protocols import AgentRunStore
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.authority import (
     ExecutionEnvelope,
@@ -35,6 +37,8 @@ from aci.runtime.run_controller import (
 )
 from aci.runtime.verification import VerifierCallable
 from aci.runtime.workspace import command_within_prefixes
+
+log = logging.getLogger(__name__)
 
 
 def new_run_id() -> str:
@@ -113,6 +117,7 @@ class AgentRunService:
         command_timeout_seconds: float = 120.0,
         verification_timeout_seconds: float = 300.0,
         event_bus: EventBus | None = None,
+        run_store: AgentRunStore | None = None,
     ) -> None:
         self._model_factory = model_gateway_factory
         self._tools_factory = tool_executor_factory
@@ -123,7 +128,8 @@ class AgentRunService:
         self._process_prefixes = [p for p in process_prefixes if p.strip()]
         self._command_timeout_ms = int(command_timeout_seconds * 1000)
         self._verification_timeout_ms = int(verification_timeout_seconds * 1000)
-        self._event_bus = event_bus
+        self._event_bus = event_bus if event_bus is not None else EventBus()
+        self._run_store = run_store
         self._cancel_tokens: dict[str, CancelToken] = {}
         self._results: dict[str, RunResult] = {}
         self._records: dict[str, _RunRecord] = {}
@@ -152,8 +158,31 @@ class AgentRunService:
         return self._start(contract, spec, options, source)
 
     def get(self, run_id: str) -> RunResult | None:
-        """§29 GET run — the last RunResult, or None when unknown."""
-        return self._results.get(run_id)
+        """§29 GET run — the last RunResult, or None when unknown.
+
+        RAM first (the live process), then the durable store (read-through:
+        a run from a PREVIOUS process is still readable after a restart —
+        the row is a projection of the frozen terminal state, INV-01)."""
+        result = self._results.get(run_id)
+        if result is not None:
+            return result
+        if self._run_store is None:
+            return None
+        record = self._run_store.get_run(run_id)
+        if record is None:
+            return None
+        return RunResult.model_validate(
+            {
+                "run_id": record.run_id,
+                "status": record.status,
+                "stop_reason": record.stop_reason,
+                "detail_code": record.detail_code,
+                "summary": record.summary,
+                "evidence": record.evidence,
+                "usage": record.usage,
+                "spec": record.spec or None,
+            }
+        )
 
     def contract(self, run_id: str) -> SubtaskContract | None:
         """The contract a known run executed (a revision's parent link lives here)."""
@@ -374,6 +403,68 @@ class AgentRunService:
                     workspace_id=binding.workspace_id if binding is not None else None,
                 )
             self._results[contract.task_id] = result
+            self._persist(contract, spec, options, result)
             return result
         finally:
             self._cancel_tokens.pop(contract.task_id, None)
+
+    def _persist(
+        self,
+        contract: SubtaskContract,
+        spec: RuntimeSpec,
+        options: RunOptions,
+        result: RunResult,
+    ) -> None:
+        """§41.1: project the frozen terminal state + the event history into
+        the durable store. Honest-null: no store wired = RAM-only (the
+        pre-0016 behavior). A persistence failure NEVER fails the run — the
+        result is already terminal and caller-visible; the store is
+        telemetry, not a dependency (§50)."""
+        if self._run_store is None:
+            return
+        from aci.domain.runtime.persistence import AgentRunEventRecord, AgentRunRecord
+
+        try:
+            self._run_store.record_run(
+                AgentRunRecord(
+                    run_id=result.run_id,
+                    parent_run_id=contract.parent_task_id,
+                    profile_id=contract.requested_profile,
+                    objective=contract.objective,
+                    workspace=options.workspace,
+                    status=result.status.value,
+                    stop_reason=result.stop_reason.value if result.stop_reason else None,
+                    detail_code=result.detail_code,
+                    summary=result.summary,
+                    evidence=result.evidence.model_dump(mode="json") if result.evidence else None,
+                    usage=result.usage.model_dump(mode="json"),
+                    spec=spec.model_dump(mode="json"),
+                    verification_command=list(options.verification_command)
+                    if options.verification_command is not None
+                    else None,
+                    created_at=contract.created_at,
+                    finished_at=datetime.now(UTC),
+                )
+            )
+            if self._event_bus is not None:
+                history = self._event_bus.history(result.run_id)
+                self._run_store.record_events(
+                    [
+                        AgentRunEventRecord(
+                            event_id=e.event_id,
+                            run_id=e.run_id,
+                            seq=seq,
+                            event_type=e.event_type,
+                            turn_id=e.turn_id,
+                            payload=dict(e.payload),
+                            recorded_at=e.timestamp,
+                        )
+                        for seq, e in enumerate(history)
+                    ]
+                )
+        except Exception:  # noqa: BLE003 — telemetry must never kill a finished run
+            log.warning(
+                "agent run %s persistence FAILED (result stays caller-visible)",
+                result.run_id,
+                exc_info=True,
+            )

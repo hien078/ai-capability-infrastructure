@@ -388,3 +388,47 @@ class TaskArtifactRow(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     digest: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AgentRunRow(Base):
+    """§41.1 persistence projection of one finished agent run — written once
+    at terminal state from the frozen RunResult, never a source of truth for
+    a live run (StateManager is, INV-01)."""
+
+    __tablename__ = "agent_runs"
+    __table_args__ = (Index("ix_agent_runs_created", "created_at"),)
+
+    run_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    parent_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    profile_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    objective: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    workspace: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    stop_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    detail_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    usage: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    verification_command: Mapped[list[Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentRunEventRow(Base):
+    """Harness telemetry (INV-15 made real): the EventBus history flattened
+    into ordered rows. CASCADE from its run."""
+
+    __tablename__ = "agent_run_events"
+    __table_args__ = (
+        ForeignKeyConstraint(["run_id"], ["agent_runs.run_id"], ondelete="CASCADE"),
+        Index("ix_agent_run_events_run", "run_id"),
+    )
+
+    event_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    turn_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -16,6 +16,7 @@ from aci.adapters.outbound.model_provider.hashing import HashingEmbedder
 from aci.adapters.outbound.model_provider.semantic import FastEmbedEmbedder
 from aci.adapters.outbound.object_store.fs import FsObjectStore
 from aci.adapters.outbound.pgvector.repository import SqlAlchemyEmbeddingRepository
+from aci.adapters.outbound.postgres.agent_runs import SqlAlchemyAgentRunRepository
 from aci.adapters.outbound.postgres.assessments import (
     SqlAlchemyLicenseAssessmentRepository,
     SqlAlchemySecurityAssessmentRepository,
@@ -105,12 +106,14 @@ def _build_executor(
     return UnconfiguredExecutor()
 
 
-def _build_agent_run_service(settings: Settings) -> AgentRunService:
+def _build_agent_run_service(
+    settings: Settings, run_store: object | None = None
+) -> AgentRunService:
     """HarnessKernel wiring (ADR-014): a real model gateway when configured,
     else the run fails caller-visibly — never a silent default model."""
     from aci.adapters.inbound.rest.agent_run_wiring import build_agent_run_service
 
-    return build_agent_run_service(settings)
+    return build_agent_run_service(settings, run_store=run_store)
 
 
 class Container:
@@ -135,6 +138,7 @@ class Container:
         bundles = SqlAlchemyBundleRepository(sessions)
         outcomes = SqlAlchemyOutcomeRecorder(sessions)
         benchmark_store = SqlAlchemyBenchmarkStore(sessions)
+        agent_run_store = SqlAlchemyAgentRunRepository(sessions)
 
         loader = ProductionCandidateLoader(capabilities, releases, licenses, securities)
         eligibility = DefaultEligibilityPolicy()
@@ -195,7 +199,7 @@ class Container:
         # The model gateway is a real provider client when
         # ACI_AGENT_MODEL_BASE_URL is set; otherwise the run fails
         # caller-visibly (the honest default, same rule as the A2A executor).
-        self.agent_run_service = _build_agent_run_service(settings)
+        self.agent_run_service = _build_agent_run_service(settings, agent_run_store)
         # Raw protocol handles, for inbound adapters that project the registry
         # directly (MCP skills extension reads releases/artifacts/objects).
         self.releases = releases
