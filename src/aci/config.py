@@ -5,6 +5,8 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from aci.domain.capability.models import DEFAULT_MAX_CONTEXT_TOKENS
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ACI_")
@@ -111,7 +113,8 @@ class Settings(BaseSettings):
     #: turn, so one capability request activates only a narrowed slice of the
     #: routed bundle. Defaults from the 2026-10-01 DEV_CASES replay (n=31,
     #: aci_bench, fastembed, read-only): margin 0.15 capped at 3 is the only
-    #: rule tried that keeps a relevant skill in 31/31 cases (top-5: 31/31)
+    #: rule tried that matches top-5's hit rate (31/31 before any token cap;
+    #: 30/31 with it — claude-api, ~21.5k tokens, can never be activated)
     #: while loading 1.61 skills instead of 5 (~3.5k vs ~11.8k skill tokens).
     #: PROVISIONAL: 0.15 just covers the largest observed gap (0.142, one
     #: debugging case); 0.10 keeps 30/31 and is not separable at n=31 —
@@ -122,9 +125,10 @@ class Settings(BaseSettings):
     agent_capability_score_margin: float = Field(default=0.15, ge=0.0)
     #: Cap on the summed real SKILL.md sizes (estimated tokens) activated per
     #: request; the top item is kept even alone if it fits the per-skill cap.
-    #: A safety net above the DEV p90 (~6.3k) — 3 skills x the 4k per-skill cap
-    #: can otherwise reach 12k.
-    agent_capability_max_total_tokens: int = Field(default=10000, ge=1)
+    #: Defaults to the routing bundle budget (DEFAULT_MAX_CONTEXT_TOKENS, 8000 —
+    #: composer v2 charges real sizes, so the router already stops there; one
+    #: knob, not two competing caps). Above the DEV p90 of kept skills (~6.3k).
+    agent_capability_max_total_tokens: int = Field(default=DEFAULT_MAX_CONTEXT_TOKENS, ge=1)
 
 
 settings = Settings()

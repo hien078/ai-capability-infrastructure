@@ -64,6 +64,7 @@ from aci.application.protocols import (
 from aci.application.route_capabilities import RouteCapabilitiesService
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.capability.models import (
+    DEFAULT_MAX_CONTEXT_TOKENS,
     ArtifactFile,
     BundleItem,
     CapabilityArtifact,
@@ -251,7 +252,7 @@ class RegistryCapabilityClient:
         *,
         principal_id: str = DEFAULT_PRINCIPAL,
         max_items: int = 5,
-        max_context_tokens: int = 6000,
+        max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
         route_runs: RouteRunRepository | None = None,
         selection_policy: SelectionPolicy | None = None,
     ) -> None:
@@ -430,7 +431,7 @@ class RegistryCapabilityClientFactory:
         *,
         principal_id: str = DEFAULT_PRINCIPAL,
         max_items: int = 5,
-        max_context_tokens: int = 6000,
+        max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
         route_runs: RouteRunRepository | None = None,
         selection_policy: SelectionPolicy | None = None,
     ) -> None:
