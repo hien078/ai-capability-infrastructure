@@ -284,6 +284,12 @@ class RetrievalTrace(BaseModel):
     returned_count: int
     limit: int
     model_id: str
+    #: Non-finite similarities sanitized at the retrieval boundary (§16):
+    #: a NaN/inf score (pgvector's ``1 - cosine_distance`` is NaN for a zero
+    #: vector) is treated as the lowest possible score, never propagated —
+    #: strict JSON / JSONB reject NaN tokens (§36), and the reranker's
+    #: clamp would silently boost it to the TOP retrieval signal.
+    nonfinite_scores: int = 0
 
 
 class RetrievalResult(BaseModel):

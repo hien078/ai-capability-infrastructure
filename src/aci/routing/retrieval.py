@@ -5,6 +5,7 @@ The retriever only ever sees eligible candidates (ADR-009) and only ever
 embeds normalized trusted metadata — never raw third-party skill bodies.
 """
 
+import math
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -23,6 +24,13 @@ from aci.domain.routing.models import (
 )
 
 MAX_DOCUMENT_CHARS = 2000
+
+#: A non-finite similarity is treated as the LOWEST possible cosine
+#: similarity and flagged in the stage trace — never propagated downstream
+#: (§16 boundary): strict JSON / JSONB reject NaN tokens (§36 telemetry),
+#: and the reranker's clamp would silently turn NaN into the TOP retrieval
+#: signal (``max(0.0, min(1.0, nan)) == 1.0``).
+LOWEST_SIMILARITY = -1.0
 
 
 def build_trusted_document(
@@ -140,15 +148,31 @@ class EmbeddingRetriever:
             query_vector, pairs, model_id=self._embedder.model_id, limit=limit
         )
         by_key = {(c.capability_id, c.version): c for c in eligible}
-        scored = [
-            ScoredCandidate(
-                candidate=by_key[(hit.capability_id, hit.version)],
-                score=hit.score,
-                document_text=texts.get((hit.capability_id, hit.version), ""),
+        scored: list[ScoredCandidate] = []
+        nonfinite = 0
+        for hit in hits:
+            key = (hit.capability_id, hit.version)
+            if key not in by_key:
+                continue
+            score = hit.score
+            if not math.isfinite(score):
+                # Non-finite similarity (NaN for a zero document vector):
+                # lowest possible score, flagged in the trace, never propagated.
+                score = LOWEST_SIMILARITY
+                nonfinite += 1
+            scored.append(
+                ScoredCandidate(
+                    candidate=by_key[key],
+                    score=score,
+                    document_text=texts.get(key, ""),
+                )
             )
-            for hit in hits
-            if (hit.capability_id, hit.version) in by_key
-        ]
+        if nonfinite:
+            # The store orders NaN ABOVE every finite value (Postgres sorts
+            # NaN as greater than everything in DESC); after sanitization the
+            # poisoned hits sit at the bottom where their score belongs. A
+            # stable sort keeps the finite order exactly as the store sent it.
+            scored.sort(key=lambda s: -s.score)
         return RetrievalResult(
             candidates=scored,
             trace=RetrievalTrace(
@@ -158,5 +182,6 @@ class EmbeddingRetriever:
                 returned_count=len(scored),
                 limit=limit,
                 model_id=self._embedder.model_id,
+                nonfinite_scores=nonfinite,
             ),
         )
