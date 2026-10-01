@@ -609,3 +609,150 @@ class TestSkillTextNeverGrantsAuthority:
         assert not (tmp_path / "etc/pwned.txt").exists()
         assert state.snapshot(RUN_ID).grants == WRITE_GRANT
         assert result.status is not RunStatus.SUCCEEDED
+
+
+# -- §13.6 approval interrupts (migration 0019 era) --------------------------
+#
+# An approval is a ONE-SHOT permission for exactly the paused call; it never
+# widens grants (INV-02): authority is still evaluated for the approved call
+# and for everything else, and a resumed run can only lose authority.
+
+
+def _approval_kernel(
+    model: ScriptedModel, root: Path, *, approval_tools: tuple[str, ...] = ("fs.write",)
+) -> tuple[HarnessKernel, StateManager]:
+    from aci.runtime.authority import AuthorityPolicy
+
+    registry = ToolRegistry()
+    registry.register(_path_tool("fs.read", "READ_ONLY", content=False))
+    registry.register(_path_tool("fs.write", "LOCAL_MUTATION", content=True))
+    state = StateManager()
+    kernel = HarnessKernel(
+        state=state,
+        model_gateway=model,
+        tool_executor=ToolRuntime(
+            registry,
+            dispatcher=NaiveDispatcher(root),
+            # The approval CLASS path too: LOCAL_MUTATION needs approval.
+            authority_policy=AuthorityPolicy(approval_classes={"LOCAL_MUTATION"}),
+        ),
+        context_engine=ContextEngine(ContextBudget(total_tokens=60_000)),
+        verifier=VerificationManager(verifier_checks(AgentProfileId.CODER)),
+        recovery=RecoveryManager(),
+        capability_runtime=object(),
+        approval_required_tools=approval_tools,
+    )
+    return kernel, state
+
+
+def _approve(approval_id: str | None, approved: bool = True) -> Any:
+    from aci.domain.runtime.authority import ApprovalDecision
+
+    return ApprovalDecision(
+        approval_id=approval_id or "none",
+        approved=approved,
+        decided_by="reviewer",
+        decided_at=datetime.now(UTC),
+    )
+
+
+class TestApprovalNeverWidensAuthority:
+    def test_out_of_scope_call_is_denied_without_ever_asking_for_approval(
+        self, tmp_path: Path
+    ) -> None:
+        """Approval cannot rescue a DENY: a write outside the write scope is
+        refused by authority — the run is not even paused for it."""
+        model = ScriptedModel(
+            [_write("c1", "etc/pwned.txt"), FinalCandidate(summary="ok", changes=["etc/pwned.txt"])]
+        )
+        kernel, _ = _approval_kernel(model, tmp_path)
+        result = kernel.run(_contract(), _coder_spec())
+        assert result.status is not RunStatus.INTERRUPTED_APPROVAL
+        assert result.approval_id is None
+        assert not (tmp_path / "etc/pwned.txt").exists()
+        tool_msgs = [m.content for m in model.requests[1].messages if m.role == "tool"]
+        assert any("AUTHORITY_DENIED" in c for c in tool_msgs)
+
+    def test_approving_a_tampered_out_of_scope_call_still_has_no_effect(
+        self, tmp_path: Path
+    ) -> None:
+        """Even if a pending out-of-scope call reached resume (a forged
+        checkpoint with a recomputed binding), the one-shot approval only
+        satisfies REQUIRE_APPROVAL — authority still DENIES the write."""
+        from aci.runtime.checkpoints import operation_hash
+
+        model = ScriptedModel(
+            [_write("c1", "out/app.py"), FinalCandidate(summary="ok", changes=["out/app.py"])]
+        )
+        kernel, _ = _approval_kernel(model, tmp_path)
+        paused = kernel.run(_contract(), _coder_spec())
+        assert paused.status is RunStatus.INTERRUPTED_APPROVAL
+        checkpoint = kernel.pending_checkpoint(RUN_ID)
+        assert checkpoint is not None and checkpoint.pending is not None
+        evil = ToolCall(
+            call_id="c1", tool_id="fs.write", arguments={"path": "etc/pwned.txt", "content": "x"}
+        )
+        forged = checkpoint.model_copy(
+            update={
+                "pending": checkpoint.pending.model_copy(
+                    update={"calls": [evil], "operation_hash": operation_hash(evil)}
+                )
+            }
+        )
+        result = kernel.resume(forged, approval=_approve(paused.approval_id))
+        assert not (tmp_path / "etc/pwned.txt").exists()
+        assert not (tmp_path / "out/app.py").exists()
+        assert result.status is not RunStatus.SUCCEEDED
+
+    def test_approved_call_runs_once_and_grants_are_unchanged(self, tmp_path: Path) -> None:
+        model = ScriptedModel(
+            [
+                _write("c1", "out/app.py"),
+                _write("c2", "out/app2.py"),  # same tool, new call: NOT pre-approved
+            ]
+        )
+        kernel, state = _approval_kernel(model, tmp_path)
+        paused = kernel.run(_contract(), _coder_spec())
+        checkpoint = kernel.pending_checkpoint(RUN_ID)
+        assert checkpoint is not None
+        again = kernel.resume(checkpoint, approval=_approve(paused.approval_id))
+        assert (tmp_path / "out/app.py").exists()
+        assert again.status is RunStatus.INTERRUPTED_APPROVAL  # c2 needs its own approval
+        assert not (tmp_path / "out/app2.py").exists()
+        assert state.snapshot(RUN_ID).grants == WRITE_GRANT  # approval extended nothing
+
+    def test_denied_approval_has_no_effect(self, tmp_path: Path) -> None:
+        model = ScriptedModel(
+            [_write("c1", "out/app.py"), FinalCandidate(summary="ok", changes=["out/app.py"])]
+        )
+        kernel, _ = _approval_kernel(model, tmp_path)
+        paused = kernel.run(_contract(), _coder_spec())
+        checkpoint = kernel.pending_checkpoint(RUN_ID)
+        assert checkpoint is not None
+        result = kernel.resume(checkpoint, approval=_approve(paused.approval_id, approved=False))
+        assert not (tmp_path / "out/app.py").exists()
+        # INV-08: the claimed change was never observed — no success.
+        assert result.status is not RunStatus.SUCCEEDED
+
+    def test_resume_cannot_widen_grants_past_the_checkpoint(self, tmp_path: Path) -> None:
+        """A caller passing WIDER grants on resume gets the intersection:
+        the checkpointed scope still bounds every effect (INV-02)."""
+        model = ScriptedModel(
+            [
+                _write("c1", "out/app.py"),
+                _write("c2", "etc/pwned.txt"),
+                FinalCandidate(summary="ok", changes=["out/app.py"]),
+            ]
+        )
+        kernel, state = _approval_kernel(model, tmp_path, approval_tools=())
+        paused = kernel.run(_contract(), _coder_spec())
+        checkpoint = kernel.pending_checkpoint(RUN_ID)
+        assert checkpoint is not None
+        everything = GrantEnvelope(
+            filesystem=FilesystemScope(read=["."], write=["."]),
+            process=ProcessScope(allowed_prefixes=["sh"]),
+        )
+        kernel.resume(checkpoint, approval=_approve(paused.approval_id), grants=everything)
+        assert not (tmp_path / "etc/pwned.txt").exists()
+        assert state.snapshot(RUN_ID).grants.filesystem.write == ["out"]
+        assert state.snapshot(RUN_ID).grants.process.allowed_prefixes == []

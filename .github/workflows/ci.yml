@@ -60,6 +60,24 @@ jobs:
           pip install -e . --no-deps
           pip check
 
+      # Agent-run process sandbox (harness.md §16.5): bubblewrap needs
+      # unprivileged user namespaces, which Ubuntu 24.04's AppArmor restricts
+      # by default — lift that on the throwaway runner so
+      # tests/security/test_process_sandbox.py really RUNS here (it skips
+      # only where bwrap is unusable). The smoke line fails the job loudly if
+      # the sandbox still cannot start.
+      - name: Install bubblewrap (process sandbox)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
+            --symlink usr/lib64 /lib64 --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache \
+            --proc /proc --dev /dev --unshare-all \
+            --die-with-parent --new-session --cap-drop ALL -- /usr/bin/true
+
       - run: ruff check src tests migrations scripts
 
       # migrations/ 0001-0008 predate the formatter; lint-only there.

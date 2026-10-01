@@ -3,7 +3,10 @@ materialize one §80 proof-loop task as a workspace, run it through the
 HarnessKernel, print what the verifier saw and what changed on disk.
 
 Usage (server started with ACI_AGENT_WORKSPACE_ROOT=<workspace-root> and
-ACI_AGENT_PROCESS_PREFIXES='["python -m pytest"]'):
+ACI_AGENT_PROCESS_PREFIXES='["python -m pytest"]'; the server's process
+sandbox — ACI_AGENT_SANDBOX, default bwrap, §16.5 — applies to the model's
+commands AND the verification command, so a host without usable bubblewrap
+refuses them until it is fixed or ACI_AGENT_SANDBOX=none is set explicitly):
     .venv/bin/python scripts/agent_run_smoke.py --task debug-mutable-default
 Exit code 0 iff the run status is "succeeded".
 """

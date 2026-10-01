@@ -62,6 +62,9 @@ _STATUS: dict[ErrorCode, int] = {
     ErrorCode.APPROVAL_REJECTED: 403,
     ErrorCode.APPROVAL_REPLAY_INVALID: 409,
     ErrorCode.AUTHORITY_EXPIRED: 403,
+    # Checkpoint resume (migration 0019)
+    ErrorCode.RUN_NOT_RESUMABLE: 409,
+    ErrorCode.CHECKPOINT_CONSUMED: 409,
 }
 
 #: Fixed client-facing text for server/upstream failures, keyed by status.

@@ -449,7 +449,19 @@ def verification_command_check(
                 mandatory=True,
                 detail=f"refused: {rendered!r} is outside the allowed verification prefixes",
             )
-        result = manager.execute(workspace_id, command, timeout_ms)
+        try:
+            result = manager.execute(workspace_id, command, timeout_ms)
+        except DomainError as exc:
+            if exc.code is not ErrorCode.PERMISSION_DENIED:
+                raise
+            # Fail closed AND visible: an unusable sandbox (or an envelope
+            # refusal) is a failed mandatory check whose detail says why.
+            return CheckResult(
+                name=VERIFICATION_CHECK_NAME,
+                passed=False,
+                mandatory=True,
+                detail=f"refused: {exc}"[:_DETAIL_CHARS],
+            )
         header = f"timed out after {timeout_ms}ms\n" if result.timed_out else ""
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)
         # §61: the detail reaches the model and the client — never the server path.

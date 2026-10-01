@@ -446,3 +446,25 @@ class AgentRunEventRow(Base):
     turn_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AgentRunCheckpointRow(Base):
+    """Migration 0019 — one PAUSE checkpoint of an agent run (§17.3/§31.4):
+    the serialized runtime Checkpoint (full state snapshot + pending
+    interrupt + run context) a resume continues from, at most once
+    (``consumed_at`` is set by the one resume that claims it). Server-side
+    only — never returned to a client. CASCADE from its run."""
+
+    __tablename__ = "agent_run_checkpoints"
+    __table_args__ = (
+        ForeignKeyConstraint(["run_id"], ["agent_runs.run_id"], ondelete="CASCADE"),
+        Index("ix_agent_run_checkpoints_run", "run_id", "created_at"),
+    )
+
+    checkpoint_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    approval_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

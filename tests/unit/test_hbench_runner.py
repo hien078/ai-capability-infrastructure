@@ -15,6 +15,7 @@ import run_hbench  # noqa: E402
 
 from aci.evaluation.harness_cases import HARNESS_CASE_IDS  # noqa: E402
 from aci.runtime.workspace import command_within_prefixes  # noqa: E402
+from tests.sandbox_support import available_sandbox  # noqa: E402
 
 
 class TestHbenchRunner:
@@ -275,6 +276,7 @@ class TestTurnBudgetFairness:
             tmp_path / "src",
             tmp_path / "runs",
             max_turns=4,
+            sandbox=available_sandbox(),
         )
         assert record["turns"] == 4
         notes = [

@@ -44,6 +44,7 @@ CAPABILITY_FEEDBACK = "capability.feedback"
 TOOL_REQUESTED = "tool.requested"
 TOOL_AUTHORITY_EVALUATED = "tool.authority.evaluated"
 TOOL_APPROVAL_REQUESTED = "tool.approval.requested"
+TOOL_APPROVAL_DECIDED = "tool.approval.decided"
 TOOL_EXECUTION_STARTED = "tool.execution.started"
 TOOL_EXECUTION_COMPLETED = "tool.execution.completed"
 TOOL_EXECUTION_FAILED = "tool.execution.failed"
@@ -92,6 +93,7 @@ ALL_EVENT_TYPES = frozenset(
         TOOL_REQUESTED,
         TOOL_AUTHORITY_EVALUATED,
         TOOL_APPROVAL_REQUESTED,
+        TOOL_APPROVAL_DECIDED,
         TOOL_EXECUTION_STARTED,
         TOOL_EXECUTION_COMPLETED,
         TOOL_EXECUTION_FAILED,

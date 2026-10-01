@@ -172,7 +172,9 @@ class ToolRuntime:
         self._guardrails = guardrails
         self._spill = spill
         # Default policy: empty ceiling — anything beyond the run's grants is
-        # DENY (no approval path exists on the kernel run loop yet).
+        # DENY. A REQUIRE_APPROVAL decision (approval classes) is surfaced as
+        # an APPROVAL_REQUIRED observation; the kernel pauses the run on it
+        # (§13.6) and a one-shot approval re-executes exactly that call.
         self._policy = authority_policy or AuthorityPolicy()
         self._evaluator = PolicyEvaluator()
         self._validator = ArgumentValidator()
@@ -184,7 +186,12 @@ class ToolRuntime:
         *,
         snapshot: RuntimeStateSnapshot,
         envelope: ExecutionEnvelope,
+        approved: bool = False,
     ) -> ToolObservation:
+        """``approved`` is a ONE-SHOT human approval for THIS call (§13.6):
+        it satisfies a REQUIRE_APPROVAL decision and nothing else — a DENY
+        (outside grants/ceiling, INV-02), an expired envelope or a guardrail
+        BLOCK still stop the call, and the envelope is never widened."""
         tool = self._registry.get(call.tool_id)
         if tool is None:
             available = ", ".join(sorted(t.tool_id for t in self._registry.all())) or "none"
@@ -211,9 +218,9 @@ class ToolRuntime:
             return self._error_observation(call, "TOOL_INVALID_ARGUMENT", str(exc))
         if decision.kind is AuthorityDecisionKind.DENY:
             return self._denied_observation(call, "AUTHORITY_DENIED", decision.reason)
-        if decision.kind is AuthorityDecisionKind.REQUIRE_APPROVAL:
+        if decision.kind is AuthorityDecisionKind.REQUIRE_APPROVAL and not approved:
             return self._denied_observation(
-                call, "APPROVAL_REQUIRED", f"{decision.reason} (no approval path on this run)"
+                call, "APPROVAL_REQUIRED", f"{decision.reason} (approval required)"
             )
         try:
             dispatch = self._dispatch(tool, args, envelope)
@@ -244,10 +251,43 @@ class ToolRuntime:
         *,
         snapshot: RuntimeStateSnapshot,
         envelope: ExecutionEnvelope,
+        approved_call_ids: frozenset[str] = frozenset(),
     ) -> list[ToolObservation]:
         # v2: always sequential. Parallel requires concurrency_safe tools +
         # disjoint mutable resources + authority permitting (§12.5, deferred).
-        return [self.execute(call, snapshot=snapshot, envelope=envelope) for call in calls]
+        return [
+            self.execute(
+                call,
+                snapshot=snapshot,
+                envelope=envelope,
+                approved=call.call_id in approved_call_ids,
+            )
+            for call in calls
+        ]
+
+    def preflight(self, call: ToolCall, *, envelope: ExecutionEnvelope) -> AuthorityDecision | None:
+        """The authority decision ``execute`` WOULD reach for ``call``, with
+        no dispatch and no side effect — or None when the call would fail
+        before authority (unknown tool, invalid arguments, guardrail BLOCK,
+        expired envelope). The kernel asks before pausing a run for an
+        approval, so a call that authority would DENY anyway never bothers
+        a human (and an approval can never turn a DENY into an effect)."""
+        tool = self._registry.get(call.tool_id)
+        if tool is None:
+            return None
+        try:
+            args = self._validate_arguments(tool, call)
+        except DomainError:
+            return None
+        if self._guardrails is not None:
+            if self._guardrails.check_pre_tool(tool, args).status == "BLOCK":
+                return None
+        if envelope_expired(envelope):
+            return None
+        try:
+            return self._authorize(tool, args, envelope)
+        except DomainError:
+            return None
 
     def available_tools(self) -> list[ToolSpec]:
         """§12.2 — the specs the model gateway advertises to the model."""

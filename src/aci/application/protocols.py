@@ -48,7 +48,11 @@ from aci.domain.routing.models import (
     TaskDescriptor,
     TrustedRoutingDocument,
 )
-from aci.domain.runtime.persistence import AgentRunEventRecord, AgentRunRecord
+from aci.domain.runtime.persistence import (
+    AgentRunCheckpointRecord,
+    AgentRunEventRecord,
+    AgentRunRecord,
+)
 from aci.domain.skills.models import SourceProvenance
 
 
@@ -291,8 +295,10 @@ class AgentRunStore(Protocol):
     the HarnessKernel plane). Honest-null: a service built without a store
     stays RAM-only — restart loses runs, exactly as before the store existed.
 
-    Rows are written ONCE at terminal state from the frozen RunResult; the
-    store is never a source of truth for a live run (StateManager is, INV-01).
+    Rows are written when a run stops (terminal, or a resumable pause) from
+    the frozen RunResult; the store is never a source of truth for a live
+    run (StateManager is, INV-01). A pause checkpoint is the one exception
+    the store feeds BACK: a resume restores the kernel from it (§17.4).
     """
 
     def record_run(self, record: AgentRunRecord) -> None: ...
@@ -302,3 +308,23 @@ class AgentRunStore(Protocol):
     def get_run(self, run_id: str) -> AgentRunRecord | None: ...
 
     def list_recent(self, limit: int = 50) -> list[AgentRunRecord]: ...
+
+    # -- migration 0019: pause checkpoints (§17.3) + resumed-segment events --
+
+    def append_events(self, events: list[AgentRunEventRecord]) -> None:
+        """Append a RESUMED segment's events after the run's stored ones
+        (``seq`` re-based past the current maximum) — never a replace."""
+        ...
+
+    def record_checkpoint(self, record: AgentRunCheckpointRecord) -> None:
+        """Store a pause checkpoint (the run row must already exist)."""
+        ...
+
+    def latest_checkpoint(self, run_id: str) -> AgentRunCheckpointRecord | None:
+        """The run's newest pause checkpoint, consumed or not."""
+        ...
+
+    def consume_checkpoint(self, checkpoint_id: str, *, at: datetime) -> bool:
+        """Atomically claim a checkpoint for resume: True for exactly ONE
+        caller (consumed_at was NULL), False for every later one."""
+        ...

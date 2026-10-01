@@ -22,6 +22,11 @@ from aci.runtime.capability_runtime import ACIClient, CapabilityRuntime
 from aci.runtime.context_engine import ContextBudget, ContextEngine
 from aci.runtime.model_gateway import OpenAICompatGateway
 from aci.runtime.protocols import ToolDispatchResult
+from aci.runtime.sandbox import (
+    ProcessSandbox,
+    ResourceLimits,
+    build_process_sandbox,
+)
 from aci.runtime.tool_runtime import ToolRegistry, ToolRuntime
 
 
@@ -53,6 +58,46 @@ class _NullCapabilityRuntime:
         return []
 
 
+def build_sandbox(settings: Settings) -> ProcessSandbox:
+    """§16.5 — the process sandbox every run's commands go through, built
+    from settings. Logs once at startup when processes are enabled and the
+    sandbox is either explicitly off or unusable (then every command is
+    refused — fail closed, never a silent unsandboxed run)."""
+    import logging
+
+    logger = logging.getLogger("aci.agent_runs")
+    mb = 1024 * 1024
+    sandbox = build_process_sandbox(
+        settings.agent_sandbox,
+        limits=ResourceLimits(
+            cpu_seconds=settings.agent_sandbox_cpu_seconds,
+            address_space_bytes=settings.agent_sandbox_memory_mb * mb,
+            file_size_bytes=settings.agent_sandbox_file_size_mb * mb,
+            max_processes=settings.agent_sandbox_max_processes,
+            open_files=settings.agent_sandbox_open_files,
+        ),
+        extra_ro_binds=settings.agent_sandbox_ro_binds,
+    )
+    if not settings.agent_process_prefixes:
+        return sandbox  # no process authority: nothing to probe or warn about
+    if sandbox.name == "none":
+        logger.warning(
+            "ACI_AGENT_SANDBOX=none — agent-run commands (run_command, "
+            "verification_command) execute UNSANDBOXED as the server user with "
+            "full network and filesystem access; use only on a disposable host"
+        )
+        return sandbox
+    reason = sandbox.unavailable_reason()
+    if reason is not None:
+        logger.warning(
+            "agent-run process sandbox UNUSABLE (%s) — every run_command and "
+            "verification_command will be REFUSED until bubblewrap works or "
+            "ACI_AGENT_SANDBOX=none is set explicitly",
+            reason,
+        )
+    return sandbox
+
+
 def build_agent_run_service(
     settings: Settings,
     *,
@@ -61,8 +106,8 @@ def build_agent_run_service(
 ) -> AgentRunService:
     if not settings.agent_runs_token:
         # Honest-default log, once per process: the surface is reachable by
-        # anyone with network access to the port and a run executes under
-        # the server user (no sandbox, §16.4).
+        # anyone with network access to the port and a run executes code
+        # on this host (sandboxed per ACI_AGENT_SANDBOX, §16.5).
         import logging
 
         logging.getLogger("aci.agent_runs").warning(
@@ -108,4 +153,5 @@ def build_agent_run_service(
         command_timeout_seconds=settings.agent_command_timeout_seconds,
         verification_timeout_seconds=settings.agent_verification_timeout_seconds,
         run_store=run_store,  # type: ignore[arg-type]
+        process_sandbox=build_sandbox(settings),
     )

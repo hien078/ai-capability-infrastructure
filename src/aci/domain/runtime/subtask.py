@@ -71,3 +71,7 @@ class RunResult(BaseModel):
     usage: RunUsage = Field(default_factory=RunUsage)
     trace_ref: str | None = None
     spec: RuntimeSpec | None = None  # reproducibility (§52) — pinned versions
+    #: Set only on an INTERRUPTED_APPROVAL pause (§13.6): the id a client's
+    #: approve/deny decision must name to resume the run (one-shot, bound to
+    #: the paused operation). None on every other result.
+    approval_id: str | None = None

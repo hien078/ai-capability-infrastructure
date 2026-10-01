@@ -91,7 +91,34 @@ hoặc test đơn vị tương ứng):
     cho cả model lẫn verifier (rỗng = không có `run_command`). Process con nhận env
     tối thiểu (không bao giờ thấy API key của server). **Không có sandbox**: bật
     process prefixes nghĩa là code trong workspace chạy dưới user của server —
-    SandboxWorkspace vẫn là non-goal v2 (mục 6).
+    SandboxWorkspace vẫn là non-goal v2 (mục 6). *(Đã thay thế bởi mục 13.)*
+
+## Amendment 2026-10-01 — sandbox, approval/resume, registry skills (quyết định của user)
+
+13. **Sandbox là BẮT BUỘC (thay thế "Docker sandbox backend" trong mục 6 và câu cuối
+    mục 12).** Mọi process của agent-run (`run_command` của model, `verification_command`
+    của client, phép đo post-hoc của H-bench) chạy trong `BwrapSandbox`
+    (`src/aci/runtime/sandbox.py`): `/usr` + interpreter prefixes read-only, workspace
+    read-write tại `/workspace` (đường dẫn trung tính), `--unshare-all` (không mạng),
+    `--cap-drop ALL`, `--clearenv` + env tối thiểu, `/proc` `/dev` mới, tmpfs `/tmp`,
+    giới hạn `prlimit` (`ACI_AGENT_SANDBOX_*`). `$HOME`, repo, `data/` và socket DB
+    không bao giờ được bind. **Fail closed:** bwrap không dùng được → lệnh bị từ chối
+    (PERMISSION_DENIED; 403 ngay lúc POST nếu có `verification_command`).
+    `ACI_AGENT_SANDBOX=none` là opt-out tường minh, có cảnh báo lớn. Còn lại: đường dẫn
+    interpreter nhìn thấy được (read-only).
+14. **Approval + resume.** REQUIRE_APPROVAL làm run DỪNG (`interrupted_approval`) TRƯỚC
+    khi call bị gate chạy; checkpoint dừng (snapshot đủ + phần batch chưa chạy, gắn
+    `apr_…` + sha256 của tool/args) được lưu bền (`agent_run_checkpoints`, migration
+    0019). `POST /v1/agent-runs/{id}/resume` resume CHÍNH run đó tối đa một lần:
+    StateManager khôi phục cùng version (INV-01), budget còn lại (không reset), grants =
+    checkpoint ∩ trần hiện tại (chỉ thu hẹp, INV-02), approve = đúng các call đang chờ
+    một lần (authority vẫn đánh giá). Nguồn approval: server floor
+    `ACI_AGENT_APPROVAL_REQUIRED_TOOLS` ∪ `approval_required_tools` của request (chỉ thêm).
+    Clarification cũng checkpoint và resume bằng `{answer}`.
+15. **Registry skills trên đường REST.** CapabilityRuntime dùng cùng
+    `RouteCapabilitiesService.route()` như `/v1/routes` (eligibility trước); nội dung
+    SKILL.md đã verify digest được đưa vào context trong khối "third-party reference"
+    có giới hạn kích thước; không gì trên đường authority đọc nó.
 
 ## Verification
 

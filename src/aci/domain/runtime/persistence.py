@@ -1,9 +1,12 @@
 """Persistence projections for agent runs (§41.1, the §36-equivalent for the
 HarnessKernel plane).
 
-A run row is written ONCE, at terminal state, from the frozen RunResult —
-the row is a projection, never a source of truth for the live kernel (the
-StateManager stays the only mutable authority, INV-01). Events are the
+A run row is written when the run stops — at terminal state, or at a
+resumable pause (re-written when the resumed run stops again) — from the
+frozen RunResult: the row is a projection, never a source of truth for the
+live kernel (the StateManager stays the only mutable authority, INV-01).
+A pause also writes a checkpoint row (migration 0019) that a resume, in this
+process or after a restart, continues from. Events are the
 harness telemetry (INV-15 made real): the EventBus history flattened into
 ordered rows.
 
@@ -74,3 +77,24 @@ class AgentRunEventRecord(BaseModel):
     turn_id: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
     recorded_at: datetime
+
+
+class AgentRunCheckpointRecord(BaseModel):
+    """One PAUSE checkpoint of an agent run (migration 0019, §17.3/§31.4):
+    the run stopped INTERRUPTED (clarification) or INTERRUPTED_APPROVAL and
+    can be resumed — at most once — from ``payload`` (the serialized
+    runtime ``Checkpoint``: full state snapshot + pending interrupt + run
+    context). Server-side only: the payload is never put on a wire."""
+
+    model_config = {"frozen": True}
+
+    checkpoint_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    #: "approval" | "clarification" — what the pause waits for.
+    kind: str = Field(min_length=1)
+    #: The approval a resume must name (approval pauses only).
+    approval_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict, repr=False)
+    created_at: datetime
+    #: Set by the ONE resume that claimed this checkpoint; never cleared.
+    consumed_at: datetime | None = None

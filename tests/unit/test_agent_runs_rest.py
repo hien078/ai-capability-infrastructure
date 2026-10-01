@@ -18,6 +18,7 @@ from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.actions import FinalCandidate, ToolCallBatchAction
 from aci.domain.runtime.tools import ToolCall
 from aci.runtime.model_gateway import FakeModelGateway
+from tests.sandbox_support import available_sandbox
 
 
 class _FakeFactory:
@@ -107,6 +108,10 @@ def _workspace(tmp_path: Path) -> dict[str, Any]:
         "workspace_root": tmp_path / "sources",
         "runs_root": tmp_path / "runs",
         "process_prefixes": [sys.executable],
+        # Real bwrap where usable (CI), explicit opt-out elsewhere — these
+        # tests are about run wiring, tests/security/test_process_sandbox.py
+        # about the sandbox.
+        "process_sandbox": available_sandbox(),
     }
 
 
@@ -253,6 +258,67 @@ class TestAgentRunsRest:
         client = _client(service)
         response = client.post("/v1/agent-runs/ghost/revise", json={"feedback": "again"})
         assert response.status_code == 404
+
+    def test_cancel_of_a_paused_run(self, tmp_path: Path) -> None:
+        """POST cancel on a PAUSED run: the same ``{"cancelled": bool}`` shape;
+        the run is then CANCELLED on GET and its pause cannot be resumed."""
+        service = _service([_read("notes.txt")], **_workspace(tmp_path))
+        client = _client(service)
+        paused = client.post(
+            "/v1/agent-runs",
+            json=_body(
+                requested_profile="researcher",
+                workspace="proj",
+                approval_required_tools=["read_file"],
+            ),
+        ).json()
+        assert paused["status"] == "interrupted_approval", paused
+        run_id = paused["run_id"]
+
+        cancelled = client.post(f"/v1/agent-runs/{run_id}/cancel")
+        assert cancelled.status_code == 200
+        assert cancelled.json() == {"cancelled": True}
+        got = client.get(f"/v1/agent-runs/{run_id}").json()
+        assert got["status"] == "cancelled"
+        assert got["stop_reason"] == "CANCELLED"
+        assert got["detail_code"] == "CANCELLED_WHILE_PAUSED"
+        assert got["approval_id"] is None
+        resumed = client.post(
+            f"/v1/agent-runs/{run_id}/resume",
+            json={"approval_id": paused["approval_id"], "approve": True},
+        )
+        assert resumed.status_code == 409
+        assert resumed.json()["error"]["code"] == "CHECKPOINT_CONSUMED"
+        again = client.post(f"/v1/agent-runs/{run_id}/cancel")
+        assert again.status_code == 200
+        assert again.json() == {"cancelled": False}
+
+    def test_revise_of_a_paused_run_supersedes_its_pause(self, tmp_path: Path) -> None:
+        service = _service([_read("notes.txt"), _read("notes.txt")], **_workspace(tmp_path))
+        client = _client(service)
+        paused = client.post(
+            "/v1/agent-runs",
+            json=_body(
+                requested_profile="researcher",
+                workspace="proj",
+                approval_required_tools=["read_file"],
+            ),
+        ).json()
+        assert paused["status"] == "interrupted_approval", paused
+        revision = client.post(
+            f"/v1/agent-runs/{paused['run_id']}/revise", json={"feedback": "read it"}
+        )
+        assert revision.status_code == 201, revision.text
+        assert revision.json()["run_id"] != paused["run_id"]
+        parent = client.get(f"/v1/agent-runs/{paused['run_id']}").json()
+        assert parent["status"] == "cancelled"
+        assert parent["detail_code"] == "SUPERSEDED_BY_REVISION"
+        resumed = client.post(
+            f"/v1/agent-runs/{paused['run_id']}/resume",
+            json={"approval_id": paused["approval_id"], "approve": True},
+        )
+        assert resumed.status_code == 409
+        assert resumed.json()["error"]["code"] == "CHECKPOINT_CONSUMED"
 
     # -- workspace runs (§16) ----------------------------------------------------
 
@@ -573,6 +639,7 @@ class TestAgentRunsRest:
             agent_workspace_root=str(options["workspace_root"]),
             agent_runs_root=str(options["runs_root"]),
             agent_process_prefixes=[sys.executable],
+            agent_sandbox="bwrap" if available_sandbox().name == "bwrap" else "none",
         )
         client = _client(build_agent_run_service(settings))
         assert client.post("/v1/agent-runs", json=_body(workspace="ghost")).status_code == 404

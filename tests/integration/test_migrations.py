@@ -177,3 +177,67 @@ def test_0018_revision_state_round_trips(scratch_db_url: str) -> None:
         command.check(cfg)
     finally:
         eng.dispose()
+
+
+def test_0019_agent_run_checkpoints_round_trips(scratch_db_url: str) -> None:
+    """0019 adds the pause-checkpoint table (CASCADE from its run): a
+    downgrade drops it and keeps the run row; re-upgrading restores an empty
+    table (a pre-0019 paused run is readable but not resumable)."""
+    cfg = _alembic_config()
+    command.upgrade(cfg, "head")
+    eng = create_engine(scratch_db_url)
+    try:
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO agent_runs (run_id, profile_id, objective, summary, status, "
+                    "usage, spec, created_at) VALUES ('run_chk', 'coder', 'o', '', "
+                    "'interrupted_approval', '{}', '{}', now())"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO agent_run_checkpoints (checkpoint_id, run_id, kind, "
+                    "approval_id, payload, created_at) VALUES ('chk-1', 'run_chk', "
+                    "'approval', 'apr_1', '{}', now())"
+                )
+            )
+            claimed = conn.execute(
+                text(
+                    "UPDATE agent_run_checkpoints SET consumed_at = now() "
+                    "WHERE checkpoint_id = 'chk-1' AND consumed_at IS NULL RETURNING checkpoint_id"
+                )
+            ).all()
+            assert len(claimed) == 1
+
+        command.downgrade(cfg, "0018")
+        with eng.connect() as conn:
+            assert (
+                conn.execute(text("SELECT to_regclass('agent_run_checkpoints')")).scalar_one()
+                is None
+            )
+            assert (
+                conn.execute(
+                    text("SELECT status FROM agent_runs WHERE run_id = 'run_chk'")
+                ).scalar_one()
+                == "interrupted_approval"
+            )
+
+        command.upgrade(cfg, "head")
+        with eng.begin() as conn:
+            assert (
+                conn.execute(text("SELECT count(*) FROM agent_run_checkpoints")).scalar_one() == 0
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO agent_run_checkpoints (checkpoint_id, run_id, kind, payload, "
+                    "created_at) VALUES ('chk-2', 'run_chk', 'clarification', '{}', now())"
+                )
+            )
+            conn.execute(text("DELETE FROM agent_runs WHERE run_id = 'run_chk'"))
+            assert (
+                conn.execute(text("SELECT count(*) FROM agent_run_checkpoints")).scalar_one() == 0
+            )
+        command.check(cfg)
+    finally:
+        eng.dispose()

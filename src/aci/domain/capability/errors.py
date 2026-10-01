@@ -37,6 +37,12 @@ class ErrorCode(StrEnum):
     APPROVAL_REJECTED = "APPROVAL_REJECTED"
     APPROVAL_REPLAY_INVALID = "APPROVAL_REPLAY_INVALID"
     AUTHORITY_EXPIRED = "AUTHORITY_EXPIRED"
+    #: A resume was requested for a run that is not paused at a resumable
+    #: checkpoint (never interrupted, terminal, or paused before 0019).
+    RUN_NOT_RESUMABLE = "RUN_NOT_RESUMABLE"
+    #: The run's pause checkpoint was already resumed — a checkpoint is
+    #: resumed at most once (idempotency; a second resume is refused).
+    CHECKPOINT_CONSUMED = "CHECKPOINT_CONSUMED"
 
 
 class DomainError(Exception):

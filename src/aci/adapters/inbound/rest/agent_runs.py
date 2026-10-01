@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from aci.adapters.inbound.rest.auth import bearer_gate
 from aci.adapters.inbound.rest.wiring import Container, get_container
@@ -56,6 +56,9 @@ class AgentRunRequest(BaseModel):
     #: Command prefixes the model may run; must narrow the server ceiling
     #: (INV-02). None = the full ceiling.
     command_prefixes: list[str] | None = None
+    #: Tool ids whose calls pause the run for this client's approval
+    #: (§13.6) — ADDED to the server's own list, never replacing it.
+    approval_required_tools: list[str] | None = Field(default=None, max_length=50)
 
 
 class AgentRunResponse(BaseModel):
@@ -71,6 +74,9 @@ class AgentRunResponse(BaseModel):
     turns: int = 0
     tool_calls: int = 0
     wall_time_seconds: float = 0.0
+    #: Set only while status == "interrupted_approval": name it in
+    #: POST /v1/agent-runs/{run_id}/resume to approve or deny the call.
+    approval_id: str | None = None
 
 
 def _profile(requested: str) -> AgentProfileId:
@@ -108,6 +114,7 @@ def start_agent_run(
         verification_command=body.verification_command,
         write_scopes=body.write_scopes,
         command_prefixes=body.command_prefixes,
+        approval_required_tools=body.approval_required_tools,
     )
     return _to_response(result)
 
@@ -157,6 +164,41 @@ def revise_agent_run(
     return _to_response(result)
 
 
+class ResumeRequest(BaseModel):
+    """§13.6/§17.4 resume of a PAUSED run — exactly one of:
+    ``{approval_id, approve}`` for an interrupted_approval run (approve →
+    the pending call executes once; deny → the model is told), or
+    ``{answer}`` for a clarification pause (interrupted)."""
+
+    approval_id: str | None = Field(default=None, min_length=1, max_length=200)
+    approve: bool | None = None
+    answer: str | None = Field(default=None, min_length=1, max_length=8000)
+
+    @model_validator(mode="after")
+    def _one_form(self) -> "ResumeRequest":
+        decision = self.approval_id is not None or self.approve is not None
+        if decision == (self.answer is not None):
+            raise ValueError("send either {approval_id, approve} or {answer}")
+        if decision and (self.approval_id is None or self.approve is None):
+            raise ValueError("an approval decision needs both approval_id and approve")
+        return self
+
+
+@router.post("/{run_id}/resume")
+def resume_agent_run(
+    run_id: str,
+    body: ResumeRequest,
+    container: Annotated[Container, Depends(get_container)],
+) -> AgentRunResponse:
+    """Continue the SAME run from its pause checkpoint (at most once). The
+    response is the RunResult projection — never the transcript, never a
+    server path."""
+    result = container.agent_run_service.resume(
+        run_id, approval_id=body.approval_id, approve=body.approve, answer=body.answer
+    )
+    return _to_response(result)
+
+
 def _to_response(result: RunResult) -> AgentRunResponse:
     evidence = result.evidence
     return AgentRunResponse(
@@ -172,4 +214,5 @@ def _to_response(result: RunResult) -> AgentRunResponse:
         turns=result.usage.turns,
         tool_calls=result.usage.tool_calls,
         wall_time_seconds=result.usage.wall_time_seconds,
+        approval_id=result.approval_id,
     )

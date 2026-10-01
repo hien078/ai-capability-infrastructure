@@ -10,7 +10,7 @@ it within the context budget (INV-09).
 
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
@@ -25,7 +25,13 @@ from aci.domain.runtime.actions import (
     PlanUpdateRequest,
     ToolCallBatchAction,
 )
-from aci.domain.runtime.authority import ExecutionEnvelope
+from aci.domain.runtime.authority import (
+    ApprovalDecision,
+    AuthorityDecision,
+    AuthorityDecisionKind,
+    ExecutionEnvelope,
+    GrantEnvelope,
+)
 from aci.domain.runtime.evidence import CandidateResult, EvidenceKind, EvidencePack
 from aci.domain.runtime.failures import FailureClass, FailureEnvelope
 from aci.domain.runtime.spec import RuntimeSpec
@@ -40,9 +46,17 @@ from aci.domain.runtime.stop_reason import RUN_TRANSITIONS, RunStatus, StopReaso
 from aci.domain.runtime.subtask import RunResult, RunUsage, SubtaskContract
 from aci.domain.runtime.tools import ToolCall, ToolObservation, ToolSpec
 from aci.runtime.cancellation import CancelToken, RunCancelled
+from aci.runtime.checkpoints import (
+    Checkpoint,
+    CheckpointError,
+    PendingInterrupt,
+    operation_hash,
+    validate_for_resume,
+)
 from aci.runtime.context_engine import AssembledContext, estimate_tokens, select_transcript
 from aci.runtime.event_bus import (
     CAPABILITY_LOADED,
+    CHECKPOINT_RESTORED,
     CHECKPOINT_SAVED,
     CONTEXT_ASSEMBLED,
     MODEL_REQUEST_COMPLETED,
@@ -54,7 +68,10 @@ from aci.runtime.event_bus import (
     RUN_CREATED,
     RUN_FAILED,
     RUN_PAUSED,
+    RUN_RESUMED,
     RUN_STARTED,
+    TOOL_APPROVAL_DECIDED,
+    TOOL_APPROVAL_REQUESTED,
     TOOL_EXECUTION_COMPLETED,
     TOOL_EXECUTION_FAILED,
     TOOL_REQUESTED,
@@ -71,7 +88,12 @@ from aci.runtime.recovery import (
     classify_tool_failure,
     tool_retry_safe,
 )
-from aci.runtime.state_manager import StateEvent, StateManager, transcript_event
+from aci.runtime.state_manager import (
+    StateCommitConflict,
+    StateEvent,
+    StateManager,
+    transcript_event,
+)
 from aci.runtime.tool_runtime import envelope_expired
 from aci.runtime.verification import VerificationManager
 
@@ -104,7 +126,12 @@ class ModelGateway(Protocol):
 
 
 class ToolExecutor(Protocol):
-    """What RunController needs from ToolRuntime (avoids circular imports)."""
+    """What RunController needs from ToolRuntime (avoids circular imports).
+
+    ``approved_call_ids`` is passed ONLY when re-executing a call a human
+    approved (§13.6 resume); an executor that never sees approvals may omit
+    the parameter. An optional ``preflight(call, *, envelope)`` seam lets
+    the kernel skip an approval pause for a call authority would DENY."""
 
     def execute_batch(
         self,
@@ -112,6 +139,7 @@ class ToolExecutor(Protocol):
         *,
         snapshot: RuntimeStateSnapshot,
         envelope: ExecutionEnvelope,
+        approved_call_ids: frozenset[str] = ...,
     ) -> list[ToolObservation]: ...
 
     def available_tools(self) -> list[ToolSpec]: ...
@@ -164,6 +192,16 @@ class _Run:
     usage: _Usage = field(default_factory=_Usage)
 
 
+@dataclass(frozen=True)
+class _Gate:
+    """A call that needs a human approval before it may execute (§13.6):
+    ``remaining`` is the unexecuted rest of the batch, ``call`` first."""
+
+    call: ToolCall
+    remaining: list[ToolCall]
+    reason: str
+
+
 @dataclass
 class _ToolBatch:
     """One tool batch's outcome, committed atomically by ``_run_tools``."""
@@ -172,6 +210,14 @@ class _ToolBatch:
     executions: int = 0  # every dispatch attempt, retries included (§7.6)
     recoveries: int = 0  # recovery decisions charged to the budget (§18.4)
     terminal: FailureClass | None = None
+    gate: _Gate | None = None  # the batch paused here for an approval
+
+
+#: ToolObservation.error_class ToolRuntime sets for a REQUIRE_APPROVAL
+#: decision — nothing was dispatched; the kernel pauses the run on it.
+APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
+#: Observation code for a call whose approval the delegating client denied.
+APPROVAL_REJECTED = "APPROVAL_REJECTED"
 
 
 class HarnessKernel:
@@ -192,6 +238,7 @@ class HarnessKernel:
         checkpoints: object | None = None,
         checkpoint_interval_turns: int = 5,
         sleep: Callable[[float], None] = time.sleep,
+        approval_required_tools: Iterable[str] = (),
     ) -> None:
         self._state = state
         self._model = model_gateway
@@ -204,6 +251,14 @@ class HarnessKernel:
         self._checkpoints = checkpoints
         self._checkpoint_interval = checkpoint_interval_turns
         self._sleep = sleep
+        #: §13.6 approval overlay: tool ids whose calls pause the run for a
+        #: human decision even when authority ALLOWS them. Narrowing only —
+        #: it turns ALLOW into REQUIRE_APPROVAL, never DENY into anything.
+        self._approval_tools = frozenset(t for t in approval_required_tools if t)
+        #: Pause checkpoints by run id (honest-null RAM copy; the service
+        #: persists them durably when a store is wired).
+        self._pause_checkpoints: dict[str, Checkpoint] = {}
+        self._consumed_checkpoints: set[str] = set()
         budget = getattr(context_engine, "budget", None)
         self._context_tokens: int = getattr(budget, "total_tokens", _DEFAULT_CONTEXT_TOKENS)
 
@@ -247,6 +302,251 @@ class HarnessKernel:
             result = self._fail_fatal(r, exc)
         self._emit_terminal(result)
         return result
+
+    # -- pause / resume (§13.6, §17.4) -----------------------------------------
+
+    def pending_checkpoint(self, run_id: str) -> Checkpoint | None:
+        """The pause checkpoint of a run this kernel interrupted (approval or
+        clarification), or None. Self-contained: a FRESH kernel can resume
+        from it (the restart case)."""
+        return self._pause_checkpoints.get(run_id)
+
+    def resume(
+        self,
+        checkpoint: Checkpoint,
+        *,
+        approval: ApprovalDecision | None = None,
+        answer: str | None = None,
+        cancel_token: CancelToken | None = None,
+        grants: GrantEnvelope | None = None,
+        workspace_id: str | None = None,
+    ) -> RunResult:
+        """§17.4 — continue a paused run from its checkpoint, at most once.
+
+        StateManager is restored from the snapshot WITH its version (CAS
+        continuity, INV-01); budgets continue from what was consumed (never
+        reset). ``approval`` (approval pause): approved → exactly the pending
+        calls execute once, the gated one under a one-shot approval that
+        never widens grants (INV-02 — authority is still evaluated for every
+        call); denied → the model sees a denial observation. ``answer``
+        (clarification pause) is appended as the client's answer. ``grants``
+        (the CURRENT ceiling, recomputed by the caller) can only narrow the
+        checkpointed grants; an expired grant stays expired. ``workspace_id``
+        names the re-bound working copy (a restart mints a new id).
+
+        Invalid requests raise DomainError BEFORE anything changes:
+        RUN_NOT_RESUMABLE, APPROVAL_REPLAY_INVALID (approval id mismatch /
+        no approval pending), CLIENT_INCOMPATIBLE (wrong input kind),
+        CHECKPOINT_CONSUMED (second resume)."""
+        try:
+            restored = validate_for_resume(checkpoint)
+        except CheckpointError as exc:
+            raise DomainError(ErrorCode.RUN_NOT_RESUMABLE, exc.reason) from exc
+        pending, contract, spec = restored.pending, restored.contract, restored.spec
+        if pending is None or contract is None or spec is None:  # validated above
+            raise DomainError(ErrorCode.RUN_NOT_RESUMABLE, "checkpoint is incomplete")
+        check_resume_input(restored, pending, approval, answer)
+        consumed = DomainError(
+            ErrorCode.CHECKPOINT_CONSUMED,
+            f"run {restored.run_id}: this pause was already resumed",
+        )
+        if restored.checkpoint_id in self._consumed_checkpoints:
+            raise consumed
+        snapshot = restored.snapshot
+        try:
+            # Idempotent for a fresh manager or an unchanged run (same version).
+            self._state.restore(snapshot)
+        except StateCommitConflict as exc:
+            raise DomainError(
+                ErrorCode.RUN_NOT_RESUMABLE,
+                f"run {restored.run_id}: state advanced since the pause — stale checkpoint",
+            ) from exc
+        if not self._claim(restored.checkpoint_id):
+            raise consumed
+        self._pause_checkpoints.pop(restored.run_id, None)
+        prior = restored.usage or RunUsage()
+        r = _Run(
+            run_id=restored.run_id,
+            contract=contract,
+            spec=spec,
+            cancel=cancel_token or CancelToken(run_id=restored.run_id),
+            max_turns=restored.max_turns or 40,
+            # Wall time continues from the paused value: the time spent
+            # waiting for the client is not charged, nothing is refunded.
+            started=time.monotonic() - snapshot.budget.consumed_wall_time_seconds,
+            usage=_Usage(
+                turns=prior.turns,
+                tool_calls=prior.tool_calls,
+                input_tokens=prior.model_input_tokens,
+                output_tokens=prior.model_output_tokens,
+                cost_usd=prior.cost_usd,
+            ),
+        )
+        if grants is not None:
+            self._state.narrow_grants(r.run_id, grants)
+        if workspace_id is not None:
+            # The workspace was re-bound (a new process mints a new id for
+            # the SAME working copy); the binding itself is the caller's.
+            self._state.set_workspace(r.run_id, workspace_id)
+        self._emit(
+            CHECKPOINT_RESTORED,
+            r.run_id,
+            payload={
+                "checkpoint_id": restored.checkpoint_id,
+                "state_version": snapshot.run.version,
+            },
+        )
+        self._state.transition(r.run_id, RunStatus.RUNNING)
+        self._emit(RUN_RESUMED, r.run_id, payload={"kind": pending.kind})
+        try:
+            result = self._resume_pending(r, pending, approval, answer)
+            if result is None:
+                result = self._loop(r)
+        except RunCancelledError:
+            result = self._cancelled(r)
+        except Exception as exc:  # noqa: BLE001 — a run never ends stuck in a live state
+            result = self._fail_fatal(r, exc)
+        self._emit_terminal(result)
+        return result
+
+    def _claim(self, checkpoint_id: str) -> bool:
+        """At most one resume per checkpoint: this kernel's own record, plus
+        the wired coordinator/store's when it can claim (``consume``)."""
+        if checkpoint_id in self._consumed_checkpoints:
+            return False
+        consume = getattr(self._checkpoints, "consume", None)
+        if consume is not None and not consume(checkpoint_id):
+            return False
+        self._consumed_checkpoints.add(checkpoint_id)
+        return True
+
+    def _resume_pending(
+        self,
+        r: _Run,
+        pending: PendingInterrupt,
+        approval: ApprovalDecision | None,
+        answer: str | None,
+    ) -> RunResult | None:
+        if pending.kind == "clarification":
+            self._state.append_transcript(
+                r.run_id,
+                [
+                    TranscriptEntry(
+                        role="user",
+                        content=_CLARIFICATION_ANSWER.format(answer=answer or ""),
+                        turn=pending.turn,
+                    )
+                ],
+            )
+            return None
+        if approval is None or pending.gated_call_id is None:
+            raise DomainError(ErrorCode.RUN_NOT_RESUMABLE, "approval resume without a gated call")
+        gated = pending.calls[0]
+        self._emit(
+            TOOL_APPROVAL_DECIDED,
+            r.run_id,
+            payload={
+                "approval_id": pending.approval_id,
+                "approved": approval.approved,
+                "tool_id": gated.tool_id,
+            },
+            turn_id=f"turn-{pending.turn}",
+        )
+        pre = self._state.snapshot(r.run_id)
+        if not approval.approved:
+            denials = [
+                _approval_denied(call, gated=call.call_id == gated.call_id)
+                for call in pending.calls
+            ]
+            return self._commit_batch(r, pre, pending.turn, [], _ToolBatch(observations=denials))
+        stop = _tool_call_stop(pre, len(pending.calls))
+        if stop is not None:
+            return self._fail(r, stop)
+        envelope = _envelope(pre)
+        if envelope_expired(envelope):
+            # Expired grants stay expired: a resume never renews authority.
+            return self._fail(r, StopReason.AUTHORITY_DENIED, detail="AUTHORITY_EXPIRED")
+        return self._execute_and_commit(
+            r,
+            list(pending.calls),
+            pre,
+            envelope,
+            pending.turn,
+            lead=[],
+            approved=frozenset({pending.gated_call_id}),
+        )
+
+    def _interrupt_for_approval(self, r: _Run, gate: _Gate, turn: int) -> RunResult:
+        """§13.6 — the run pauses BEFORE the gated call: everything executed
+        so far is already committed; the checkpoint holds the full snapshot
+        plus the unexecuted rest of the batch, bound to a fresh approval id.
+        Telemetry carries tool ids only — never arguments or paths."""
+        approval_id = f"apr_{uuid.uuid4().hex[:16]}"
+        pending = PendingInterrupt(
+            kind="approval",
+            turn=turn,
+            approval_id=approval_id,
+            gated_call_id=gate.call.call_id,
+            operation_hash=operation_hash(gate.call),
+            calls=list(gate.remaining),
+            reason=gate.reason,
+        )
+        self._state.transition(
+            r.run_id,
+            RunStatus.INTERRUPTED_APPROVAL,
+            stop_reason=StopReason.AWAITING_APPROVAL,
+            detail_code=APPROVAL_REQUIRED,
+        )
+        self._emit(
+            TOOL_APPROVAL_REQUESTED,
+            r.run_id,
+            payload={
+                "approval_id": approval_id,
+                "tool_id": gate.call.tool_id,
+                "pending_tool_ids": [c.tool_id for c in gate.remaining],
+            },
+            turn_id=f"turn-{turn}",
+        )
+        self._save_pause_checkpoint(r, pending)
+        return self._finalize(
+            r,
+            StopReason.AWAITING_APPROVAL,
+            summary=f"approval required for tool {gate.call.tool_id}",
+            approval_id=approval_id,
+        )
+
+    def _save_pause_checkpoint(self, r: _Run, pending: PendingInterrupt) -> Checkpoint:
+        """§17.2 "before human approval interrupt" — always taken (RAM, the
+        honest-null); also handed to a wired coordinator that can ``record``."""
+        snapshot = self._state.snapshot(r.run_id)
+        checkpoint = Checkpoint(
+            checkpoint_id=f"chk-{r.run_id}-{uuid.uuid4().hex[:12]}",
+            run_id=r.run_id,
+            state_version=snapshot.run.version,
+            turn=snapshot.run.current_turn,
+            snapshot=snapshot,
+            pending_approval_id=pending.approval_id,
+            pending=pending,
+            contract=r.contract,
+            spec=r.spec,
+            max_turns=r.max_turns,
+            usage=r.usage.to_run_usage(time.monotonic() - r.started),
+        )
+        validate_for_resume(checkpoint)  # INV-13: refuse a checkpoint that cannot resume
+        self._pause_checkpoints[r.run_id] = checkpoint
+        record = getattr(self._checkpoints, "record", None)
+        if record is not None:
+            record(checkpoint)
+        self._emit(
+            CHECKPOINT_SAVED,
+            r.run_id,
+            payload={
+                "turn": checkpoint.turn,
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "reason": pending.kind,
+            },
+        )
+        return checkpoint
 
     # -- turn loop --------------------------------------------------------------
 
@@ -429,12 +729,41 @@ class HarnessKernel:
         if envelope_expired(envelope):
             # Grants never renew mid-run: every further call would be denied.
             return self._fail(r, StopReason.AUTHORITY_DENIED, detail="AUTHORITY_EXPIRED")
-        batch = self._execute_with_recovery(r, list(action.calls), pre, envelope, turn)
+        assistant = TranscriptEntry(
+            role="assistant", content=raw, tool_calls=list(action.calls), turn=turn
+        )
+        return self._execute_and_commit(
+            r, list(action.calls), pre, envelope, turn, lead=[assistant], approved=frozenset()
+        )
+
+    def _execute_and_commit(
+        self,
+        r: _Run,
+        calls: list[ToolCall],
+        pre: RuntimeStateSnapshot,
+        envelope: ExecutionEnvelope,
+        turn: int,
+        *,
+        lead: list[TranscriptEntry],
+        approved: frozenset[str],
+    ) -> RunResult | None:
+        batch = self._execute_with_recovery(r, calls, pre, envelope, turn, approved)
+        return self._commit_batch(r, pre, turn, lead, batch)
+
+    def _commit_batch(
+        self,
+        r: _Run,
+        pre: RuntimeStateSnapshot,
+        turn: int,
+        lead: list[TranscriptEntry],
+        batch: _ToolBatch,
+    ) -> RunResult | None:
+        """One CAS commit for a batch (or its executed prefix, when it paused
+        for an approval): observations, tool-call and recovery charges,
+        progress, confirmed effects and the transcript (§59 STATE_COMMIT)."""
         observations = batch.observations
         entries = [
-            TranscriptEntry(
-                role="assistant", content=raw, tool_calls=list(action.calls), turn=turn
-            ),
+            *lead,
             *(
                 TranscriptEntry(
                     role="tool",
@@ -484,7 +813,23 @@ class HarnessKernel:
             # §18.4: recovery exhausted (or terminal by policy) — the run ends
             # through the stop-reason path, the observations stay committed.
             return self._fail(r, StopReason.TOOL_FAILURE, detail=batch.terminal.value)
+        if batch.gate is not None:
+            return self._interrupt_for_approval(r, batch.gate, turn)
         return None
+
+    def _approval_gate(self, call: ToolCall, envelope: ExecutionEnvelope) -> str | None:
+        """The approval overlay (§13.6): a call of an approval-required tool
+        pauses the run — unless authority would refuse it anyway (preflight
+        DENY, or a failure before authority): a human is never asked to
+        approve what cannot execute, and approval never rescues a DENY."""
+        if call.tool_id not in self._approval_tools:
+            return None
+        preflight = getattr(self._tools, "preflight", None)
+        if preflight is not None:
+            decision: AuthorityDecision | None = preflight(call, envelope=envelope)
+            if decision is None or decision.kind is AuthorityDecisionKind.DENY:
+                return None
+        return f"tool {call.tool_id} requires approval on this run"
 
     def _execute_with_recovery(
         self,
@@ -493,6 +838,7 @@ class HarnessKernel:
         pre: RuntimeStateSnapshot,
         envelope: ExecutionEnvelope,
         turn: int,
+        approved: frozenset[str] = frozenset(),
     ) -> _ToolBatch:
         """§12 + §18: execute calls in order; an infrastructure failure
         (``classify_tool_failure``) goes through the RecoveryManager.
@@ -501,14 +847,27 @@ class HarnessKernel:
         (§12.6 retry-block). Deterministic failures, denials and unknown
         tools are plain observations. NO state is written here — the
         caller commits observations, tool calls and recovery charges in one
-        CAS commit (INV-01, §8.5)."""
+        CAS commit (INV-01, §8.5).
+
+        §13.6: a call that needs approval (the overlay, or a REQUIRE_APPROVAL
+        authority decision) and is not in ``approved`` stops the batch
+        BEFORE it executes — ``batch.gate`` holds it plus the rest."""
         specs = {t.tool_id: t for t in self._advertised_tools()}
         batch = _ToolBatch()
         for index, call in enumerate(calls):
             remaining_after = len(calls) - index - 1
+            is_approved = call.call_id in approved
+            if not is_approved:
+                reason = self._approval_gate(call, envelope)
+                if reason is not None:
+                    batch.gate = _Gate(call=call, remaining=list(calls[index:]), reason=reason)
+                    return batch
             attempt = 0
             while True:
-                obs = self._execute_one(r, call, pre, envelope, turn, batch)
+                obs = self._execute_one(r, call, pre, envelope, turn, batch, approved=is_approved)
+                if obs.error_class == APPROVAL_REQUIRED and not is_approved:
+                    batch.gate = _Gate(call=call, remaining=list(calls[index:]), reason=obs.summary)
+                    return batch
                 failure_class = classify_tool_failure(obs)
                 if failure_class is None:
                     break
@@ -559,12 +918,26 @@ class HarnessKernel:
         envelope: ExecutionEnvelope,
         turn: int,
         batch: _ToolBatch,
+        *,
+        approved: bool = False,
     ) -> ToolObservation:
         """One execution through ToolRuntime (INV-06) + its telemetry
-        (INV-15 — every execution, a retried attempt included)."""
-        observations = self._tools.execute_batch([call], snapshot=pre, envelope=envelope)
-        batch.executions += 1
+        (INV-15 — every execution, a retried attempt included). An
+        APPROVAL_REQUIRED refusal dispatched nothing: not charged, and the
+        caller pauses the run on it."""
+        if approved:
+            observations = self._tools.execute_batch(
+                [call],
+                snapshot=pre,
+                envelope=envelope,
+                approved_call_ids=frozenset({call.call_id}),
+            )
+        else:
+            observations = self._tools.execute_batch([call], snapshot=pre, envelope=envelope)
         obs = observations[0]
+        if obs.error_class == APPROVAL_REQUIRED and not approved:
+            return obs
+        batch.executions += 1
         self._emit(
             TOOL_EXECUTION_COMPLETED if obs.status == "success" else TOOL_EXECUTION_FAILED,
             r.run_id,
@@ -671,14 +1044,18 @@ class HarnessKernel:
         self, r: _Run, action: ClarificationRequest, raw: str, turn: int
     ) -> RunResult:
         """§7.5 resumable pause: the delegating client owns the dialogue
-        (§0.3), so the run stops and surfaces the question — a revision
-        carries the answer back as feedback."""
+        (§0.3), so the run stops and surfaces the question. A pause
+        checkpoint is saved: the client's answer RESUMES this run (same
+        state, same budget) — a revision remains the other option."""
         self._append(r, turn, assistant=raw or action.model_dump_json(), user=None)
         self._state.transition(
             r.run_id,
             RunStatus.INTERRUPTED,
             stop_reason=StopReason.INTERRUPTED,
             detail_code="CLARIFICATION_REQUIRED",
+        )
+        self._save_pause_checkpoint(
+            r, PendingInterrupt(kind="clarification", turn=turn, question=action.question)
         )
         return self._finalize(
             r, StopReason.INTERRUPTED, summary=f"clarification required: {action.question}"
@@ -886,9 +1263,11 @@ class HarnessKernel:
         evidence: EvidencePack | None = None,
         summary: str = "",
         artifacts: list[str] | None = None,
+        approval_id: str | None = None,
     ) -> RunResult:
         snapshot = self._state.snapshot(r.run_id)
         return RunResult(
+            approval_id=approval_id,
             run_id=r.run_id,
             status=snapshot.run.status,
             stop_reason=stop_reason,
@@ -905,7 +1284,7 @@ class HarnessKernel:
             self._emit(RUN_COMPLETED, result.run_id, payload={"stop_reason": stop})
         elif result.status is RunStatus.CANCELLED:
             self._emit(RUN_CANCELLED, result.run_id)
-        elif result.status is RunStatus.INTERRUPTED:
+        elif result.status in (RunStatus.INTERRUPTED, RunStatus.INTERRUPTED_APPROVAL):
             self._emit(RUN_PAUSED, result.run_id, payload={"detail_code": result.detail_code})
         else:
             self._emit(RUN_FAILED, result.run_id, payload={"stop_reason": stop})
@@ -934,6 +1313,108 @@ def _envelope(snapshot: RuntimeStateSnapshot) -> ExecutionEnvelope:
         network=snapshot.grants.network,
         process=snapshot.grants.process,
         expires_at=snapshot.grants.expires_at,
+    )
+
+
+def check_resume_input(
+    checkpoint: Checkpoint,
+    pending: PendingInterrupt,
+    approval: ApprovalDecision | None,
+    answer: str | None,
+) -> None:
+    """The resume input must answer the pause the checkpoint records."""
+    status = checkpoint.snapshot.run.status
+    if pending.kind == "approval":
+        if status is not RunStatus.INTERRUPTED_APPROVAL:
+            raise DomainError(ErrorCode.RUN_NOT_RESUMABLE, "the run is not awaiting an approval")
+        if approval is None or answer is not None:
+            raise DomainError(
+                ErrorCode.CLIENT_INCOMPATIBLE,
+                "this run awaits an approval decision (approval_id + approve)",
+            )
+        if approval.approval_id != pending.approval_id:
+            raise DomainError(
+                ErrorCode.APPROVAL_REPLAY_INVALID,
+                "approval_id does not match the run's pending approval",
+            )
+        return
+    if status is not RunStatus.INTERRUPTED:
+        raise DomainError(ErrorCode.RUN_NOT_RESUMABLE, "the run is not awaiting an answer")
+    if approval is not None:
+        raise DomainError(ErrorCode.APPROVAL_REPLAY_INVALID, "no approval is pending on this run")
+    if answer is None or not answer.strip():
+        raise DomainError(ErrorCode.CLIENT_INCOMPATIBLE, "this run awaits a clarification answer")
+
+
+#: detail_code of a PAUSED run cancelled by its client (POST .../cancel).
+CANCELLED_WHILE_PAUSED = "CANCELLED_WHILE_PAUSED"
+#: detail_code of a PAUSED run whose pause a revision took over (§29A).
+SUPERSEDED_BY_REVISION = "SUPERSEDED_BY_REVISION"
+
+
+def cancel_paused(
+    checkpoint: Checkpoint,
+    *,
+    state: StateManager,
+    event_bus: EventBus,
+    detail_code: str = CANCELLED_WHILE_PAUSED,
+) -> RunResult:
+    """§7.3 INTERRUPTED/INTERRUPTED_APPROVAL → CANCELLED for a paused run
+    that has no live loop (nothing to signal): the pause snapshot is
+    restored into ``state`` (version continuity, INV-01) and the
+    StateManager makes the move — the same status + stop reason as a
+    cancelled live run (CANCELLED/CANCELLED), with ``detail_code`` naming
+    why — then RUN_CANCELLED is emitted. Nothing pending executes.
+
+    The CALLER claims the checkpoint first (at most one of resume / cancel /
+    revise wins it); this function never consumes anything. A checkpoint
+    whose snapshot is not paused is RUN_NOT_RESUMABLE (checked before any
+    write)."""
+    snapshot = checkpoint.snapshot
+    if snapshot.run.run_id != checkpoint.run_id or snapshot.run.status not in (
+        RunStatus.INTERRUPTED,
+        RunStatus.INTERRUPTED_APPROVAL,
+    ):
+        raise DomainError(
+            ErrorCode.RUN_NOT_RESUMABLE, f"run {checkpoint.run_id} is not paused at this checkpoint"
+        )
+    state.restore(snapshot)
+    final = state.transition(
+        checkpoint.run_id,
+        RunStatus.CANCELLED,
+        stop_reason=StopReason.CANCELLED,
+        detail_code=detail_code,
+    )
+    kind = checkpoint.pending.kind if checkpoint.pending is not None else None
+    event_bus.emit(
+        RUN_CANCELLED,
+        run_id=checkpoint.run_id,
+        payload={"while_paused": kind, "detail_code": detail_code},
+    )
+    return RunResult(
+        run_id=checkpoint.run_id,
+        status=final.run.status,
+        stop_reason=StopReason.CANCELLED,
+        detail_code=final.run.detail_code,
+        usage=checkpoint.usage or RunUsage(),
+    )
+
+
+def _approval_denied(call: ToolCall, *, gated: bool) -> ToolObservation:
+    """The observation for a call that did NOT run because its approval was
+    denied (``gated``) or an earlier call of its batch was."""
+    summary = (
+        "the delegating client DENIED approval for this call; it was NOT executed — "
+        "do not retry it, choose another approach"
+        if gated
+        else "NOT executed: an earlier call in this batch was denied approval"
+    )
+    return ToolObservation(
+        tool_call_id=call.call_id,
+        tool_id=call.tool_id,
+        status="denied",
+        summary=summary,
+        error_class=APPROVAL_REJECTED,
     )
 
 
@@ -1055,6 +1536,8 @@ unverifiable entries are rejected and returned to you as feedback.
 Other JSON actions: {"type": "plan_update", "items": [{"objective": "...", "status": \
 "pending"}]} records a plan; {"type": "clarification", "question": "..."} stops the run to \
 ask the delegating client."""
+
+_CLARIFICATION_ANSWER = "Answer from the delegating client to your question: {answer}"
 
 _CONTINUE_PROMPT = (
     "No action was taken. Continue: call a tool to make progress, or reply with the "

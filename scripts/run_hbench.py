@@ -95,8 +95,13 @@ from aci.runtime.run_controller import (  # noqa: E402
     task_state_from,
     turn_budget_note,
 )
+from aci.runtime.sandbox import (  # noqa: E402
+    BwrapSandbox,
+    ProcessSandbox,
+    build_process_sandbox,
+)
 from aci.runtime.state_manager import StateManager  # noqa: E402
-from aci.runtime.workspace import WorkspaceManager  # noqa: E402
+from aci.runtime.workspace import LocalWorkspace, WorkspaceManager  # noqa: E402
 from aci.runtime.workspace_tools import (  # noqa: E402
     WorkspaceToolDispatcher,
     provision_workspace,
@@ -129,21 +134,14 @@ def _all_fixtures() -> list[dict[str, Any]]:
     return [*MULTI_TASKS, *LONG_TASKS]
 
 
-def _post_hoc(run_dir: Path) -> int:
+def _post_hoc(run_dir: Path, sandbox: ProcessSandbox) -> int:
     """Run the verification command in a run dir AFTER the run — the SAME
     yardstick for both arms (§44 outcome), independent of the arm's own
-    completion semantics."""
-    import subprocess
-
-    env = {
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
-        "PYTHONDONTWRITEBYTECODE": "1",  # the §80 bytecode-cache trap
-    }
-    try:
-        proc = subprocess.run(VERIFICATION, cwd=run_dir, env=env, capture_output=True, timeout=300)
-    except subprocess.TimeoutExpired:
-        return 124
-    return int(proc.returncode)
+    completion semantics. Model-written code: it runs in the SAME sandbox as
+    the arms' own commands (the minimal env keeps PYTHONDONTWRITEBYTECODE=1,
+    the §80 bytecode-cache trap)."""
+    result = LocalWorkspace(run_dir, sandbox=sandbox).execute(VERIFICATION, 300_000)
+    return 124 if result.timed_out else int(result.exit_code)
 
 
 def _contract_spec(fixture: dict[str, Any]) -> tuple[SubtaskContract, Any]:
@@ -255,6 +253,7 @@ def _kernel_service(
     bus: EventBus,
     *,
     ablations: list[str] | None = None,
+    sandbox: ProcessSandbox | None = None,
 ) -> AgentRunService:
     ablations = ablations or []
     context_engine = (
@@ -273,6 +272,7 @@ def _kernel_service(
         command_timeout_seconds=120.0,
         verification_timeout_seconds=300.0,
         event_bus=bus,
+        process_sandbox=sandbox if sandbox is not None else BwrapSandbox(),
     )
 
 
@@ -287,14 +287,16 @@ def run_kernel_arm(
     max_turns: int,
     ablations: list[str] | None = None,
     trace_dir: Path | None = None,
+    sandbox: ProcessSandbox | None = None,
 ) -> dict[str, Any]:
+    sandbox = sandbox if sandbox is not None else BwrapSandbox()
     bus = EventBus()
     # The service discards a run's bus history once the run is terminal, so
     # collect events through a sink — reading bus.history() afterwards would
     # silently yield [] (empty trace, all mechanism counts 0).
     events: list[EventEnvelope] = []
     bus.subscribe(events.append)
-    service = _kernel_service(gateway, sources, runs, bus, ablations=ablations)
+    service = _kernel_service(gateway, sources, runs, bus, ablations=ablations, sandbox=sandbox)
     started = time.monotonic()
     result = service.run(
         contract,
@@ -321,7 +323,7 @@ def run_kernel_arm(
     # regardless of whether the model proposed completion? A LIMIT_TURNS run
     # where the fix landed but was never proposed counts here (and NOT in
     # `accepted`, which is the verifier-gated completion metric).
-    post_hoc_exit = _post_hoc(runs / result.run_id)
+    post_hoc_exit = _post_hoc(runs / result.run_id, sandbox)
     return {
         "run_id": result.run_id,
         "arm": "K",
@@ -420,6 +422,7 @@ def run_naive_arm(
     runs: Path,
     *,
     max_turns: int,
+    sandbox: ProcessSandbox | None = None,
 ) -> dict[str, Any]:
     run_id = new_run_id()
     source = sources / fixture["name"]
@@ -433,7 +436,10 @@ def run_naive_arm(
         network=grants.network,
         process=grants.process,
     )
-    workspace_id = manager.create_local(run_dir, envelope)
+    # §42 fairness: the SAME process sandbox as arm K (one instance per pack).
+    workspace_id = manager.create_local(
+        run_dir, envelope, sandbox=sandbox if sandbox is not None else BwrapSandbox()
+    )
     dispatcher = WorkspaceToolDispatcher(manager, workspace_id)
     tools = standard_tool_specs(allow_commands=True, command_timeout_ms=120_000)
     by_id = {t.tool_id: t for t in tools}
@@ -550,6 +556,7 @@ def _run_one(
     max_turns: int,
     ablations: list[str] | None = None,
     trace_dir: Path | None = None,
+    sandbox: ProcessSandbox | None = None,
 ) -> dict[str, Any]:
     contract, spec = _contract_spec(fixture)
     gateway = OpenAICompatGateway(
@@ -566,9 +573,12 @@ def _run_one(
             max_turns=max_turns,
             ablations=ablations,
             trace_dir=trace_dir,
+            sandbox=sandbox,
         )
     else:
-        record = run_naive_arm(fixture, contract, spec, gateway, sources, runs, max_turns=max_turns)
+        record = run_naive_arm(
+            fixture, contract, spec, gateway, sources, runs, max_turns=max_turns, sandbox=sandbox
+        )
     record["fixture"] = fixture["name"]
     record["h_ref"] = H_REFS.get(fixture["name"], "")
     return record
@@ -599,6 +609,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="dump every K run's event history to <report>/traces/",
     )
+    parser.add_argument(
+        "--sandbox",
+        choices=["bwrap", "none"],
+        default="bwrap",
+        help=(
+            "process sandbox for BOTH arms (§16.5; default bwrap — the run "
+            "refuses to start when bwrap is unusable; `none` = explicit opt-out)"
+        ),
+    )
     parser.add_argument("--out", default="", help="report path (default data/hbench/<ts>.json)")
     args = parser.parse_args(argv)
 
@@ -617,6 +636,15 @@ def main(argv: list[str] | None = None) -> int:
     if ablations:
         apply_ablations(ablations)
         print(f"ABLATIONS ACTIVE: {ablations} (process-wide)", flush=True)
+    # ONE sandbox instance for the whole pack: both arms (and both post-hoc
+    # yardsticks) execute model-written code under the identical profile.
+    sandbox = build_process_sandbox(args.sandbox)
+    unusable = sandbox.unavailable_reason()
+    if unusable is not None:
+        print(f"sandbox unusable: {unusable} — fix it or pass --sandbox none", file=sys.stderr)
+        return 2
+    if args.sandbox == "none":
+        print("SANDBOX OFF (--sandbox none): model-written code runs as you", flush=True)
     fixtures = _all_fixtures()
     if args.cases:
         wanted = {c.strip() for c in args.cases.split(",")}
@@ -658,6 +686,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_turns=args.max_turns,
                 ablations=ablations,
                 trace_dir=trace_dir,
+                sandbox=sandbox,
             ): (fixture, arm, repeat)
             for fixture, arm, repeat in jobs
         }
@@ -728,6 +757,7 @@ def main(argv: list[str] | None = None) -> int:
         "repeat": args.repeat,
         "max_turns": args.max_turns,
         "ablations": ablations,
+        "sandbox": args.sandbox,
         "verification": VERIFICATION,
         "pending_h_cases": PENDING_H_CASES,
         "aggregate": {arm: _agg(arm) for arm in arms},

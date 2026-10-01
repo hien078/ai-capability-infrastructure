@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from aci.domain.runtime.authority import GrantEnvelope
+from aci.domain.runtime.authority import GrantEnvelope, narrow_grants
 from aci.domain.runtime.evidence import EvidenceItem
 from aci.domain.runtime.state import (
     BudgetLedger,
@@ -78,6 +78,33 @@ class StateManager:
             "changed_resources": [],
             "observed_evidence": [],
             "transcript": [],
+        }
+        return self.snapshot(run_id)
+
+    def restore(self, snapshot: RuntimeStateSnapshot) -> RuntimeStateSnapshot:
+        """§17.4 resume: install a checkpointed snapshot AS the run's
+        authoritative state — version included, so CAS continuity holds
+        across the pause (INV-01): the first write after a resume is
+        ``snapshot.run.version + 1``, exactly as if the process had never
+        stopped. A run already known here may only be restored from a
+        snapshot of its CURRENT version (nothing written since the pause);
+        anything else is a conflict, never a silent rollback."""
+        run_id = snapshot.run.run_id
+        existing = self._runs.get(run_id)
+        if existing is not None and existing["run"].version != snapshot.run.version:
+            raise StateCommitConflict(run_id, snapshot.run.version, existing["run"].version)
+        self._runs[run_id] = {
+            "run": snapshot.run,
+            "task": snapshot.task,
+            "budget": snapshot.budget,
+            "grants": snapshot.grants,
+            "plan": list(snapshot.plan),
+            "capabilities": list(snapshot.active_capabilities),
+            "workspace_id": snapshot.workspace_id,
+            "depth": snapshot.depth,
+            "changed_resources": list(snapshot.changed_resources),
+            "observed_evidence": list(snapshot.observed_evidence),
+            "transcript": list(snapshot.transcript),
         }
         return self.snapshot(run_id)
 
@@ -218,6 +245,16 @@ class StateManager:
             ),
         )
 
+    def narrow_grants(self, run_id: str, bound: GrantEnvelope) -> RuntimeStateSnapshot:
+        """INV-02: grants := grants ∩ bound (scopes and expiry) — this event
+        can only ever REMOVE authority (a resume under a narrowed ceiling)."""
+        return self._mutate(
+            run_id,
+            StateEvent(
+                event_type="grants.narrowed", payload={"bound": bound.model_dump(mode="json")}
+            ),
+        )
+
     def set_workspace(self, run_id: str, workspace_id: str) -> RuntimeStateSnapshot:
         return self._mutate(
             run_id, StateEvent(event_type="workspace.set", payload={"workspace_id": workspace_id})
@@ -249,6 +286,10 @@ class StateManager:
             ] + [activation]
         elif et == "grants.extended":
             record["grants"] = GrantEnvelope.model_validate(p["grants"])
+        elif et == "grants.narrowed":
+            record["grants"] = narrow_grants(
+                record["grants"], GrantEnvelope.model_validate(p["bound"])
+            )
         elif et == "workspace.set":
             record["workspace_id"] = p["workspace_id"]
         elif et == "tool.observed":

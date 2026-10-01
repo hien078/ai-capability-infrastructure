@@ -47,6 +47,7 @@ from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.actions import FinalCandidate, ToolCall, ToolCallBatchAction
 from aci.domain.runtime.persistence import AgentRunEventRecord, AgentRunRecord
 from aci.runtime.model_gateway import FakeModelGateway
+from tests.sandbox_support import available_sandbox
 
 PY = sys.executable
 WORKSPACE = "proj"
@@ -150,6 +151,8 @@ def _service(
         command_timeout_seconds=30,
         verification_timeout_seconds=30,
         run_store=cast("Any", run_store),
+        # bwrap where usable; the sandbox itself: tests/security/test_process_sandbox.py
+        process_sandbox=available_sandbox(),
     )
     return service, gateway
 
@@ -688,3 +691,191 @@ def test_vanished_run_dir_error_never_names_the_path(roots: Roots) -> None:
     assert response.json()["error"]["code"] == "WORKSPACE_NOT_FOUND"
     _assert_no_server_paths(roots, response.text)
     assert gateway.requests == []  # refused before the model is invoked
+
+
+# -- 13: approval interrupts + checkpoint resume (migration 0019) ------------
+#
+# - a client can ADD approval requirements, never remove the server's;
+# - an approval is one-shot and never widens grants: a call outside the
+#   write scope is DENIED (never even paused for), approved or not;
+# - resume continues the SAME run in its OWN working copy (also after a
+#   restart, from the store), at most once, and no response carries a path.
+
+
+class _CheckpointStore(_MemoryStore):
+    """_MemoryStore + the 0019 checkpoint methods (atomic claim)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.checkpoints: dict[str, Any] = {}
+        self.appended: list[AgentRunEventRecord] = []
+
+    def append_events(self, events: list[AgentRunEventRecord]) -> None:
+        self.appended.extend(events)
+
+    def record_checkpoint(self, record: Any) -> None:
+        assert record.run_id in self.runs  # FK: the run row is written first
+        self.checkpoints.setdefault(record.checkpoint_id, record)
+
+    def latest_checkpoint(self, run_id: str) -> Any:
+        mine = [c for c in self.checkpoints.values() if c.run_id == run_id]
+        return max(mine, key=lambda c: c.created_at) if mine else None
+
+    def consume_checkpoint(self, checkpoint_id: str, *, at: Any) -> bool:
+        record = self.checkpoints.get(checkpoint_id)
+        if record is None or record.consumed_at is not None:
+            return False
+        self.checkpoints[checkpoint_id] = record.model_copy(update={"consumed_at": at})
+        return True
+
+
+def test_client_cannot_remove_server_approval_requirements(roots: Roots) -> None:
+    service, _ = _service([_write("c1", "src/greet.py", GREET), _done("src/greet.py")], roots)
+    service.require_approval_for(["write_file"])  # the server floor
+    response = _client(service).post(
+        "/v1/agent-runs", json=_body(approval_required_tools=[])
+    )  # an empty request list removes nothing
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "interrupted_approval"
+    assert body["stop_reason"] == "AWAITING_APPROVAL"
+    assert body["approval_id"]
+    assert not (roots.run_dir(body["run_id"]) / "src" / "greet.py").exists()
+
+
+def test_approval_pauses_then_resume_executes_once_without_leaking_paths(
+    roots: Roots,
+) -> None:
+    service, gateway = _service([_write("c1", "src/greet.py", GREET), _done("src/greet.py")], roots)
+    client = _client(service)
+    paused = client.post("/v1/agent-runs", json=_body(approval_required_tools=["write_file"]))
+    assert paused.status_code == 201, paused.text
+    run_id, approval_id = paused.json()["run_id"], paused.json()["approval_id"]
+    assert paused.json()["status"] == "interrupted_approval"
+    run_dir = roots.run_dir(run_id)
+    assert not (run_dir / "src" / "greet.py").exists()
+    assert client.get(f"/v1/agent-runs/{run_id}").json()["approval_id"] == approval_id
+
+    resumed = client.post(
+        f"/v1/agent-runs/{run_id}/resume", json={"approval_id": approval_id, "approve": True}
+    )
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["run_id"] == run_id
+    assert resumed.json()["status"] == "succeeded", resumed.json()
+    assert resumed.json()["approval_id"] is None
+    _assert_no_server_paths(roots, resumed.text)
+    assert (run_dir / "src" / "greet.py").read_text(encoding="utf-8") == GREET
+    assert roots.run_dirs() == [run_dir]  # the SAME working copy — never re-copied
+    assert _tool_results(gateway)["c1"].startswith("status: success")
+
+    again = client.post(
+        f"/v1/agent-runs/{run_id}/resume", json={"approval_id": approval_id, "approve": True}
+    )
+    assert again.status_code == 409
+    assert again.json()["error"]["code"] == "CHECKPOINT_CONSUMED"
+
+
+def test_approval_cannot_widen_the_write_scope(roots: Roots) -> None:
+    """write_file needs approval AND the call is outside write_scopes: it is
+    DENIED by authority — no pause, no approval id, no effect."""
+    service, gateway = _service([_write("c1", "README.md", "pwned\n"), _done("README.md")], roots)
+    response = _client(service).post(
+        "/v1/agent-runs", json=_body(approval_required_tools=["write_file"])
+    )
+    body = response.json()
+    assert body["status"] != "interrupted_approval"
+    assert body["approval_id"] is None
+    assert (roots.run_dir(body["run_id"]) / "README.md").read_text(encoding="utf-8") == README
+    assert _tool_results(gateway)["c1"].startswith("status: denied")
+
+
+def test_denied_approval_is_an_observation_and_the_run_continues(roots: Roots) -> None:
+    service, gateway = _service(
+        [_write("c1", "src/greet.py", GREET), _done(summary="could not write")], roots
+    )
+    client = _client(service)
+    paused = client.post(
+        "/v1/agent-runs", json=_body(approval_required_tools=["write_file"])
+    ).json()
+    resumed = client.post(
+        f"/v1/agent-runs/{paused['run_id']}/resume",
+        json={"approval_id": paused["approval_id"], "approve": False},
+    )
+    assert resumed.status_code == 200, resumed.text
+    assert not (roots.run_dir(paused["run_id"]) / "src" / "greet.py").exists()
+    assert "DENIED approval" in _tool_results(gateway)["c1"]
+
+
+def test_resume_refusals_are_typed_and_pathless(roots: Roots) -> None:
+    service, _ = _service([_write("c1", "src/greet.py", GREET), _done("src/greet.py")] * 2, roots)
+    client = _client(service)
+    assert client.post("/v1/agent-runs/run_nope/resume", json={"answer": "x"}).status_code == 404
+    paused = client.post(
+        "/v1/agent-runs", json=_body(approval_required_tools=["write_file"])
+    ).json()
+    run_id = paused["run_id"]
+    wrong = client.post(
+        f"/v1/agent-runs/{run_id}/resume", json={"approval_id": "apr_forged", "approve": True}
+    )
+    assert wrong.status_code == 409
+    assert wrong.json()["error"]["code"] == "APPROVAL_REPLAY_INVALID"
+    both = client.post(
+        f"/v1/agent-runs/{run_id}/resume",
+        json={"approval_id": paused["approval_id"], "approve": True, "answer": "x"},
+    )
+    assert both.status_code == 422
+    # The refusals above did not burn the one resume.
+    ok = client.post(
+        f"/v1/agent-runs/{run_id}/resume",
+        json={"approval_id": paused["approval_id"], "approve": True},
+    )
+    assert ok.status_code == 200, ok.text
+    finished = client.post("/v1/agent-runs", json=_body()).json()
+    assert finished["status"] == "succeeded", finished
+    never_paused = client.post(f"/v1/agent-runs/{finished['run_id']}/resume", json={"answer": "x"})
+    assert never_paused.status_code == 409
+    assert never_paused.json()["error"]["code"] == "RUN_NOT_RESUMABLE"
+    for response in (wrong, both, never_paused):
+        _assert_no_server_paths(roots, response.text)
+
+
+def test_resume_after_restart_continues_the_same_run_from_the_store(roots: Roots) -> None:
+    store = _CheckpointStore()
+    first_service, _ = _service([_write("c1", "src/greet.py", GREET)], roots, run_store=store)
+    paused = (
+        _client(first_service)
+        .post("/v1/agent-runs", json=_body(approval_required_tools=["write_file"]))
+        .json()
+    )
+    assert paused["status"] == "interrupted_approval"
+    assert store.runs[paused["run_id"]].status == "interrupted_approval"
+    stored = store.latest_checkpoint(paused["run_id"])
+    assert stored is not None and stored.approval_id == paused["approval_id"]
+
+    # A FRESH process: empty RAM, same store, same server-side directories.
+    restarted, gateway = _service([_done("src/greet.py")], roots, run_store=store)
+    client = _client(restarted)
+    got = client.get(f"/v1/agent-runs/{paused['run_id']}")
+    assert got.json()["approval_id"] == paused["approval_id"]
+    resumed = client.post(
+        f"/v1/agent-runs/{paused['run_id']}/resume",
+        json={"approval_id": paused["approval_id"], "approve": True},
+    )
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["status"] == "succeeded", resumed.json()
+    _assert_no_server_paths(roots, resumed.text)
+    run_dir = roots.run_dir(paused["run_id"])
+    assert (run_dir / "src" / "greet.py").read_text(encoding="utf-8") == GREET
+    assert roots.run_dirs() == [run_dir]
+    assert store.runs[paused["run_id"]].status == "succeeded"
+    assert store.appended  # the resumed segment's events were APPENDED
+    # The model saw its own pre-restart turn (the transcript was restored).
+    first_request = gateway.requests[0].messages
+    assert any(m.role == "assistant" and m.tool_calls for m in first_request)
+    assert any(m.tool_call_id == "c1" for m in first_request)
+    second = _client(_service([], roots, run_store=store)[0]).post(
+        f"/v1/agent-runs/{paused['run_id']}/resume",
+        json={"approval_id": paused["approval_id"], "approve": True},
+    )
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "CHECKPOINT_CONSUMED"

@@ -116,9 +116,13 @@ def _build_agent_run_service(
     else the run fails caller-visibly — never a silent default model."""
     from aci.adapters.inbound.rest.agent_run_wiring import build_agent_run_service
 
-    return build_agent_run_service(
+    service = build_agent_run_service(
         settings, run_store=run_store, capability_client_factory=capability_client_factory
     )
+    # §13.6 server approval floor (ACI_AGENT_APPROVAL_REQUIRED_TOOLS): additive
+    # only — a request can add approval requirements, never remove these.
+    service.require_approval_for(settings.agent_approval_required_tools)
+    return service
 
 
 class Container:

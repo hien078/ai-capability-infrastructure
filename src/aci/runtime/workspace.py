@@ -5,7 +5,6 @@ import json
 import os
 import signal
 import subprocess
-import sys
 import time
 import uuid
 from collections.abc import Sequence
@@ -15,6 +14,7 @@ from pathlib import Path
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.authority import ExecutionEnvelope
 from aci.runtime.protocols import ProcessResult
+from aci.runtime.sandbox import NoSandbox, ProcessSandbox
 
 #: Tool caches and VCS metadata: never workspace state, never a side effect.
 NOISE_DIRS: frozenset[str] = frozenset(
@@ -35,27 +35,6 @@ def command_within_prefixes(command: Sequence[str], prefixes: Sequence[str]) -> 
         if list(command[: len(tokens)]) == tokens or command[0] == prefix.strip():
             return True
     return False
-
-
-def _process_env(home: Path) -> dict[str, str]:
-    """§16.4 — a minimal allowlisted environment: the server's env (API keys,
-    DB URLs) never reaches workspace processes. Relative PATH entries are
-    dropped so a model-written file in the cwd can never shadow a command."""
-    entries = [os.path.dirname(sys.executable)]
-    entries += os.environ.get("PATH", os.defpath).split(os.pathsep)
-    path = os.pathsep.join(dict.fromkeys(e for e in entries if os.path.isabs(e)))
-    env = {
-        "PATH": path,
-        "HOME": str(home),
-        "LANG": "C.UTF-8",
-        "LC_ALL": "C.UTF-8",
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONUNBUFFERED": "1",
-    }
-    tz = os.environ.get("TZ")
-    if tz:
-        env["TZ"] = tz
-    return env
 
 
 def _kill_process_group(proc: subprocess.Popen[bytes]) -> None:
@@ -166,20 +145,35 @@ class _RootedWorkspace:
 
 
 class LocalWorkspace(_RootedWorkspace):
-    """§16.4 — trusted local execution; paths stay under root, processes die on timeout."""
+    """§16.4 — local execution; paths stay under root, processes die on timeout.
 
-    def __init__(self, root: str | Path) -> None:
+    Every process goes through `sandbox` (§16.5): the agent-run path passes a
+    BwrapSandbox (fail closed when unusable); the bare primitive defaults to
+    NoSandbox — the caller that exposes a workspace to a model decides."""
+
+    def __init__(self, root: str | Path, sandbox: ProcessSandbox | None = None) -> None:
         super().__init__(root)
+        self._sandbox: ProcessSandbox = sandbox if sandbox is not None else NoSandbox()
         self._process: subprocess.Popen[bytes] | None = None
+
+    @property
+    def sandbox(self) -> ProcessSandbox:
+        return self._sandbox
 
     def execute(self, command: list[str], timeout_ms: int) -> ProcessResult:
         if not command:
             raise DomainError(ErrorCode.WORKSPACE_PATH_INVALID, "execute requires a command")
+        # Raises PERMISSION_DENIED when the sandbox cannot isolate the command
+        # (fail closed) — nothing has been started at that point.
+        prepared = self._sandbox.prepare(command, self._root_real)
         start = time.monotonic()
+        # The process group (start_new_session) is the kill unit: under bwrap
+        # its leader is the outer bwrap, whose death takes the sandbox's PID
+        # namespace down with it (--die-with-parent + --unshare-pid).
         proc = subprocess.Popen(
-            command,
-            cwd=self._root,
-            env=_process_env(self._root_real),
+            prepared.argv,
+            cwd=prepared.cwd,
+            env=prepared.env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -262,9 +256,15 @@ class WorkspaceManager:
         self._workspaces: dict[str, _RootedWorkspace] = {}
         self._envelopes: dict[str, ExecutionEnvelope | None] = {}
 
-    def create_local(self, root: str | Path, envelope: ExecutionEnvelope | None = None) -> str:
+    def create_local(
+        self,
+        root: str | Path,
+        envelope: ExecutionEnvelope | None = None,
+        *,
+        sandbox: ProcessSandbox | None = None,
+    ) -> str:
         workspace_id = f"ws-{uuid.uuid4().hex[:12]}"
-        self._workspaces[workspace_id] = LocalWorkspace(root)
+        self._workspaces[workspace_id] = LocalWorkspace(root, sandbox=sandbox)
         self._envelopes[workspace_id] = envelope
         return workspace_id
 
