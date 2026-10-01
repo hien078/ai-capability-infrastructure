@@ -115,13 +115,17 @@ def _build_agent_run_service(
     settings: Settings,
     run_store: object | None = None,
     capability_client_factory: RegistryCapabilityClientFactory | None = None,
+    outcome_service: object | None = None,
 ) -> AgentRunService:
     """HarnessKernel wiring (ADR-014): a real model gateway when configured,
     else the run fails caller-visibly — never a silent default model."""
     from aci.adapters.inbound.rest.agent_run_wiring import build_agent_run_service
 
     service = build_agent_run_service(
-        settings, run_store=run_store, capability_client_factory=capability_client_factory
+        settings,
+        run_store=run_store,
+        capability_client_factory=capability_client_factory,
+        outcome_service=outcome_service,
     )
     # §13.6 server approval floor (ACI_AGENT_APPROVAL_REQUIRED_TOOLS): additive
     # only — a request can add approval requirements, never remove these.
@@ -234,7 +238,10 @@ class Container:
             selection_policy=agent_capability_policy(settings),
         )
         self.agent_run_service = _build_agent_run_service(
-            settings, agent_run_store, self.agent_capability_clients
+            settings,
+            agent_run_store,
+            self.agent_capability_clients,
+            outcome_service=self.outcome_service,
         )
         # Raw protocol handles, for inbound adapters that project the registry
         # directly (MCP skills extension reads releases/artifacts/objects).

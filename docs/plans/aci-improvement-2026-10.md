@@ -165,13 +165,17 @@ E3 ✗      → bất kể E1/E2: không xây thêm gì hướng người dùng;
   route → bundle → activation → verdict (quan sát, không nhân quả). Nếu run events đủ làm cầu,
   không mở migration mới.
 
-> **TRẠNG THÁI (2026-10-02, đêm): BASELINE ĐÃ ĐO (instrument m8, main `764611d`) — nửa
-> wiring còn treo.** Agent-run chain complete 2/2 plane-touching (window-linked, pre-B);
-> bundle outcome coverage **0.1502** (44/293; opencode 38, rest-client 4, mcp-client 2);
-> **0 §33 outcome trên bundle harness-kernel** — `CapabilityFeedback` seam được gọi nhưng
-> chưa nối trên REST (việc wiring còn lại, không cần migration, verdict kernel = MỘT
-> source theo §33/ADR-010). V5 (§3.4) giữ hoãn: coverage 15% ≠ ~80%. Chi tiết:
-> `data/aci-improvement/m8-evidence-completeness-result.md`.
+> **TRẠNG THÁI (2026-10-02, đêm): XONG HẲN — đo + wiring.** Baseline (instrument m8,
+> `764611d`): agent-run chain complete 2/2 plane-touching; bundle outcome coverage
+> **0.1502** (44/293; opencode 38, rest-client 4, mcp-client 2). Wiring (cùng đêm, red-test
+> first): `RegistryCapabilityFeedback` sink (`adapters/outbound/agent_capabilities.py`) —
+> seam terminal-state của kernel giờ nối §33 qua `ReportOutcomeService` trên MỌI agent run
+> REST; MỘT event per routed bundle, verdict map trung thực (`run_success` → test_harness
+> success/high [INV-08] + agent_self_report; VERIFICATION_FAILED → test_harness
+> failure/high; failure khác → CHỈ self-report; limit/cancel → unknown/low), envelope
+> không fabricate (build/lint/tokens NULL — pin bằng test). Full suite 1824 passed / 0
+> failed. V5 (§3.4) vẫn hoãn cho tới traffic hữu cơ. Chi tiết:
+> `data/aci-improvement/{m8-evidence-completeness,m8-wiring}-result.md`.
 
 ### 3.3 V4 service theo nhu cầu thật
 

@@ -51,6 +51,7 @@ import hashlib
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from math import ceil
 from uuid import uuid4
 
@@ -61,6 +62,7 @@ from aci.application.protocols import (
     ReleaseRepository,
     RouteRunRepository,
 )
+from aci.application.report_outcome import ReportOutcomeService, new_outcome_id
 from aci.application.route_capabilities import RouteCapabilitiesService
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.capability.models import (
@@ -68,6 +70,8 @@ from aci.domain.capability.models import (
     ArtifactFile,
     BundleItem,
     CapabilityArtifact,
+    OutcomeEvidence,
+    OutcomeVerdict,
     RouteCapabilitiesCommand,
     SkillSpec,
     TaskContext,
@@ -273,6 +277,12 @@ class RegistryCapabilityClient:
         #: (capability_id, version) pairs this run's search selected — the
         #: only pairs resolve() will ever serve.
         self._issued: set[tuple[str, str]] = set()
+        #: §3.2 feedback linkage: the (route_run_id, bundle_id) pairs this
+        #: run's searches routed WITH kept skills — the §33 attach points the
+        #: terminal-state sink (RegistryCapabilityFeedback) joins the run's
+        #: outcome to. Empty bundles (ADR-008 abstentions) are honest
+        #: non-attachments: nothing was ever loadable from them.
+        self.routed_bundles: list[tuple[str, str]] = []
 
     # -- search ----------------------------------------------------------------
 
@@ -320,6 +330,8 @@ class RegistryCapabilityClient:
         )
         self.decisions.append(decision)
         self._log(decision)
+        if kept:
+            self.routed_bundles.append((decision.route_run_id, decision.bundle_id))
         # Only KEPT pairs are ever resolvable for this run (defense in depth).
         for selection in kept:
             self._issued.add((selection.capability_id, selection.version))
@@ -416,6 +428,87 @@ class RegistryCapabilityClient:
                 f"blob {entry.sha256} missing for {capability_id}/{path}",
             )
         return data, f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+# -- §33 feedback sink (plan §3.2) --------------------------------------------
+
+
+def kernel_outcome_verdicts(outcome: str, failure_class: str | None) -> list[OutcomeVerdict]:
+    """Map the kernel seam's ``(outcome, failure_class)`` to §33 verdicts —
+    ONE source per REAL observation, never a merge (ADR-010).
+
+    - ``run_success``: succeeded is verifier-gated (INV-08 — the kernel only
+      reports succeeded on a verified proposal), so ``test_harness
+      success/high`` is a real observation, plus the run's own claim.
+    - ``VERIFICATION_FAILED``: the verifier ran and refuted — a real
+      ``test_harness failure/high`` observation, plus the run's claim.
+    - any OTHER failure class (MODEL_FAILURE, TOOL_FAILURE, …): the run failed
+      for reasons that are NOT a test observation — the run's own claim
+      only; the tests state stays unclaimed, never guessed.
+    - no failure class (limits, cancelled, partial): ``unknown/low`` — §33
+      keeps unknown as unknown.
+    """
+    if outcome == "run_success":
+        return [
+            OutcomeVerdict(source="test_harness", status="success", confidence="high"),
+            OutcomeVerdict(source="agent_self_report", status="success", confidence="medium"),
+        ]
+    if failure_class == "VERIFICATION_FAILED":
+        return [
+            OutcomeVerdict(source="test_harness", status="failure", confidence="high"),
+            OutcomeVerdict(source="agent_self_report", status="failure", confidence="medium"),
+        ]
+    if failure_class is not None:
+        return [OutcomeVerdict(source="agent_self_report", status="failure", confidence="medium")]
+    return [OutcomeVerdict(source="agent_self_report", status="unknown", confidence="low")]
+
+
+class RegistryCapabilityFeedback:
+    """§3.2 wiring: the kernel's per-capability outcome seam → §33
+    ``OutcomeEvidence`` on the run's linked bundles (appending — the kernel's
+    verifier is ONE source among sources, ADR-010; loaded-in-context is never
+    a causal claim, ADR-014 amendments 14–17).
+
+    The seam (``run_controller``, terminal state) fires ``report`` once per
+    ACTIVATED capability; §33 attaches evidence to the BUNDLE, so the sink
+    records ONE event per routed bundle (``client.routed_bundles`` — the
+    pairs its searches kept skills for) and dedupes the rest.
+    ``capability_id``/``version``/``evidence_refs`` stay in the run's own event
+    stream (``capability.exposure``) — the §33 envelope has no field for them
+    and nothing is fabricated. Exceptions propagate to the seam's own except
+    (feedback must never fail the run, §50 telemetry).
+    """
+
+    def __init__(
+        self, client: RegistryCapabilityClient, outcome_service: ReportOutcomeService
+    ) -> None:
+        self._client = client
+        self._outcomes = outcome_service
+        self._recorded: set[str] = set()
+
+    def report(
+        self,
+        *,
+        capability_id: str,
+        version: str,
+        outcome: str,
+        failure_class: str | None,
+        evidence_refs: list[str],
+    ) -> None:
+        for route_run_id, bundle_id in list(self._client.routed_bundles):
+            if bundle_id in self._recorded:
+                continue  # one §33 event per bundle; the seam fires per capability
+            self._outcomes.report(
+                OutcomeEvidence(
+                    outcome_id=new_outcome_id(),
+                    route_run_id=route_run_id,
+                    bundle_id=bundle_id,
+                    received_at=datetime.now(UTC),
+                    verdicts=kernel_outcome_verdicts(outcome, failure_class),
+                    client_status=outcome,
+                )
+            )
+            self._recorded.add(bundle_id)
 
 
 class RegistryCapabilityClientFactory:

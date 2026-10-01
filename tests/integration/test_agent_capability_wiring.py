@@ -19,6 +19,7 @@ from aci.adapters.inbound.rest.wiring import Container, agent_capability_policy
 from aci.adapters.outbound.agent_capabilities import (
     CLIENT_TYPE,
     RegistryCapabilityClientFactory,
+    kernel_outcome_verdicts,
 )
 from aci.adapters.outbound.postgres.assessments import (
     SqlAlchemyLicenseAssessmentRepository,
@@ -293,3 +294,117 @@ def test_kernel_run_emits_capability_loaded_from_registry(
             m.tool_call_id: m.content for m in model.requests[1].messages if m.role == "tool"
         }
         assert tool_results["call_cap"].startswith(f"Capability request result: loaded {cap}")
+
+
+def test_kernel_run_appends_outcome_evidence_on_its_bundle(
+    container: Container,
+    engine: object,
+    clients: RegistryCapabilityClientFactory,
+    ingestion: SkillIngestionService,
+    promotion: PromotionService,
+    license_repo: SqlAlchemyLicenseAssessmentRepository,
+    security_repo: SqlAlchemySecurityAssessmentRepository,
+    tmp_path: Path,
+) -> None:
+    """§3.2 wiring, end to end: a run that activated a registry skill and
+    reached a terminal state appends ONE §33 outcome event on its linked
+    bundle — the kernel's verifier as ONE source (appending, never merging,
+    ADR-010). Red before the sink existed: the m8 baseline measured 0 §33
+    rows on every harness-kernel bundle."""
+    from sqlalchemy import text
+
+    token = unique_token()
+    ingest_and_promote(ingestion, promotion, license_repo, security_repo, tmp_path, token)
+
+    class _Factory:
+        def __init__(self, obj: object) -> None:
+            self._obj = obj
+
+        def build(self) -> object:
+            return self._obj
+
+    class _NullTools:
+        def handle_request(self, request: object, snapshot: object) -> list[object]:  # noqa: ARG002
+            return []
+
+    model = FakeModelGateway([CapabilityRequest(objective=token), FinalCandidate(summary="done")])
+    bus = EventBus()
+    seen: list[EventEnvelope] = []
+    bus.subscribe(seen.append)  # the service frees bus history at run end
+    service = AgentRunService(
+        model_gateway_factory=cast(ModelGatewayFactory, _Factory(model)),
+        tool_executor_factory=cast(ModelGatewayFactory, _Factory(_NullTools())),
+        capability_runtime_factory=build_agent_run_service(
+            Settings(database_url=DB_URL),
+            capability_client_factory=clients,
+            outcome_service=container.outcome_service,
+        )._capability_factory,
+        context_engine_factory=cast(
+            ModelGatewayFactory, _Factory(ContextEngine(ContextBudget(total_tokens=60_000)))
+        ),
+        workspace_root=None,
+        runs_root=tmp_path / "runs",
+        process_prefixes=[],
+        event_bus=bus,
+    )
+    contract = SubtaskContract(
+        task_id=uid("run"),
+        objective="recalibrate",
+        global_context="",
+        constraints=[],
+        acceptance_criteria=[AcceptanceCriterion(criterion_id="ac-1", description="done")],
+        requested_profile="researcher",
+        budget=None,
+        created_at=datetime.now(UTC),
+    )
+    result = service.run(contract, runtime_spec_for("researcher"), max_turns=2)
+
+    loaded = [e for e in seen if e.run_id == result.run_id and e.event_type == CAPABILITY_LOADED]
+    assert loaded, "the run must activate the routed skill for the seam to fire"
+    bundle_id = loaded[0].payload["bundle_id"]
+    route_run_id = loaded[0].payload["route_run_id"]
+
+    # The seam's own vocabulary, reconstructed from the run result — the
+    # client_status and verdicts must match the honest map, whatever the
+    # terminal state actually was.
+    stop = result.stop_reason.value if result.stop_reason else "unknown"
+    expected_status = f"run_{stop.lower()}"
+    failure_class = stop if result.status is RunStatus.FAILED else None
+
+    with engine.connect() as conn:  # type: ignore[attr-defined]
+        rows = conn.execute(
+            text(
+                "select outcome_id, route_run_id, client_status from outcome_events"
+                " where bundle_id = :b"
+            ),
+            {"b": bundle_id},
+        ).fetchall()
+    assert len(rows) == 1, "one §33 event per routed bundle, not one per capability"
+    (outcome_id, ev_route, client_status) = rows[0]
+    assert ev_route == route_run_id
+    assert client_status == expected_status
+
+    with engine.connect() as conn:  # type: ignore[attr-defined]
+        verdicts = conn.execute(
+            text(
+                "select source, status, confidence from outcome_verdicts"
+                " where outcome_id = :o order by position"
+            ),
+            {"o": outcome_id},
+        ).fetchall()
+    expected = {
+        (v.source, v.status, v.confidence)
+        for v in kernel_outcome_verdicts(expected_status, failure_class)
+    }
+    assert {(s, st, c) for s, st, c in verdicts} == expected
+    # The §33 envelope stays honest: the seam carries no build/lint/token
+    # observations, so none are fabricated.
+    with engine.connect() as conn:  # type: ignore[attr-defined]
+        envelope = conn.execute(
+            text(
+                "select build_passed, lint_passed, input_tokens, human_corrected"
+                " from outcome_events where outcome_id = :o"
+            ),
+            {"o": outcome_id},
+        ).fetchone()
+    assert envelope == (None, None, None, None)

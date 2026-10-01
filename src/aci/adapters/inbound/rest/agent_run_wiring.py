@@ -13,6 +13,7 @@ directly) the honest null stays: a capability request loads nothing."""
 from collections.abc import Callable
 from typing import Any
 
+from aci.adapters.outbound.agent_capabilities import RegistryCapabilityFeedback
 from aci.application.run_agent_task import AgentRunService
 from aci.config import Settings
 from aci.domain.capability.errors import DomainError, ErrorCode
@@ -107,6 +108,7 @@ def build_agent_run_service(
     *,
     run_store: object | None = None,
     capability_client_factory: Callable[[], ACIClient] | None = None,
+    outcome_service: object | None = None,
 ) -> AgentRunService:
     if not settings.agent_runs_token:
         # Honest-default log, once per process: the surface is reachable by
@@ -140,7 +142,18 @@ def build_agent_run_service(
                 return _NullCapabilityRuntime()
             # Per run: the runtime's refresh budget + digest cache and the
             # client's issued-selection allowlist never leak across runs.
-            return CapabilityRuntime(capability_client_factory())
+            client = capability_client_factory()
+            # §3.2 feedback wiring: the kernel's terminal-state outcome seam
+            # reaches the §33 stream through a sink bound to THIS run's
+            # client (its routed bundles) + the container's outcome service.
+            # No outcome service (unit wiring) = the seam stays a no-op —
+            # the honest pre-§3.2 behavior.
+            feedback = (
+                RegistryCapabilityFeedback(client, outcome_service)  # type: ignore[arg-type]
+                if outcome_service is not None
+                else None
+            )
+            return CapabilityRuntime(client, feedback=feedback)
 
     class _ContextFactory:
         def build(self) -> object:
