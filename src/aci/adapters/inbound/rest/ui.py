@@ -247,19 +247,18 @@ def routes(
     container: Annotated[Container, Depends(get_container)],
     principal: str = "",
 ) -> HTMLResponse:
-    params: dict[str, Any] = {}
-    where = ""
-    if principal:
-        where = " WHERE principal_id = :principal"
-        params["principal"] = principal
+    # Fully static SQL: the optional filter is a bound parameter ('' = no filter),
+    # never string-built, so there is no injection surface (bandit B608).
     runs = _rows(
         container,
         "SELECT rr.route_run_id, rr.created_at, rr.principal_id, rr.client_type, rr.task_text,"
         " rr.latency_ms, rr.eligible_count, rr.bundle_id, rr.error_code,"
         " rr.stages -> 'retrieval' ->> 'model_id' AS embedder,"
         " (SELECT count(*) FROM bundle_items bi WHERE bi.bundle_id = rr.bundle_id) AS items"
-        f" FROM route_runs rr{where} ORDER BY rr.created_at DESC LIMIT 60",
-        params,
+        " FROM route_runs rr"
+        " WHERE (CAST(:principal AS text) = '' OR rr.principal_id = :principal)"
+        " ORDER BY rr.created_at DESC LIMIT 60",
+        {"principal": principal},
     )
     principals = _rows(
         container,

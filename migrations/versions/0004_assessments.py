@@ -1,4 +1,5 @@
 """License + security assessment tables (Phase 4, plan §§24-25, 41)."""
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa

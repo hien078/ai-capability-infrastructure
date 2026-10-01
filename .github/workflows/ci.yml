@@ -63,7 +63,7 @@ jobs:
       - run: ruff check src tests migrations scripts
 
       # migrations/ 0001-0008 predate the formatter; lint-only there.
-      - run: ruff format --check src tests scripts
+      - run: ruff format --check src tests migrations scripts
 
       - run: python -m mypy src
 

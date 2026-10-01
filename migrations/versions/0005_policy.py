@@ -1,4 +1,5 @@
 """Facet/compatibility columns + policy snapshots (Phase 5, plan §§41, 46)."""
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa

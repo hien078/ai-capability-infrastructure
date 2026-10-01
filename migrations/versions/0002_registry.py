@@ -4,6 +4,7 @@ facets stay JSONB+GIN on versions; normalized facet_nodes tables arrive in
 Phase 5. A trigger rejects UPDATE on capability_versions: published versions
 are immutable, promotion only moves release pointers.
 """
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -37,9 +38,7 @@ def upgrade() -> None:
         sa.Column("description", sa.Text(), nullable=False),
         sa.Column("facets", postgresql.JSONB(), nullable=False),
         sa.Column("spec", postgresql.JSONB(), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["capability_id"], ["capabilities.id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["capability_id"], ["capabilities.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("capability_id", "version"),
     )
     op.create_index(

@@ -1,4 +1,5 @@
 """Trusted routing documents + pgvector vectors (Phase 6, plan §§16, 40.2, 41)."""
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa

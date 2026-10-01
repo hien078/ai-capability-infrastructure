@@ -318,3 +318,29 @@ class _FakeSourceRecords:
 
     def list_source_records(self, cid):
         return [x for x in self.r if x.capability_id == cid]
+
+
+def test_package_invalid_messages_never_leak_the_absolute_path(tmp_path: Path) -> None:
+    """SKILL_PACKAGE_INVALID must name the package, not the server filesystem
+    path it lives at (no FS layout leak if the message ever reaches a wire)."""
+    root = str(tmp_path)
+    svc = SkillIngestionService(
+        capabilities=_FakeCaps(),
+        releases=_FakeReleases(),
+        artifacts=_FakeArtifacts(),
+        source_records=_FakeSourceRecords(),
+        objects=FsObjectStore(tmp_path / "objects"),
+    )
+    no_skill = tmp_path / "pkg-without-skill"
+    no_skill.mkdir()
+    with pytest.raises(DomainError) as exc:
+        svc.ingest_local(no_skill)
+    assert exc.value.code == ErrorCode.SKILL_PACKAGE_INVALID
+    assert root not in str(exc.value)
+    assert "pkg-without-skill" in str(exc.value)
+
+    with pytest.raises(DomainError) as exc:
+        build_file_list(tmp_path / "missing-pkg")
+    assert exc.value.code == ErrorCode.SKILL_PACKAGE_INVALID
+    assert root not in str(exc.value)
+    assert "missing-pkg" in str(exc.value)

@@ -1,4 +1,5 @@
 """Provenance source records (Phase 3, plan §§23, 41)."""
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -32,9 +33,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["capability_id"], ["capabilities.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("record_id"),
     )
-    op.create_index(
-        "ix_source_records_capability", "source_records", ["capability_id", "version"]
-    )
+    op.create_index("ix_source_records_capability", "source_records", ["capability_id", "version"])
 
 
 def downgrade() -> None:

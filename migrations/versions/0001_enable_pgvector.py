@@ -1,4 +1,5 @@
 """Enable pgvector extension (foundation; domain tables land in Phase 2)."""
+
 from collections.abc import Sequence
 
 from alembic import op

@@ -38,7 +38,8 @@ def package_digest(files: list[ArtifactFile]) -> str:
 def build_file_list(source: Path) -> list[ArtifactFile]:
     """Snapshot a local skill package directory into hashed file records."""
     if not source.is_dir():
-        raise _invalid(f"source is not a directory: {source}")
+        # Package name only — never the absolute server path (no FS layout leak).
+        raise _invalid(f"source is not a directory: {source.name}")
     root = source.resolve()
     files: list[ArtifactFile] = []
     for path in sorted(source.rglob("*")):

@@ -1,4 +1,5 @@
 """Routing telemetry + bundles + outcomes (Phase 9, plan §§36, 41)."""
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -45,9 +46,7 @@ def upgrade() -> None:
         sa.Column("execution_order", postgresql.JSONB(), nullable=False),
         sa.Column("budget", postgresql.JSONB(), nullable=True),
         sa.Column("policy_snapshot_id", sa.Text(), nullable=True),
-        sa.ForeignKeyConstraint(
-            ["route_run_id"], ["route_runs.route_run_id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["route_run_id"], ["route_runs.route_run_id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("bundle_id"),
     )
     op.create_table(
@@ -61,9 +60,7 @@ def upgrade() -> None:
         sa.Column("role", sa.Text(), nullable=False),
         sa.Column("load_mode", sa.Text(), nullable=False),
         sa.Column("reason_code", sa.Text(), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["bundle_id"], ["bundles.bundle_id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["bundle_id"], ["bundles.bundle_id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
             ["capability_id", "version"],
             ["capability_versions.capability_id", "capability_versions.version"],
@@ -80,9 +77,7 @@ def upgrade() -> None:
         sa.Column("latency_ms", sa.Integer(), nullable=True),
         sa.Column("tests_before", postgresql.JSONB(), nullable=False),
         sa.Column("tests_after", postgresql.JSONB(), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["route_run_id"], ["route_runs.route_run_id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["route_run_id"], ["route_runs.route_run_id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("outcome_id"),
     )
     op.create_table(
@@ -92,9 +87,7 @@ def upgrade() -> None:
         sa.Column("source", sa.Text(), nullable=False),
         sa.Column("status", sa.Text(), nullable=False),
         sa.Column("confidence", sa.Text(), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["outcome_id"], ["outcome_events.outcome_id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["outcome_id"], ["outcome_events.outcome_id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("outcome_id", "position"),
     )
 

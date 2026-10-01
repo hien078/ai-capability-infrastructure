@@ -90,7 +90,8 @@ class SkillIngestionService:
         if not skill_path.is_file():
             raise DomainError(
                 ErrorCode.SKILL_PACKAGE_INVALID,
-                f"skill package must contain SKILL.md at the root: {source}",
+                # Package name only — never the absolute server path (no FS layout leak).
+                f"skill package must contain SKILL.md at the root: {source.name}",
             )
         metadata = parse_skill_md(skill_path.read_text(encoding="utf-8"))
         files = build_file_list(source)

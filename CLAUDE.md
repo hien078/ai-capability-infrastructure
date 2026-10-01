@@ -18,7 +18,7 @@ The acquisition era (judges, refinery, crawler, canary) is **FROZEN**: built, te
 ```bash
 .venv/bin/python -m pytest -q            # all tests (integration/security live-DB ones skip without Postgres)
 pytest -q tests/unit/test_foo.py::test_bar  # single test (pythonpath=src is set in pyproject.toml)
-ruff check src tests migrations scripts && ruff format --check src tests scripts   # both clean (line-length 100, rules E,F,I,UP,B; migrations lint-only)
+ruff check src tests migrations scripts && ruff format --check src tests migrations scripts   # both clean (line-length 100, rules E,F,I,UP,B)
 uv pip install --python .venv/bin/python -r requirements-lock.txt   # deps are locked (hashed, universal 3.11-3.13); pyproject keeps >= ranges
 uv pip compile pyproject.toml --extra dev --extra semantic --universal --python-version 3.11 --generate-hashes -o requirements-lock.txt   # regenerate after any dep change
 .venv/bin/python -m mypy src             # strict, clean required

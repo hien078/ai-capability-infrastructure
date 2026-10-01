@@ -1,4 +1,5 @@
 """Capability relations (Phase 8, plan §18; V1: requires/conflicts_with/checks)."""
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -21,12 +22,8 @@ def upgrade() -> None:
         sa.Column("target_version_constraint", sa.Text(), nullable=True),
         sa.Column("relation", sa.Text(), nullable=False),
         sa.Column("metadata", postgresql.JSONB(), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["source_capability_id"], ["capabilities.id"], ondelete="CASCADE"
-        ),
-        sa.ForeignKeyConstraint(
-            ["target_capability_id"], ["capabilities.id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["source_capability_id"], ["capabilities.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["target_capability_id"], ["capabilities.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("relation_id"),
     )
     op.create_index(
