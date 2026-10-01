@@ -437,3 +437,42 @@ def test_default_context_budget_is_one_shared_constant() -> None:
     assert RouteConstraintsIn().max_context_tokens == 8000
     tool = make_route_tool(None)  # type: ignore[arg-type]
     assert inspect.signature(tool).parameters["max_context_tokens"].default == 8000
+
+
+class CountingRelations(FakeRelations):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+
+    def list_relations(self, source_capability_id: str) -> list[CapabilityRelation]:
+        self.calls.append(source_capability_id)
+        return super().list_relations(source_capability_id)
+
+
+def test_relations_are_fetched_once_per_capability_per_resolve() -> None:
+    """The pairwise conflict check used to issue O(n²) relation lookups (930 of
+    943 SQL statements per /v1/routes, ~16 s over a 3 ms DB link). One lookup
+    per distinct candidate per resolve() — with identical results."""
+    relations = CountingRelations()
+    relations.put(relation("c05", "conflicts_with", "c17"))
+    relations.put(relation("c02", "checks", "c03"))
+    candidates = [ranked(f"c{i:02d}", i) for i in range(1, 31)]
+    result = make_resolver(relations, FakeReleases()).resolve(candidates)
+    assert sorted(relations.calls) == sorted(set(relations.calls))
+    assert len(relations.calls) <= 30
+    assert [d.capability_id for d in result.dropped] == ["c17"]
+    roles = {i.candidate.capability_id: i.role for i in result.selected}
+    assert roles["c01"] == "primary" and roles["c03"] == "check"
+
+
+def test_memo_does_not_leak_across_resolves() -> None:
+    """The resolver is shared across requests: a relation added between two
+    resolves must be seen by the second (the memo is per call)."""
+    relations = FakeRelations()
+    resolver = make_resolver(relations, FakeReleases())
+    assert len(resolver.resolve([ranked("a", 1), ranked("b", 2)]).selected) == 2
+    relations.put(relation("a", "conflicts_with", "b"))
+    assert [
+        i.candidate.capability_id
+        for i in resolver.resolve([ranked("a", 1), ranked("b", 2)]).selected
+    ] == ["a"]
