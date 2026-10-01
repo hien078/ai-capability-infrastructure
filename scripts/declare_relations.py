@@ -32,6 +32,7 @@ capabilities' interchangeable docs, not specific releases.
 
 Usage:
     ACI_DATABASE_URL=... .venv/bin/python scripts/declare_relations.py [--dry-run]
+        [--include-session-triage]
 """
 
 import argparse
@@ -73,6 +74,39 @@ CONFLICT_PAIRS: list[tuple[str, str, float, str]] = [
     ),
 ]
 
+# Optional extension (2026-10-01 corpus cleanup, TASK 1): diagnosing-superpowers
+# is NOT a debugging-methodology near-dup — it is superpowers-SESSION triage
+# (transcript analysis, issue filing, bundle scrubbing) — but the router
+# cannot tell them apart (semantic cosine 0.714–0.770 over trusted routing
+# docs) and a bundle carrying one of each is always one of them being noise.
+# Measured on the 60-case DEV_CASES+KERNEL_QUERY_CASES read-only replay
+# (composer v2, 8000-token budget): the curated pairs above free bundle
+# slots that diagnosing-superpowers then fills (3 → 4 bundles); declaring
+# these three pairs too removes that pollution (→ 1 bundle) at NO
+# relevant-hit cost (54/60 unchanged in both arms). Semantically these are
+# "confusable, never co-bundle" rather than "interchangeable" — hence the
+# opt-in flag, not membership in CONFLICT_PAIRS.
+SESSION_TRIAGE_CONFLICT_PAIRS: list[tuple[str, str, float, str]] = [
+    (
+        "diagnosing-superpowers",
+        "debugging",
+        0.714,
+        "session-triage doc confusable with debugging methodology; never co-bundle",
+    ),
+    (
+        "diagnosing-superpowers",
+        "systematic-debugging",
+        0.741,
+        "session-triage doc confusable with debugging methodology; never co-bundle",
+    ),
+    (
+        "diagnosing-superpowers",
+        "diagnosing-bugs",
+        0.770,
+        "session-triage doc confusable with debugging methodology; never co-bundle",
+    ),
+]
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -82,20 +116,49 @@ def main() -> int:
         action="store_true",
         help="remove the curated relations instead (revert the experiment)",
     )
+    parser.add_argument(
+        "--include-session-triage",
+        action="store_true",
+        help=(
+            "also (re)move the optional diagnosing-superpowers ~ debugging-family "
+            "pairs (SESSION_TRIAGE_CONFLICT_PAIRS) — see the comment there for "
+            "the measured evidence"
+        ),
+    )
     args = parser.parse_args()
 
     sessions = make_session_factory(create_engine(Settings().database_url))
     repo = SqlAlchemyRelationRepository(sessions)
 
+    pairs = (
+        CONFLICT_PAIRS + SESSION_TRIAGE_CONFLICT_PAIRS
+        if args.include_session_triage
+        else CONFLICT_PAIRS
+    )
     if args.remove:
-        return _remove(repo, args.dry_run)
+        return _remove(repo, args.dry_run, pairs)
 
-    existing = {(r.source_capability_id, r.target_capability_id) for r in _all_relations(repo)}
-    for a, b, cosine, why in CONFLICT_PAIRS:
+    existing = {
+        (r.source_capability_id, r.target_capability_id) for r in _all_relations(repo, pairs)
+    }
+    ds_ids = {f"rel-conflict-{a}-{b}" for a, b, _c, _w in SESSION_TRIAGE_CONFLICT_PAIRS}
+    for a, b, cosine, why in pairs:
         relation_id = f"rel-conflict-{a}-{b}"
         if (a, b) in existing or (b, a) in existing:
             print(f"exists   {a} conflicts_with {b}")
             continue
+        if relation_id in ds_ids:
+            trigger = (
+                "corpus-cleanup 2026-10-01: 60-case DEV+KERNEL read-only replay "
+                "(composer v2, 8000 tok) — curated pairs freed slots that "
+                "diagnosing-superpowers filled (3->4 bundles); these pairs "
+                "remove that pollution at no relevant-hit cost (54/60 unchanged)"
+            )
+        else:
+            trigger = (
+                "dev-31-corpus36-semantic: 4/31 bundles co-selected a "
+                "near-dup pair; 3 were full bundles with a missed relevant skill"
+            )
         relation = CapabilityRelation(
             relation_id=relation_id,
             source_capability_id=a,
@@ -105,8 +168,7 @@ def main() -> int:
                 "curated_by": "declare_relations.py",
                 "evidence": f"semantic cosine {cosine} over trusted routing docs",
                 "why": why,
-                "trigger": "dev-31-corpus36-semantic: 4/31 bundles co-selected a "
-                "near-dup pair; 3 were full bundles with a missed relevant skill",
+                "trigger": trigger,
             },
         )
         if args.dry_run:
@@ -117,7 +179,9 @@ def main() -> int:
     return 0
 
 
-def _remove(repo: SqlAlchemyRelationRepository, dry_run: bool) -> int:
+def _remove(
+    repo: SqlAlchemyRelationRepository, dry_run: bool, pairs: list[tuple[str, str, float, str]]
+) -> int:
     """Delete exactly the curated relation_ids (never touches other rows)."""
     from sqlalchemy import delete
 
@@ -126,7 +190,7 @@ def _remove(repo: SqlAlchemyRelationRepository, dry_run: bool) -> int:
     sessions = repo._sessions  # noqa: SLF001 - operational revert, same session factory
     removed = 0
     with sessions() as session, session.begin():
-        for a, b, _cosine, _why in CONFLICT_PAIRS:
+        for a, b, _cosine, _why in pairs:
             relation_id = f"rel-conflict-{a}-{b}"
             if dry_run:
                 print(f"would remove {relation_id}")
@@ -143,10 +207,12 @@ def _remove(repo: SqlAlchemyRelationRepository, dry_run: bool) -> int:
     return 0
 
 
-def _all_relations(repo: SqlAlchemyRelationRepository) -> list[CapabilityRelation]:
+def _all_relations(
+    repo: SqlAlchemyRelationRepository, pairs: list[tuple[str, str, float, str]]
+) -> list[CapabilityRelation]:
     """The repo lists per-source; iterate over the curated sources."""
     seen: dict[str, CapabilityRelation] = {}
-    sources = {p[0] for p in CONFLICT_PAIRS} | {p[1] for p in CONFLICT_PAIRS}
+    sources = {p[0] for p in pairs} | {p[1] for p in pairs}
     for source in sources:
         for relation in repo.list_relations(source):
             seen[relation.relation_id] = relation
