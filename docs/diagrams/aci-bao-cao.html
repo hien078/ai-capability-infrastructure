@@ -181,7 +181,7 @@
 <tr><td><span class="num">6</span></td><td>Đỏ → repair turn</td><td>Test fail → output thất bại được phản hồi vào model → vòng sửa lại (mũi tên đứt quay lại bước 2). Mọi bước ghi event append-only (checkpoint).</td></tr>
 <tr><td><span class="num">7</span></td><td>Xanh → kết thúc</td><td><code>succeeded</code> + bằng chứng (output test, files đổi, tool calls). 3 run thật đầu tiên: 3/3 verifier-gated succeeded.</td></tr>
 </table>
-<div class="callout success"><b>Vì sao vòng kiểm chứng quan trọng — số thật</b>H-bench round 1 (8 task multi-file/long-horizon, cùng model, cùng tool, cùng budget 12 turn): kernel <b>6/8</b> chấp nhận vs naive ReAct loop (không verify, không repair) <b>4/8</b> — <b>delta dương đầu tiên</b> trong lịch sử đo của dự án. 2 case naive thua vì đốt hết budget mà không land được fix; kernel dùng feedback pytest để sửa trúng trong budget. false_success 0/8 cả hai arm — glm-5.3 không bao giờ claim xong khi test còn đỏ.</div>
+<div class="callout success"><b>Vì sao vòng kiểm chứng quan trọng — số thật (H-bench, 3 vòng)</b>Thí nghiệm giữ nguyên model + tool + budget, chỉ đổi harness: <b>K</b> = kernel có verify vs <b>N</b> = naive ReAct. Vòng 1: K 75% vs N 50% — tưởng là "delta dương đầu tiên" nhưng <b>sai</b>: N thiếu system prompt (prompt artifact). Vòng 2: đảo chiều (K 62% vs N 75%) nhưng hai thước đo khác nhau (yardstick artifact). Vòng 3 — prompt fair + cùng thước <code>tests_pass_at_end</code>: <b>K 88% (21/24) vs N 75% (18/24)</b>, K ≥ N ở <b>mọi</b> case (3 thắng, 5 hoà, 0 thua) — edge nhỏ, nhất quán, chưa significant ở n=24. false_success 0.00 cả 48 runs; kernel còn bảo đảm <b>cấu trúc</b>: chỉ báo succeeded khi proposal đã qua verify — không bao giờ claim xong khi chưa kiểm chứng.</div>
 <div class="callout warn"><b>Honest-fail, không sandbox</b>Không có sandbox thật: tool chạy dưới user của server, whitelist lệnh là tuyến phòng chính. <code>ACI_AGENT_RUNS_TOKEN</code> đặt = mọi route cần Bearer token. Gap đã ghi nhận: runs RAM-only (restart mất), agent chưa được wire CapabilityRuntime (chưa dùng kỹ năng registry), approval flow chưa wire, không resume từ checkpoint.</div>
 </section>
 
@@ -201,7 +201,7 @@
 <tr><td>Telemetry §36</td><td>Mọi route ghi trace đầy đủ: router versions, latency, bundle size, từng stage. Dashboard (<code>dashboard.py</code>) + console <code>/ui</code> đọc trực tiếp.</td></tr>
 <tr><td>Detector → đề xuất</td><td><code>detect_gaps.py</code> / <code>detect_deprecation.py</code> đọc telemetry và <b>chỉ đề xuất</b> (proposal-only) — 14 evidence-gap proposals là dữ liệu thật. Benchmark arena (smoke-10, dev-31, H-bench) là cổng bắt buộc cho mọi thay đổi router/kernel.</td></tr>
 </table>
-<div class="callout info"><b>Kết quả đo lớn nhất tới nay (đọc trung thực)</b>§80 (7 vòng, n=33 task thật): <b>không</b> thấy delta outcome khi thêm kỹ năng vào task đơn — model giải được naked. H-bench round 1: delta harness dương đầu tiên (6/8 vs 4/8) nhưng budget-sensitive. false-success (H008) chưa demonstrate được ở tier glm-5.3 — trục tiếp theo là model yếu hơn.</div>
+<div class="callout info"><b>Kết quả đo lớn nhất tới nay (đọc trung thực)</b>§80 (7 vòng, n=33 task thật): <b>không</b> thấy delta outcome khi thêm kỹ năng vào task đơn — model giải được naked. H-bench (3 vòng): kết luận "delta dương đầu tiên" của vòng 1 đã <b>rút lại</b> (prompt artifact); sau khi fair hoá: edge outcome nhỏ nhưng nhất quán (K ≥ N mọi case) + bảo đảm completion-honesty (0 false success cấu trúc), không thêm chi phí đáng kể. false-success (H008) chưa demonstrate ở tier glm-5.3 — trục tiếp theo là model yếu hơn.</div>
 </section>
 
 <hr>
@@ -284,9 +284,9 @@
   </div>
   <div class="card">
     <h4>Kết luận trung thực</h4>
-    <p><b style="color:var(--green)">Đã chứng minh</b> — router semantic route đúng kỹ năng miền end-to-end qua plugin thật; delta harness dương đầu tiên (6/8 vs 4/8); 2 client vận hành; judge phân biệt adversarial.</p>
-    <p><b style="color:var(--orange)">Chưa chứng minh</b> — giá trị outcome trên task đơn (§80 n=33: A=E, model giải được naked); false-success (H008) chưa thấy ở tier glm-5.3.</p>
-    <p><b>Tiếp theo</b> — durable runs (lưu DB); wire CapabilityRuntime (agent dùng kỹ năng registry); H-bench trục model yếu.</p>
+    <p><b style="color:var(--green)">Đã chứng minh</b> — router semantic route đúng kỹ năng miền end-to-end qua plugin thật; H-bench vòng 3 (fair): K ≥ N mọi case + 0 false-success cấu trúc; 2 client vận hành; judge phân biệt adversarial.</p>
+    <p><b style="color:var(--orange)">Chưa chứng minh</b> — giá trị outcome trên task đơn (§80 n=33: A=E, model giải được naked); edge H-bench chưa significant (n=24); false-success (H008) chưa thấy ở tier glm-5.3.</p>
+    <p><b>Tiếp theo</b> — durable runs (lưu DB); wire CapabilityRuntime (agent dùng kỹ năng registry); H-bench trục model yếu; auto-run verifier ở LIMIT_TURNS (ghi làm evidence, không phải success).</p>
   </div>
 </div>
 <div class="callout danger"><b>Cảnh báo dữ liệu: aci_bench không còn trong container đang chạy</b>Container <code>aci-db-1</code> + volume <code>aci_pgdata</code> được tạo lại 2026-09-30 21:52 (+07); hiện chỉ còn DB <code>aci</code> (733 capabilities = fixture test). DB operational <code>aci_bench</code> — nơi chứa corpus thật (~38 kỹ năng) + toàn bộ lịch sử route_runs/outcomes/benchmark — <b>không còn</b>. Nếu không có dump/backup ở nơi khác, dữ liệu đã mất cùng volume cũ — cần kiểm tra ngay.</div>

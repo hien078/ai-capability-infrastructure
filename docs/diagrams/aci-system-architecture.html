@@ -235,13 +235,13 @@
   <div>
     <div class="stats" style="gap:22px">
       <div class="stat"><b>33/33</b><span>§80: A = E (không delta outcome)</span></div>
-      <div class="stat"><b style="color:var(--green)">6/8 vs 4/8</b><span>H-bench: K vs N — delta harness dương đầu tiên</span></div>
+      <div class="stat"><b style="color:var(--green)">21/24 vs 18/24</b><span>H-bench r3 (fair): K ≥ N mọi case — edge nhỏ, nhất quán</span></div>
     </div>
     <div class="stats" style="gap:22px;margin-top:14px">
-      <div class="stat"><b>0.00</b><span>false_success cả 2 arm (glm-5.3 không claim sai)</span></div>
-      <div class="stat"><b>31s vs 42s</b><span>wall K vs N (confound: N skip verification)</span></div>
+      <div class="stat"><b>0.00</b><span>false_success cả 48 runs (glm-5.3 không claim sai)</span></div>
+      <div class="stat"><b>40s vs 50s</b><span>wall K vs N r3 — không chênh lệch chi phí đáng kể</span></div>
     </div>
-    <div class="callout info" style="margin-top:14px"><b>Đọc kết quả thế nào</b>§80 (7 rounds, n=33): không value nào đo được trên single-bug acceptance — model giải được naked. H-bench round 1: kernel rescue 2 case multi/long bằng vòng verifier-gated trong budget; 2 case dài cả hai arm đều LIMIT_TURNS. Delta thật nhưng budget-sensitive; trục tiếp theo = model yếu hơn (H008 false-success chưa demonstrate được ở tier này).</div>
+    <div class="callout info" style="margin-top:14px"><b>Đọc kết quả thế nào</b>§80 (7 rounds, n=33): không value nào đo được trên single-bug acceptance — model giải được naked. H-bench 3 rounds là bài học phương pháp: vòng 1 (K 0.75 vs N 0.50) từng được ghi là "delta dương đầu tiên" — đã RÚT LẠI (N thiếu system prompt — prompt artifact); vòng 2 đảo chiều nhưng thước đo hai arm khác nhau (yardstick artifact); vòng 3 fair hoá: K 0.88 (21/24) vs N 0.75 (18/24) trên cùng thước tests_pass_at_end, K ≥ N MỌI case (3 thắng, 5 hoà, 0 thua) — edge nhỏ, nhất quán, chưa significant ở n=24 (z≈1.1), kèm bảo đảm cấu trúc 0 false-success. Trục tiếp theo = model yếu hơn (H008 chưa demonstrate ở tier glm-5.3).</div>
   </div>
 </div>
 </section>
@@ -383,7 +383,7 @@ document.getElementById("kmanagers").innerHTML=["run_controller","state_manager"
 
 /* ---------- 9. bar chart ---------- */
 (function(){
-  const data=[["§80 A naked",100,"#8888a8"],["§80 E routed",100,"#8888a8"],["H-bench K kernel",75,"#1f8a65"],["H-bench N naive",50,"#c06028"]];
+  const data=[["§80 A naked",100,"#8888a8"],["§80 E routed",100,"#8888a8"],["H-bench K (r3)",88,"#1f8a65"],["H-bench N (r3)",75,"#c06028"]];
   const W=470,H=210,pad=34,bw=64,gap=38;
   let s=`<svg width="${W}" height="${H}">`;
   s+=`<line x1="${pad}" y1="${H-34}" x2="${W-8}" y2="${H-34}" stroke="#333"/>`;
