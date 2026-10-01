@@ -19,18 +19,28 @@ data/aci-improvement/BOOTSTRAP.md):
   requires MemAvailable >= 3.5 GiB.
 - Sustained pressure (3 samples, 5 s apart): MemAvailable < 3 GiB or
   CPU busy > 85% or load1 > 12 → stop admitting, interrupt running workers
-  (SIGINT + grace), defer queued work to the next explicit invocation.
-- Ownership: every stop/signal call is preceded by ownership validation —
-  the unit name must carry this queue run's persisted unit token, the unit
-  Description must carry the same token + job id, WorkingDirectory must
-  equal the job cwd, and ExecStart must contain the expected CLI binary.
-  Process-name matching utilities are never used.
+  (SIGINT to ALL owned units first, ONE shared 30 s grace window, then stop
+  stragglers), defer queued work to the next explicit invocation.
+- Exit codes: 0 = every job reached a terminal state; 75 = work was DEFERRED
+  (sustained pressure, or an admission/dependency deferral-only run where
+  nothing ran); 130 = supervisor interrupted by signal; 2 = queue error.
+- Logs: every attempt writes its OWN <job>.attempt-N.log (earlier evidence
+  is never truncated); <job>.log is kept as a copy of the latest attempt.
+- Ownership: every stop/signal/reset-failed call is preceded by ownership
+  validation — the unit name must carry this queue run's persisted unit
+  token, the unit Description must carry the same token + job id (the
+  spec-digest label `spec_digest=`, or the legacy `exe=` label written by
+  older versions), WorkingDirectory must equal the job cwd, and ExecStart
+  must contain the expected CLI binary. Process-name matching utilities are
+  never used.
 - The worker CLI runs inside a /bin/sh wrapper in the same cgroup that
   redirects output to a log and writes a durable exit receipt; the agent
   exit code alone NEVER implies accepted/verified completion (exit 0 is
   recorded as finished-needs-review, everything else fails).
 - One supervisor per state file (flock); state is bound to the manifest
   job specs (changing a manifest job under an existing state fails closed).
+  State persists via write-to-temp + fsync + atomic rename (a crash never
+  leaves a truncated state file).
 - Job timeout default 30 min; CLI failure/timeout → bounded failed/interrupted
   state, no unlimited retries. Explicit `run` re-invocation resumes
   interrupted/deferred jobs (claude --resume with the persisted session id).
@@ -100,9 +110,22 @@ DEFAULT_JOB_TIMEOUT_S = 30 * 60
 SIGINT_CHECKPOINT_GRACE_S = 30.0
 POLL_INTERVAL_S = 2.0
 
+#: Exit code for "work was deferred, nothing ran to completion" — returned
+#: consistently for sustained-pressure deferral AND admission/dependency
+#: deferral-only runs (0 = every job reached a terminal state, 2 = QueueError,
+#: 130 = supervisor interrupted by signal).
+EXIT_DEFERRED = 75
+EXIT_SIGNALLED = 130
+
 UNIT_PREFIX = "aci-worker"
 UNIT_TOKEN_RE = re.compile(r"^[0-9a-f]{16}$")
 JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")  # ASCII: becomes part of a unit name
+#: Unit Description label for the manifest spec digest. Older versions wrote
+#: the digest under the misleading name `exe=`; that label is still ACCEPTED
+#: (see QueueState.description_matches) so units started by a supervisor that
+#: is still running stay recognizable across an upgrade.
+UNIT_DESC_SPEC_LABEL = "spec_digest"
+UNIT_DESC_SPEC_LABEL_LEGACY = "exe"
 STATE_SCHEMA_VERSION = 2
 JOB_STATUSES = frozenset(
     {"queued", "running", "finished-needs-review", "verified", "failed", "deferred", "interrupted"}
@@ -366,9 +389,23 @@ class QueueState:
             "job_digests": self.job_digests,
             "jobs": {jid: js.to_dict() for jid, js in self.jobs.items()},
         }
+        # Durable write: temp file + fsync + atomic rename + directory fsync —
+        # a crash mid-write can never leave a truncated/corrupt state file
+        # (load() would refuse it and the run token would be lost).
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, self.path)
+        try:
+            dir_fd = os.open(self.path.parent, os.O_RDONLY)
+        except OSError:
+            return  # e.g. parent gone: the rename above is still atomic
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
     # -- single-supervisor lock (acquire BEFORE load) ---------------------------
 
@@ -408,8 +445,26 @@ class QueueState:
 
     def description_for(self, job: JobSpec) -> str:
         # Unforgeable-ish identity carried in the unit Description and
-        # re-verified before any stop/signal call.
-        return f"aci worker queue token={self.unit_token} job={job.id} exe={job.digest()}"
+        # re-verified before any stop/signal call. The spec-digest label is
+        # `spec_digest=` (what it actually is); older versions wrote the same
+        # value under the misleading name `exe=` — see description_matches.
+        return (
+            f"aci worker queue token={self.unit_token} job={job.id} "
+            f"{UNIT_DESC_SPEC_LABEL}={job.digest()}"
+        )
+
+    def description_matches(self, job: JobSpec, description: str) -> bool:
+        """A unit Description identifies this run's job when it matches the
+        CURRENT spec-digest label OR the legacy `exe=` label written by an
+        older version — units of a RUNNING supervisor (started before an
+        upgrade) must stay recognizable/interruptible, not become orphans."""
+        if description == self.description_for(job):
+            return True
+        legacy = (
+            f"aci worker queue token={self.unit_token} job={job.id} "
+            f"{UNIT_DESC_SPEC_LABEL_LEGACY}={job.digest()}"
+        )
+        return description == legacy
 
 
 # --- systemd --------------------------------------------------------------------
@@ -498,7 +553,7 @@ def validate_ownership(state: QueueState, job: JobSpec, unit: str) -> tuple[bool
     props = unit_properties(unit, ["LoadState", "Description", "WorkingDirectory", "ExecStart"])
     if props.get("LoadState") != "loaded":
         return False, f"unit {unit} not loaded"
-    if props.get("Description") != state.description_for(job):
+    if not state.description_matches(job, props.get("Description", "")):
         return False, f"unit {unit} Description does not match this run's job"
     wd = props.get("WorkingDirectory", "")
     if job.cwd and wd != job.cwd:
@@ -574,8 +629,17 @@ def unit_active(unit: str) -> bool:
     return props.get("ActiveState") in ("active", "activating", "deactivating")
 
 
-def cleanup_finished_unit(unit: str) -> None:
-    """Best-effort reset of a finished transient unit (it may already be gone)."""
+def cleanup_finished_unit(state: QueueState, job: JobSpec, unit: str) -> None:
+    """Best-effort reset of a finished transient unit — ONLY after ownership
+    validation. `reset-failed` clears systemd's failed-unit bookkeeping; doing
+    it to a unit we do not own would clear SOMEONE ELSE's failure state."""
+    ok, why = validate_ownership(state, job, unit)
+    if not ok:
+        if "not loaded" in why:
+            # A cleanly-exited transient unit is already gone: nothing to reset.
+            return
+        log.error("refusing reset-failed of %s: %s", unit, why)
+        return
     try:
         _systemctl(["reset-failed", unit], timeout=10)
     except (subprocess.TimeoutExpired, OSError):
@@ -746,8 +810,8 @@ class HostControls:
     def unit_active(self, unit: str) -> bool:
         return unit_active(unit)
 
-    def cleanup_finished_unit(self, unit: str) -> None:
-        cleanup_finished_unit(unit)
+    def cleanup_finished_unit(self, state: QueueState, job: JobSpec, unit: str) -> None:
+        return cleanup_finished_unit(state, job, unit)
 
     def read_exit_receipt(self, receipt_path: Path) -> int | None:
         return read_exit_receipt(receipt_path)
@@ -790,12 +854,28 @@ class WorkerQueue:
         self._pressure_samples: list[HostSnapshot] = []
         self._last_sample: float | None = None
         self._active: dict[str, tuple[JobSpec, JobState]] = {}
-        self._install_signals()
+        # NOTE: signal handlers are NOT installed here — only cmd_run installs
+        # them for a real run (dry-run/tests must not touch process signals).
 
-    def _install_signals(self) -> None:
-        # SIGINT/SIGTERM: checkpoint (interrupt owned units gracefully) and exit.
+    def install_signal_handlers(self) -> None:
+        """Install SIGINT/SIGTERM checkpoint handlers (real runs only).
+
+        Returns nothing but records the previous handlers so
+        restore_signal_handlers() can put them back (cmd_run does)."""
+        self._prev_handlers: dict[int, Any] = {}
         for sig in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(sig, self._handle_signal)
+            try:
+                self._prev_handlers[sig] = signal.signal(sig, self._handle_signal)
+            except (ValueError, OSError):  # pragma: no cover - non-main-thread
+                pass
+
+    def restore_signal_handlers(self) -> None:
+        for sig, handler in getattr(self, "_prev_handlers", {}).items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):  # pragma: no cover - non-main-thread
+                pass
+        self._prev_handlers = {}
 
     def _handle_signal(self, signum: Any, frame: Any) -> None:
         log.warning("received signal %s — interrupting owned units and exiting", signum)
@@ -834,11 +914,11 @@ class WorkerQueue:
         while True:
             if self._consume_control_request():
                 self._interrupt_active(reason="operator defer-all request", defer_queued=True)
-                rc = 75
+                rc = EXIT_DEFERRED
                 break
             if self._shutdown:
                 self._interrupt_active(reason="supervisor signal", defer_queued=False)
-                rc = 130
+                rc = EXIT_SIGNALLED
                 break
             # finalize exited units / apply timeouts
             for _jid, (job, js) in list(self._active.items()):
@@ -864,7 +944,7 @@ class WorkerQueue:
                     self._interrupt_active(reason=f"host pressure: {reason}", defer_queued=True)
                     self.state.pressure_deferred = True
                     self.state.pressure_reason = reason
-                    rc = 75
+                    rc = EXIT_DEFERRED
                     break
             # admission (max 2 active, deps gated)
             self._try_admit()
@@ -872,7 +952,23 @@ class WorkerQueue:
                 break
             self.sleep(POLL_INTERVAL_S)
         self.state.save()
+        if rc == 0 and self._all_deferred():
+            # Nothing ran to any terminal state: every job of this run ended
+            # DEFERRED (admission/dependency) — same honest signal as a
+            # pressure deferral, not a silent "all good" 0.
+            log.info("all jobs deferred by admission — exiting %d", EXIT_DEFERRED)
+            rc = EXIT_DEFERRED
         return rc
+
+    def _all_deferred(self) -> bool:
+        """True when EVERY manifest job of this run ended deferred — nothing
+        reached finished/failed/interrupted/verified."""
+        if not self.jobs:
+            return False
+        return all(
+            (self.state.jobs[jid].status == "deferred") if jid in self.state.jobs else False
+            for jid in self.jobs
+        )
 
     def _has_pending(self) -> bool:
         return any(js.status == "queued" for jid, js in self.state.jobs.items() if jid in self.jobs)
@@ -930,13 +1026,35 @@ class WorkerQueue:
 
     # -- start / finalize / interrupt ------------------------------------------------
 
+    def _attempt_log_path(self, job: JobSpec, js: JobState) -> Path:
+        """Per-attempt log: <job>.attempt-N.log (N = the current attempt).
+        Every attempt gets its OWN file — earlier evidence is never truncated."""
+        return self.logs_dir / f"{job.id}.attempt-{js.attempts}.log"
+
+    def _promote_latest_log(self, job: JobSpec, js: JobState) -> None:
+        """Keep <job>.log as the LATEST attempt's log (a COPY — the per-attempt
+        file stays untouched as the durable record). Best-effort."""
+        if js.attempts < 1:
+            return
+        attempt_log = self._attempt_log_path(job, js)
+        latest = self.logs_dir / f"{job.id}.log"
+        try:
+            if attempt_log.exists():
+                shutil.copyfile(attempt_log, latest)
+        except OSError:
+            pass  # best-effort convenience copy; the attempt log is the record
+
     def _start_job(self, job: JobSpec, js: JobState) -> None:
-        log_path = self.logs_dir / f"{job.id}.log"
         receipt_path = self.logs_dir / f"{job.id}.exit"
         # A previous attempt's receipt must never be read as THIS attempt's exit
         # code (e.g. an OOM kill takes the wrapper down before it writes one).
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         receipt_path.unlink(missing_ok=True)
+        # The attempt counter is bumped BEFORE the per-attempt log path is
+        # derived from it: this attempt writes <job>.attempt-N.log and never
+        # truncates an earlier attempt's evidence.
+        js.attempts += 1
+        log_path = self._attempt_log_path(job, js)
         # Resume the persisted session when a previous attempt actually spawned
         # (unit_name is only set after a successful systemd-run), or the
         # manifest's explicit resume pointer; otherwise create a fresh session.
@@ -957,7 +1075,6 @@ class WorkerQueue:
         js.status = "running"
         js.session_id = session_id
         js.started_at = self.clock()
-        js.attempts += 1
         js.error = None
         js.exit_code = None
         js.ended_at = None
@@ -995,7 +1112,8 @@ class WorkerQueue:
     def _finalize_job(self, job: JobSpec, js: JobState, unit: str) -> None:
         self._active.pop(job.id, None)
         receipt_path = self.logs_dir / f"{job.id}.exit"
-        log_path = self.logs_dir / f"{job.id}.log"
+        # The log of THIS attempt (per-attempt logs are never overwritten).
+        log_path = self._attempt_log_path(job, js)
         code = self.host_ctl.read_exit_receipt(receipt_path)
         # claude runs with stream-json: a missing/non-success result event is an
         # error even on exit 0 (stdout errors are never treated as success).
@@ -1018,7 +1136,8 @@ class WorkerQueue:
         else:
             # Exit code alone NEVER implies accepted/verified completion.
             js.status = "finished-needs-review"
-        self.host_ctl.cleanup_finished_unit(unit)
+        self._promote_latest_log(job, js)
+        self.host_ctl.cleanup_finished_unit(self.state, job, unit)
         self.state.save()
         log.info("job %s finalized: %s (exit=%s)", job.id, js.status, code)
 
@@ -1046,6 +1165,7 @@ class WorkerQueue:
         js.error = reason
         js.ended_at = self.clock()
         # session id + working files preserved: interrupted jobs resume (--resume)
+        self._promote_latest_log(job, js)
         self.state.save()
         log.info("job %s interrupted (%s) — session %s preserved", job.id, reason, js.session_id)
 
@@ -1061,10 +1181,29 @@ class WorkerQueue:
             log.error("refusing cleanup stop of %s: %s", unit, why)
 
     def _interrupt_active(self, *, reason: str, defer_queued: bool) -> None:
+        """Pressure/defer-all/signal path — THREE phases, not one-at-a-time:
+
+        1. validate ownership of every active unit, then SIGINT ALL owned
+           units FIRST (a worker mid-checkpoint keeps running while its
+           sibling is still being signaled one-at-a-time otherwise);
+        2. ONE shared SIGINT_CHECKPOINT_GRACE_S window for all of them;
+        3. stop the stragglers (units still active after the window).
+        """
+        signaled: list[tuple[JobSpec, JobState, str]] = []
         for jid, (job, js) in list(self._active.items()):
             unit = js.unit_name or ""
             if unit and self.host_ctl.unit_active(unit):
-                self._interrupt_job(job, js, unit, reason=reason, graceful=True)
+                # Ownership validated before EVERY signal (as before).
+                ok, why = self.host_ctl.validate_ownership(self.state, job, unit)
+                if not ok:
+                    log.error("refusing to signal %s: %s", unit, why)
+                    js.status = "failed"
+                    js.error = f"ownership validation failed: {why}"
+                    js.ended_at = self.clock()
+                    self._active.pop(jid, None)
+                    continue
+                self.host_ctl.send_sigint_to_unit(unit)
+                signaled.append((job, js, unit))
             elif unit and self._has_receipt(job):
                 self._finalize_job(job, js, unit)  # exited between polls: record it
             else:
@@ -1073,7 +1212,26 @@ class WorkerQueue:
                 js.status = "deferred"
                 js.error = reason
                 js.ended_at = self.clock()
+                self._promote_latest_log(job, js)
             self._active.pop(jid, None)
+        # Phase 2: one SHARED grace window for all signaled units.
+        deadline = self.clock() + SIGINT_CHECKPOINT_GRACE_S
+        while self.clock() < deadline and any(
+            self.host_ctl.unit_active(unit) for _job, _js, unit in signaled
+        ):
+            self.sleep(1.0)
+        # Phase 3: stop the stragglers, mark every signaled job interrupted.
+        for job, js, unit in signaled:
+            if self.host_ctl.unit_active(unit):
+                self.host_ctl.stop_worker_unit(unit)
+            js.status = "interrupted"
+            js.error = reason
+            js.ended_at = self.clock()
+            # session id + working files preserved: interrupted jobs resume
+            self._promote_latest_log(job, js)
+            log.info(
+                "job %s interrupted (%s) — session %s preserved", job.id, reason, js.session_id
+            )
         self._active.clear()
         if defer_queued:
             for jid, js in self.state.jobs.items():
@@ -1106,6 +1264,7 @@ class WorkerQueue:
             js.status = "interrupted"
             js.error = "supervisor restarted while worker was active"
             js.ended_at = self.clock()
+            self._promote_latest_log(job, js)
             self.state.save()
 
     # -- operator control ------------------------------------------------------------
@@ -1237,9 +1396,14 @@ def cmd_run(args: argparse.Namespace) -> int:
             state.jobs.setdefault(j.id, JobState(status="queued"))
         state.save()
         queue = WorkerQueue(state, jobs, logs_dir)
+        # Signal handlers are installed HERE (real run only — never in
+        # WorkerQueue.__init__, so dry-run/tests never touch process signals)
+        # and restored afterwards.
+        queue.install_signal_handlers()
         try:
             return queue.run()
         finally:
+            queue.restore_signal_handlers()
             state.save()
     finally:
         state.release_lock()
@@ -1384,7 +1548,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     try:
-        return args.func(args)
+        # argparse.Namespace attributes are Any; bind the handler to a typed
+        # callable so the return is an int, not Any (mypy --strict).
+        handler: Callable[[argparse.Namespace], int] = args.func
+        return handler(args)
     except QueueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

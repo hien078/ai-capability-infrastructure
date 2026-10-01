@@ -22,16 +22,31 @@ python scripts/aci_worker_queue.py host-snapshot
   human coordinator. An explicit `run` invocation RESUMES: interrupted and
   deferred jobs are re-queued (claude jobs resume with `--resume <persisted
   session id>`; attempts/session metadata are preserved, never reset).
+  Signal handlers (SIGINT/SIGTERM checkpoint) are installed ONLY by a real
+  `run` — never by `--dry-run`, `status`, or library use.
 - `--dry-run` prints the admission plan and unit names without launching
   anything and marks nothing complete.
 - `status` is read-only.
 - `resume JOB` explicitly re-queues one failed/interrupted/deferred job.
 - `defer-all` defers queued/interrupted jobs. If a supervisor is currently
   holding the state lock, it writes a control request file the supervisor
-  consumes in its poll loop (it then SIGINTs its OWN validated units with a
-  30 s grace and defers the rest); if no supervisor is running it acts
-  directly. It never touches running units it does not own.
+  consumes in its poll loop (it then SIGINTs ALL of its OWN validated units
+  at once, waits ONE shared 30 s grace window, stops the stragglers, and
+  defers the rest); if no supervisor is running it acts directly. It never
+  touches running units it does not own.
 - `host-snapshot` prints `MemAvailable` (GiB), CPU busy %, load1.
+
+## Exit codes
+
+- `0` — every job reached a terminal state (finished-needs-review / verified /
+  failed / interrupted).
+- `75` — work was DEFERRED, nothing ran to completion: sustained host
+  pressure, OR a deferral-only run where every job ended deferred by
+  admission/dependency refusal. Both mean "re-invoke explicitly later".
+- `130` — the supervisor itself was interrupted by SIGINT/SIGTERM (owned
+  units were gracefully interrupted first).
+- `2` — queue error (bad manifest, corrupt state, systemd unavailable, …).
+- `1` — `status`/`resume`/`defer-all` could not find or act on the state.
 
 ## Manifest
 
@@ -64,9 +79,12 @@ python scripts/aci_worker_queue.py host-snapshot
   stays QUEUED and is rechecked on the next poll; it is DEFERRED (resumable,
   never failed) only when nothing of ours is running.
 - **Sustained pressure** (3 samples, 5 s apart): MemAvailable < 3 GiB or CPU
-  busy > 85% or load1 > 12 → running workers get SIGINT (30 s checkpoint
-  grace) then stop, queued work is marked deferred, and the supervisor exits
-  75. Deferred work is never auto-restarted — only an explicit `run`/`resume`.
+  busy > 85% or load1 > 12 → ALL running workers are SIGINTed FIRST (each
+  after its own ownership validation), then ONE shared 30 s checkpoint grace
+  window elapses for all of them, then the stragglers are stopped; queued
+  work is marked deferred, and the supervisor exits 75. A single worker's
+  timeout uses the same per-unit SIGINT + 30 s grace. Deferred work is never
+  auto-restarted — only an explicit `run`/`resume`.
 - **Per-worker cgroup**: each worker runs in its OWN transient systemd user
   service with `MemoryHigh=1536M`, `MemoryMax=2G`, `MemorySwapMax=256M`,
   `CPUQuota=200%`, `TasksMax=128`, `OOMPolicy=kill`, `Nice=10`. The exact
@@ -84,10 +102,17 @@ python scripts/aci_worker_queue.py host-snapshot
 
 - Unit names carry a persisted per-state run token:
   `aci-worker-<token>-<job>.service`.
-- Before ANY stop/signal call the queue validates: unit name matches the
-  expected name, the unit Description matches the recorded
-  `token/job/digest` identity, `WorkingDirectory` equals the job cwd, and
-  `ExecStart` contains the expected CLI binary. Mismatch → refuse to act.
+- Before ANY stop/signal/reset-failed call the queue validates: unit name
+  matches the expected name, the unit Description matches the recorded
+  `token/job/spec_digest` identity, `WorkingDirectory` equals the job cwd,
+  and `ExecStart` contains the expected CLI binary. Mismatch → refuse to
+  act. The Description label is `spec_digest=<manifest spec digest>`; units
+  written by an older version of the queue carry the same digest under the
+  legacy label `exe=` and are still accepted, so workers of a supervisor
+  that is still running stay recognizable/interruptible across an upgrade.
+- `reset-failed` (cleanup of a finished unit's systemd bookkeeping) is
+  ownership-gated the same way: a unit that is gone is skipped, a mismatch
+  is refused, only a validated OWNED unit is reset.
 - Process-name matching utilities (`pkill`/`killall`/`pgrep`/`psutil`) are
   never used and their presence is test-banned.
 - Existing OpenCode services, user sessions, swap, and sysctls are never
@@ -99,6 +124,9 @@ python scripts/aci_worker_queue.py host-snapshot
   redirects output to a log file and writes a durable exit receipt
   (`<job>.exit`). Transient units vanish after exit, so the receipt — not
   systemd — is the exit-code source of truth.
+- **Logs are per attempt**: attempt N writes `<job>.attempt-N.log` (earlier
+  attempts are never truncated — evidence survives re-runs); `<job>.log`
+  is kept as a copy of the latest attempt for `tail` convenience.
 - **Exit code 0 is recorded as `finished-needs-review`, never `verified`.**
   Agent exit codes alone never imply accepted/verified task completion.
 - Nonzero exit, missing receipt, or `is_error` in the claude result event →
@@ -111,11 +139,14 @@ python scripts/aci_worker_queue.py host-snapshot
 
 - One supervisor per state file (flock; the lock is taken BEFORE loading
   state).
+- State persists via write-to-temp + `fsync` + atomic rename (+ a directory
+  fsync): a crash mid-write can never leave a truncated state file — the
+  run token and job states survive a power cut.
 - On start, jobs left `running` by a dead supervisor are reconciled: a
   still-active unit that passes ownership validation is ADOPTED; anything
   else is honestly marked `interrupted` (resumable with its session).
-- SIGINT/SIGTERM to the supervisor interrupts owned units gracefully and
-  exits 130.
+- SIGINT/SIGTERM to the supervisor (handlers installed only by a real
+  `run`) interrupts owned units gracefully and exits 130.
 
 ## CLI invocation details
 

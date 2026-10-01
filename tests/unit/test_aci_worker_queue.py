@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -67,6 +69,8 @@ class FakeHostControls:
         self.systemd_ok = systemd
         self.limits_ok = limits_ok
         self.ownership_ok = ownership_ok
+        #: per-unit ownership-validation overrides (unit name -> fail)
+        self.ownership_fail_units: set[str] = set()
         self.units: dict[str, FakeUnit] = {}
         self.started: list[str] = []
         self.stopped: list[str] = []
@@ -76,6 +80,8 @@ class FakeHostControls:
         self.logs: dict[str, str] = {}
         self.descriptions: dict[str, str] = {}
         self.argvs: list[list[str]] = []
+        self.envs: list[dict[str, str]] = []
+        self.log_paths: list[Path] = []
 
     def snapshot(self) -> q.HostSnapshot:
         if self._snap_idx < len(self.snapshots):
@@ -95,6 +101,8 @@ class FakeHostControls:
     def validate_ownership(
         self, state: q.QueueState, job: q.JobSpec, unit: str
     ) -> tuple[bool, str]:
+        if unit in self.ownership_fail_units:
+            return False, "Description mismatch (simulated per-unit)"
         if not self.ownership_ok:
             return False, "Description mismatch (simulated)"
         expected = state.unit_for(job)
@@ -117,6 +125,8 @@ class FakeHostControls:
         unit = state.unit_for(job)
         self.started.append(unit)
         self.argvs.append(list(argv))
+        self.envs.append(dict(env))
+        self.log_paths.append(Path(log_path))
         self.units[unit] = FakeUnit(unit, job.cwd)
         self.descriptions[unit] = state.description_for(job)
         # simulate the wrapper writing the receipt when the "process" finishes
@@ -161,8 +171,11 @@ class FakeHostControls:
         u = self.units.get(unit)
         return bool(u and u.active)
 
-    def cleanup_finished_unit(self, unit: str) -> None:
-        self.cleaned.append(unit)
+    def cleanup_finished_unit(self, state: q.QueueState, job: q.JobSpec, unit: str) -> None:
+        # mirrors the real contract: reset-failed is ownership-gated
+        ok, _why = self.validate_ownership(state, job, unit)
+        if ok:
+            self.cleaned.append(unit)
 
     def read_exit_receipt(self, receipt_path: Path) -> int | None:
         return self.receipts.get(str(receipt_path))
@@ -460,7 +473,7 @@ def test_is_error_result_fails(tmp_path):
     queue._try_admit()
     unit = state.jobs["a"].unit_name
     host.set_log(
-        tmp_path / "logs" / "a.log",
+        tmp_path / "logs" / "a.attempt-1.log",
         '{"type":"result","session_id":"s1","is_error":true}\n',
     )
     host.finish_unit(unit)
@@ -475,7 +488,7 @@ def test_session_id_captured_from_result_event(tmp_path):
     queue._try_admit()
     unit = state.jobs["a"].unit_name
     host.set_log(
-        tmp_path / "logs" / "a.log",
+        tmp_path / "logs" / "a.attempt-1.log",
         '{"type":"system","session_id":"sess-abc"}\n{"type":"result","session_id":"sess-abc"}\n',
     )
     host.finish_unit(unit)
@@ -592,7 +605,8 @@ def test_admission_refusal_defers_not_fails(tmp_path):
     host = FakeHostControls(snapshots=[snap(mem=1.0)])
     queue, state, host, clock = make_queue(tmp_path, [job_raw("a", tmp_path)], host)
     rc = queue.run()
-    assert rc == 0
+    # deferral-only run: exit 75 (same as pressure deferral), NOT a silent 0
+    assert rc == q.EXIT_DEFERRED == 75
     js = state.jobs["a"]
     assert js.status == "deferred"
     assert "MemAvailable" in (js.error or "")
@@ -1030,6 +1044,8 @@ class FileHost(FakeHostControls):
         unit = state.unit_for(job)
         self.started.append(unit)
         self.argvs.append(list(argv))
+        self.envs.append(dict(env))
+        self.log_paths.append(Path(log_path))
         self.units[unit] = FakeUnit(unit, job.cwd)
         return unit
 
@@ -1051,7 +1067,9 @@ def test_stale_exit_receipt_from_previous_attempt_is_never_reused(tmp_path):
     logs.mkdir()
     (logs / "a.exit").write_text("0\n")
     queue._try_admit()
-    (logs / "a.log").write_text('{"type":"result","subtype":"success","is_error":false}\n')
+    (logs / "a.attempt-1.log").write_text(
+        '{"type":"result","subtype":"success","is_error":false}\n'
+    )
     unit = state.jobs["a"].unit_name
     host.finish_unit(unit)
     queue._finalize_job(queue.jobs["a"], state.jobs["a"], unit)
@@ -1065,7 +1083,7 @@ def test_claude_exit_zero_without_result_event_fails(tmp_path):
     host = FakeHostControls()
     queue, state, host, clock = make_queue(tmp_path, [job_raw("a", tmp_path, kind="claude")], host)
     queue._try_admit()
-    host.set_log(tmp_path / "logs" / "a.log", "API Error: 401 unauthorized\n")
+    host.set_log(tmp_path / "logs" / "a.attempt-1.log", "API Error: 401 unauthorized\n")
     unit = state.jobs["a"].unit_name
     host.finish_unit(unit)
     queue._finalize_job(queue.jobs["a"], state.jobs["a"], unit)
@@ -1076,7 +1094,9 @@ def test_claude_error_result_subtype_fails(tmp_path):
     host = FakeHostControls()
     queue, state, host, clock = make_queue(tmp_path, [job_raw("a", tmp_path, kind="claude")], host)
     queue._try_admit()
-    host.set_log(tmp_path / "logs" / "a.log", '{"type":"result","subtype":"error_max_turns"}\n')
+    host.set_log(
+        tmp_path / "logs" / "a.attempt-1.log", '{"type":"result","subtype":"error_max_turns"}\n'
+    )
     unit = state.jobs["a"].unit_name
     host.finish_unit(unit)
     queue._finalize_job(queue.jobs["a"], state.jobs["a"], unit)
@@ -1247,3 +1267,365 @@ def test_resource_overrides_are_validated_and_applied(monkeypatch: pytest.Monkey
     for bad in ((9, None, None), (None, 1.0, None), (None, None, 0.5), (None, 3.0, 3.5)):
         with pytest.raises(q.QueueError):
             q.apply_resource_overrides(*bad)
+
+
+# --- m2 hardening (2026-10-02 independent review, non-blocking findings) ----------------
+
+
+class RecordingHost(FakeHostControls):
+    """Records the VIRTUAL time of every SIGINT/stop call (clock-driven)."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        super().__init__()
+        self.clock = clock
+        self.sigint_times: list[float] = []
+        self.stop_times: list[float] = []
+
+    def send_sigint_to_unit(self, unit: str) -> bool:
+        self.sigint_times.append(self.clock.now)
+        return super().send_sigint_to_unit(unit)
+
+    def stop_worker_unit(self, unit: str) -> bool:
+        self.stop_times.append(self.clock.now)
+        return super().stop_worker_unit(unit)
+
+
+# 1. per-attempt logs
+
+
+def test_per_attempt_logs_are_kept_and_latest_is_copied(tmp_path):
+    """Every attempt writes its OWN <job>.attempt-N.log — the wrapper's `>`
+    redirection can never destroy an earlier attempt's evidence — and
+    <job>.log is kept as a copy of the latest attempt."""
+    host = FileHost()
+    queue, state, host, clock = make_queue(tmp_path, [job_raw("a", tmp_path, kind="claude")], host)
+    logs = tmp_path / "logs"
+    queue._try_admit()
+    # the wrapper was pointed at the PER-ATTEMPT log, not at <job>.log
+    aciq_log = host.log_paths[0]
+    assert aciq_log == logs / "a.attempt-1.log"
+    aciq_log.write_text("attempt-1 evidence\n")
+    host.finish_unit(state.jobs["a"].unit_name)
+    queue._finalize_job(queue.jobs["a"], state.jobs["a"], state.jobs["a"].unit_name)
+    assert (logs / "a.attempt-1.log").read_text() == "attempt-1 evidence\n"
+    assert (logs / "a.log").read_text() == "attempt-1 evidence\n"  # latest copy
+    # resume: attempt 2 must NOT touch attempt 1's file
+    state.jobs["a"].status = "queued"
+    queue._try_admit()
+    aciq_log2 = host.log_paths[1]
+    assert aciq_log2 == logs / "a.attempt-2.log"
+    aciq_log2.write_text("attempt-2 evidence\n")
+    host.finish_unit(state.jobs["a"].unit_name)
+    queue._finalize_job(queue.jobs["a"], state.jobs["a"], state.jobs["a"].unit_name)
+    assert (logs / "a.attempt-1.log").read_text() == "attempt-1 evidence\n"  # NOT lost
+    assert (logs / "a.log").read_text() == "attempt-2 evidence\n"  # latest = attempt 2
+
+
+def test_interrupted_attempt_log_is_promoted_to_latest(tmp_path):
+    """An interrupted attempt's log also becomes <job>.log (the latest)."""
+    host = FileHost()
+    queue, state, host, clock = make_queue(tmp_path, [job_raw("a", tmp_path)], host)
+    logs = tmp_path / "logs"
+    queue._try_admit()
+    (logs / "a.attempt-1.log").write_text("partial evidence\n")
+    queue._interrupt_job(
+        queue.jobs["a"],
+        state.jobs["a"],
+        state.jobs["a"].unit_name,
+        reason="pressure",
+        graceful=False,
+    )
+    assert state.jobs["a"].status == "interrupted"
+    assert (logs / "a.log").read_text() == "partial evidence\n"
+
+
+# 2. pressure interruption: signal ALL owned units first, ONE shared grace window
+
+
+def test_pressure_interrupt_signals_all_units_first_then_one_shared_window(tmp_path):
+    """_interrupt_active must SIGINT ALL owned units FIRST, wait ONE shared
+    30 s grace window, then stop the stragglers — never SIGINT one unit, wait
+    out its full grace, stop it, and only then signal the next (60 s total)."""
+    clock = FakeClock()
+    host = RecordingHost(clock)
+    queue, state, host, clock = make_queue(
+        tmp_path, [job_raw("a", tmp_path), job_raw("b", tmp_path)], host, clock
+    )
+    queue._try_admit()
+    assert set(queue._active) == {"a", "b"}
+    t0 = clock.now
+    queue._interrupt_active(reason="host pressure", defer_queued=True)
+    # ALL units were signaled BEFORE any unit was stopped
+    assert len(host.sigints) == 2
+    assert max(host.sigint_times) < min(host.stop_times)
+    # ONE shared 30 s window, not one per unit (old code: 60 s)
+    assert clock.now - t0 <= q.SIGINT_CHECKPOINT_GRACE_S + 1.0
+    assert all(js.status == "interrupted" for js in state.jobs.values())
+    assert all(js.session_id for js in state.jobs.values())  # resumable
+
+
+def test_pressure_interrupt_skips_unowned_unit_but_signals_owned(tmp_path):
+    """Ownership is validated before EVERY signal: a unit that fails
+    validation is never signaled (failed honestly) while its sibling still
+    gets the full graceful interrupt."""
+    clock = FakeClock()
+    host = RecordingHost(clock)
+    queue, state, host, clock = make_queue(
+        tmp_path, [job_raw("a", tmp_path), job_raw("b", tmp_path)], host, clock
+    )
+    queue._try_admit()
+    unit_a = state.jobs["a"].unit_name
+    host.ownership_fail_units.add(unit_a)  # e.g. Description no longer matches
+    queue._interrupt_active(reason="host pressure", defer_queued=True)
+    assert host.sigints == [state.jobs["b"].unit_name]
+    assert state.jobs["a"].status == "failed"
+    assert "ownership" in (state.jobs["a"].error or "")
+    assert state.jobs["b"].status == "interrupted"
+
+
+# 3. deferral-only runs exit 75 (same as pressure deferral)
+
+
+def test_dependency_deferral_only_run_returns_75(tmp_path):
+    """An admission-refused job defers its dependent too: EVERY job deferred,
+    nothing ran — exit 75, not a silent all-good 0."""
+    host = FakeHostControls(snapshots=[snap(mem=1.0)])
+    queue, state, host, clock = make_queue(
+        tmp_path,
+        [job_raw("a", tmp_path), job_raw("b", tmp_path, depends_on=["a"])],
+        host,
+    )
+    assert queue.run() == q.EXIT_DEFERRED == 75
+    assert state.jobs["a"].status == "deferred"
+    assert state.jobs["b"].status == "deferred"
+
+
+def test_run_with_any_completed_job_still_exits_0(tmp_path):
+    """75 is for DEFERRAL-ONLY runs: when at least one job reached a real
+    terminal state, the run exits 0 even if another job was deferred."""
+    host = FakeHostControls(snapshots=[snap(mem=8.0), snap(mem=4.0), snap(mem=3.0)])
+    queue, state, host, clock = make_queue(
+        tmp_path, [job_raw("a", tmp_path), job_raw("b", tmp_path)], host
+    )
+    orig_start = host.start_worker_unit
+
+    def start_and_finish(*a: Any, **kw: Any) -> str:
+        unit = orig_start(*a, **kw)
+        host.finish_unit(unit)
+        return unit
+
+    host.start_worker_unit = start_and_finish  # type: ignore[method-assign]
+    assert queue.run() == 0
+    assert state.jobs["a"].status == "finished-needs-review"
+    assert state.jobs["b"].status == "deferred"
+
+
+# 4. signal handlers only in cmd_run for a real run
+
+
+def test_worker_queue_constructor_installs_no_signal_handlers(tmp_path, monkeypatch):
+    """Signal handlers belong to cmd_run's REAL run only — the constructor
+    (also used by --dry-run and by tests) must never touch process signals."""
+    installed: list[int] = []
+    monkeypatch.setattr(q.signal, "signal", lambda sig, handler: installed.append(sig))
+    queue, *_ = make_queue(tmp_path, [job_raw("a", tmp_path)])
+    assert installed == [], "constructor must not install signal handlers"
+    queue.install_signal_handlers()
+    assert installed == [signal.SIGINT, signal.SIGTERM]
+    queue.restore_signal_handlers()
+    assert len(installed) == 4  # both handlers restored afterwards
+
+
+def test_cmd_run_installs_handlers_only_for_real_runs(tmp_path, monkeypatch):
+    calls: list[tuple[Any, Any]] = []
+
+    def fake_signal(sig: Any, handler: Any) -> Any:
+        calls.append((sig, handler))
+        return signal.default_int_handler
+
+    monkeypatch.setattr(q.signal, "signal", fake_signal)
+    monkeypatch.setattr(q, "host_snapshot", lambda: q.HostSnapshot(8.0, 10.0, 1.0))
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"jobs": [job_raw("a", tmp_path)]}))
+    # dry-run: NO signal handlers
+    args = type(
+        "Args", (), {"manifest": str(manifest), "state": str(tmp_path / "st.json"), "dry_run": True}
+    )()
+    assert q.cmd_run(args) == 0
+    assert calls == [], "--dry-run must not install signal handlers"
+    # real run: handlers installed (and restored afterwards)
+    host = FakeHostControls()
+    orig_start = host.start_worker_unit
+
+    def start_and_finish(*a: Any, **kw: Any) -> str:
+        unit = orig_start(*a, **kw)
+        host.finish_unit(unit)
+        return unit
+
+    host.start_worker_unit = start_and_finish  # type: ignore[method-assign]
+    monkeypatch.setattr(q, "HostControls", lambda: host)
+    monkeypatch.setattr(q, "POLL_INTERVAL_S", 0.0)
+    args2 = type(
+        "Args",
+        (),
+        {"manifest": str(manifest), "state": str(tmp_path / "st2.json"), "dry_run": False},
+    )()
+    assert q.cmd_run(args2) == 0
+    sigs = [sig for sig, _h in calls]
+    assert signal.SIGINT in sigs and signal.SIGTERM in sigs
+    assert len(calls) == 4  # 2 installs + 2 restores
+
+
+# 5. reset-failed is ownership-gated
+
+
+def test_finalize_never_resets_failed_of_unowned_unit(tmp_path):
+    """`reset-failed` clears systemd's failed-unit bookkeeping — doing it to a
+    unit that fails ownership validation would clear SOMEONE ELSE's failure
+    state. The job itself still finalizes honestly."""
+    host = FakeHostControls()
+    queue, state, host, clock = make_queue(tmp_path, [job_raw("a", tmp_path)], host)
+    queue._try_admit()
+    unit = state.jobs["a"].unit_name
+    host.finish_unit(unit)
+    host.ownership_fail_units.add(unit)  # ownership now fails (Description tampered)
+    queue._finalize_job(queue.jobs["a"], state.jobs["a"], unit)
+    assert host.cleaned == [], "unowned unit must never be reset-failed"
+    assert state.jobs["a"].status == "finished-needs-review"
+
+
+def test_finalize_resets_owned_failed_unit(tmp_path):
+    host = FakeHostControls()
+    queue, state, host, clock = make_queue(tmp_path, [job_raw("a", tmp_path)], host)
+    queue._try_admit()
+    unit = state.jobs["a"].unit_name
+    host.set_receipt(tmp_path / "logs" / "a.exit", 3)
+    host.finish_unit(unit, exit_code=3)
+    queue._finalize_job(queue.jobs["a"], state.jobs["a"], unit)
+    assert host.cleaned == [unit]  # OWNED failed unit: reset-failed runs
+    assert state.jobs["a"].status == "failed"
+
+
+def test_cleanup_finished_unit_real_function_is_ownership_gated(tmp_path, monkeypatch):
+    state = q.QueueState(tmp_path / "s.json")
+    state.load()
+    job = q.JobSpec.from_manifest(job_raw("a", tmp_path))
+    unit = state.unit_for(job)
+    reset_calls: list[list[str]] = []
+
+    def fake_systemctl(args: list[str], timeout: float = 20.0) -> Any:
+        reset_calls.append(list(args))
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(q, "_systemctl", fake_systemctl)
+    # loaded unit with a MISMATCHED Description: refuse to reset
+    monkeypatch.setattr(
+        q,
+        "unit_properties",
+        lambda unit, props: {  # type: ignore[assignment]
+            "LoadState": "loaded",
+            "Description": "some other description",
+            "WorkingDirectory": job.cwd,
+            "ExecStart": f"exec {q.CLAUDE_BIN} -p",
+        },
+    )
+    q.cleanup_finished_unit(state, job, unit)
+    assert reset_calls == []
+    # not loaded (cleanly-exited transient unit is gone): skip silently
+    monkeypatch.setattr(q, "unit_properties", lambda unit, props: {})  # type: ignore[assignment]
+    q.cleanup_finished_unit(state, job, unit)
+    assert reset_calls == []
+    # loaded + matching: reset-failed runs
+    monkeypatch.setattr(
+        q,
+        "unit_properties",
+        lambda unit, props: {  # type: ignore[assignment]
+            "LoadState": "loaded",
+            "Description": state.description_for(job),
+            "WorkingDirectory": job.cwd,
+            "ExecStart": f"exec {q.CLAUDE_BIN} -p",
+        },
+    )
+    q.cleanup_finished_unit(state, job, unit)
+    assert reset_calls == [["reset-failed", unit]]
+
+
+# 6. honest Description label (spec_digest=, legacy exe= still accepted)
+
+
+def test_unit_description_label_is_spec_digest_not_exe(tmp_path):
+    """The Description label tells the truth: it carries the manifest SPEC
+    DIGEST (older versions misleadingly named it `exe=`)."""
+    queue, state, *_ = make_queue(tmp_path, [job_raw("a", tmp_path)])
+    desc = state.description_for(queue.jobs["a"])
+    assert "spec_digest=" in desc
+    assert "exe=" not in desc
+    assert queue.jobs["a"].digest() in desc
+
+
+def test_validate_ownership_accepts_legacy_exe_label(tmp_path):
+    """Units started by an OLDER version (Description `exe=<digest>`) stay
+    recognizable/interruptible across an upgrade — validation accepts both
+    labels, so a running supervisor's workers never become orphans."""
+    state = q.QueueState(tmp_path / "s.json")
+    state.load()
+    job = q.JobSpec.from_manifest(job_raw("a", tmp_path))
+    legacy = f"aci worker queue token={state.unit_token} job={job.id} exe={job.digest()}"
+    orig = q.unit_properties
+    q.unit_properties = lambda unit, props: {  # type: ignore[assignment]
+        "LoadState": "loaded",
+        "Description": legacy,
+        "WorkingDirectory": job.cwd,
+        "ExecStart": f"exec {q.CLAUDE_BIN} -p",
+    }
+    try:
+        ok, reason = q.validate_ownership(state, job, state.unit_for(job))
+    finally:
+        q.unit_properties = orig  # type: ignore[assignment]
+    assert ok, reason
+
+
+def test_validate_ownership_rejects_wrong_digest(tmp_path):
+    state = q.QueueState(tmp_path / "s.json")
+    state.load()
+    job = q.JobSpec.from_manifest(job_raw("a", tmp_path))
+    orig = q.unit_properties
+    q.unit_properties = lambda unit, props: {  # type: ignore[assignment]
+        "LoadState": "loaded",
+        "Description": (
+            f"aci worker queue token={state.unit_token} job={job.id} spec_digest=deadbeef"
+        ),
+        "WorkingDirectory": job.cwd,
+        "ExecStart": f"exec {q.CLAUDE_BIN} -p",
+    }
+    try:
+        ok, reason = q.validate_ownership(state, job, state.unit_for(job))
+    finally:
+        q.unit_properties = orig  # type: ignore[assignment]
+    assert not ok and "Description" in reason
+
+
+# 7. durable state persistence (fsync + atomic rename)
+
+
+def test_state_save_fsyncs_temp_file_before_atomic_rename(tmp_path, monkeypatch):
+    """State persists durably: write-to-temp + fsync + atomic rename + a
+    directory fsync — a crash mid-write can never leave a truncated state
+    file (load() would refuse it and the run token would be lost)."""
+    state_path = tmp_path / "state.json"
+    state = q.QueueState(state_path)
+    state.load()
+    fsynced: list[int] = []
+    real_fsync = os.fsync
+
+    def recording_fsync(fd: int) -> None:
+        fsynced.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(q.os, "fsync", recording_fsync)
+    state.save()
+    assert len(fsynced) == 2, "save() must fsync the temp file AND the directory"
+    assert not (tmp_path / "state.tmp").exists()  # consumed by the atomic rename
+    state2 = q.QueueState(state_path)
+    state2.load()
+    assert state2.unit_token == state.unit_token  # round-trips intact
