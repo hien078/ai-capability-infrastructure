@@ -7,6 +7,8 @@ action protocol, and a verification command that can actually run.
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 SCRIPTS = Path(__file__).resolve().parent.parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -411,10 +413,9 @@ class _OneSkillACIClient:
 
 
 class TestPreloadPlumbing:
-    """No preload arm is added here (that is the measurement's job) — only
-    the plumbing it needs: the runner's own service builder can turn the
-    kernel's run-start preload on, and it stays OFF by default so K/N/S are
-    unchanged."""
+    """The plumbing the preload arm needs: the runner's own service builder
+    can turn the kernel's run-start preload on, and it stays OFF by default
+    so K/N/S are unchanged. (The P arm itself is pinned in TestPreloadArm.)"""
 
     def test_kernel_service_defaults_preload_off(self, tmp_path: Path) -> None:
         service = run_hbench._kernel_service(
@@ -448,3 +449,117 @@ class TestPreloadPlumbing:
         # Preloaded skills are loaded skills, but NOT model requests.
         assert runtime.requests == 0
         assert runtime.preloaded == ["cap.fx@1"] and runtime.loaded == ["cap.fx@1"]
+
+
+class TestPreloadArm:
+    """Arm P = arm S + the kernel's run-start preload, NOTHING else different
+    (§42): the dispatch pin — P reaches run_skills_arm with
+    preload_capabilities=True while S does not — and the end-to-end pin —
+    the FIRST ModelRequest of P already carries the preloaded skill text
+    while S's does not. Together they make P−S a clean preload-only A/B."""
+
+    def test_dispatch_p_preloads_and_s_does_not(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """`_run_one` routes arm P to run_skills_arm with the preload ON and
+        arm S with the defaults (preload OFF) — and NOTHING else differs
+        between the two dispatches."""
+        calls: list[dict[str, Any]] = []
+
+        def _record_call(*args: object, **kwargs: object) -> dict[str, Any]:
+            calls.append({"args": args, "kwargs": kwargs})
+            return {}
+
+        monkeypatch.setattr(run_hbench, "run_skills_arm", _record_call)
+        fixture = {"name": "fx", "prompt": "fix the bug"}
+        container = object()
+        for arm in ("S", "P"):
+            run_hbench._run_one(
+                fixture,
+                arm,
+                "http://gateway.invalid/v1",
+                "some-model",
+                "key",
+                tmp_path / "src",
+                tmp_path / "runs",
+                max_turns=3,
+                container=container,
+            )
+        (s_call, p_call) = calls
+        assert p_call["kwargs"]["arm"] == "P"
+        assert p_call["kwargs"]["preload_capabilities"] is True
+        # S passes NEITHER — the run_skills_arm defaults hold (arm="S",
+        # preload off), so S stays byte-identical to the pre-P runner.
+        assert "arm" not in s_call["kwargs"]
+        assert "preload_capabilities" not in s_call["kwargs"]
+        # ...and the two dispatches share everything else.
+        assert set(p_call["kwargs"]) == set(s_call["kwargs"]) | {"arm", "preload_capabilities"}
+        for key, value in s_call["kwargs"].items():
+            assert p_call["kwargs"][key] == value
+
+    def _skills_arm_run(
+        self, tmp_path: Path, *, arm: str, preload: bool
+    ) -> tuple[dict[str, Any], FakeModelGateway, _OneSkillACIClient]:
+        """One FULL run_skills_arm run over fakes — no network, no DB: the
+        real kernel path (workspace copy, at-limit verification, post-hoc
+        yardstick) with a fake gateway and a fake advertised registry
+        client, exactly the plane arm S/P wires."""
+        client = _OneSkillACIClient()
+        container = SimpleNamespace(agent_capability_clients=lambda: client)
+        gateway = FakeModelGateway([ContinueAction()])
+        sources = tmp_path / "src"
+        (sources / "fx").mkdir(parents=True, exist_ok=True)
+        (sources / "fx" / "a.py").write_text("x = 1\n", encoding="utf-8")
+        fixture = {"name": "fx", "prompt": "fix the bug"}
+        contract, spec = run_hbench._contract_spec(fixture)
+        record = run_hbench.run_skills_arm(
+            fixture,
+            contract,
+            spec,
+            gateway,  # type: ignore[arg-type]
+            sources,
+            tmp_path / "runs",
+            max_turns=1,
+            container=container,
+            sandbox=available_sandbox(),
+            arm=arm,
+            preload_capabilities=preload,
+        )
+        return record, gateway, client
+
+    def test_first_request_of_p_carries_the_preloaded_skill_s_does_not(
+        self, tmp_path: Path
+    ) -> None:
+        """The whole P−S difference, on the wire: both arms are offered the
+        identical capability plane (same tools, same protocol), but P's FIRST
+        ModelRequest already contains the rendered preloaded skill — S's
+        does not, because the model never asks."""
+        p_record, p_gateway, p_client = self._skills_arm_run(tmp_path, arm="P", preload=True)
+        s_record, s_gateway, s_client = self._skills_arm_run(tmp_path, arm="S", preload=False)
+
+        # The plane is offered IDENTICALLY in both arms.
+        assert [t.tool_id for t in p_gateway.requests[0].tools] == [
+            t.tool_id for t in s_gateway.requests[0].tools
+        ]
+        assert "request_capability" in [t.tool_id for t in s_gateway.requests[0].tools]
+
+        # P's first request = S's first request + EXACTLY ONE system message:
+        # the rendered preloaded skill (§42 — nothing else differs).
+        p_first = p_gateway.requests[0].messages
+        s_first = s_gateway.requests[0].messages
+        skill_at = [i for i, m in enumerate(p_first) if "Run pytest -x first." in m.content]
+        assert len(skill_at) == 1
+        i = skill_at[0]
+        assert p_first[i].role == "system"
+        assert "<<<BEGIN SKILL REFERENCE cap.fx@1" in p_first[i].content
+        assert p_first[:i] + p_first[i + 1 :] == s_first
+        assert all("Run pytest -x first." not in m.content for m in s_first)
+
+        # The counters: a preload is a loaded skill, NOT a model request.
+        assert p_record["arm"] == "P" and s_record["arm"] == "S"
+        assert p_record["skills_preloaded"] == ["cap.fx@1"]
+        assert p_record["skills_loaded"] == ["cap.fx@1"]
+        assert p_record["capability_requests"] == 0
+        assert s_record["skills_preloaded"] == []
+        assert s_record["skills_loaded"] == []
+        assert s_record["capability_requests"] == 0
+        assert p_client.searches == 1  # the preload routed once, at run start
+        assert s_client.searches == 0  # offered, never used

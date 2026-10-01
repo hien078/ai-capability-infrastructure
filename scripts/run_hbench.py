@@ -23,14 +23,22 @@ outcomes?", not "does the model?"):
       request_capability (tool + protocol text). NOTHING else differs from
       K (same fixtures/model/tools/sandbox/max_turns/verification/turn-budget
       note); S−K isolates what registry skills add to the kernel.
+  P — preload arm: arm S + the kernel's run-start skill PRELOAD
+      (``preload_capabilities=True``) — the §14 router runs on the task
+      objective BEFORE turn 1 and the selected skills are in context from
+      the FIRST model request on. S measured that the model never asks
+      (ZERO capability requests in 24 runs), so P is the arm that actually
+      carries skills; NOTHING else differs from S (same registry plane,
+      fixtures, model, tools, sandbox, max_turns, verification,
+      turn-budget note) — P−S isolates preload-vs-offered.
 
 The delta K−N is what the kernel adds. The headline metric is FALSE
 SUCCESS (§44): N reports "done" the verifier refutes; K can only report
 `succeeded` when the verification command actually passed. K additionally
 reports its verification rounds / fails and repair turns (from the event
-bus), so the mechanism's cost is visible next to its gain. S reports its
-capability requests + loaded skill ids + token usage, so the skill plane's
-cost is visible next to its outcome.
+bus), so the mechanism's cost is visible next to its gain. S/P report their
+capability requests + loaded skill ids + preloaded skill ids + token usage,
+so the skill plane's cost is visible next to its outcome.
 
 Each case runs `--repeat` times (default 3), in parallel; the aggregate
 carries mean ± std. §34 caveat applies to everything here: small n, one
@@ -47,7 +55,7 @@ fixture through the false-success metric.
 Usage:
     ACI_AGENT_MODEL_API_KEY=... .venv/bin/python scripts/run_hbench.py \
         [--base-url http://localhost:20128/v1] [--model OneNexus/glm-5.3] \
-        [--cases multi-config-precedence,...] [--arms K,N,S] \
+        [--cases multi-config-precedence,...] [--arms K,N,S,P] \
         [--repeat 3] [--parallel 4] [--max-turns 12]
 
 Writes a JSON report to data/hbench/ (gitignored) and prints the table.
@@ -460,9 +468,9 @@ def run_kernel_arm(
         "tool_calls": result.usage.tool_calls,
         "wall_seconds": round(wall, 1),
         # §44 cost next to outcome: what the run consumed (tokens) and —
-        # arm S only, overwritten by run_skills_arm — what the capability
-        # plane added (requests + loaded skill ids). K's null plane is the
-        # honest zero.
+        # arms S/P only, overwritten by run_skills_arm — what the capability
+        # plane added (requests + loaded/preloaded skill ids). K's null plane
+        # is the honest zero.
         "tokens_in": result.usage.model_input_tokens,
         "tokens_out": result.usage.model_output_tokens,
         "capability_requests": 0,
@@ -494,6 +502,7 @@ def run_skills_arm(
     container: Any,
     sandbox: ProcessSandbox | None = None,
     trace_dir: Path | None = None,
+    arm: str = "S",
     preload_capabilities: bool = False,
 ) -> dict[str, Any]:
     """Arm S = arm K + the REAL registry capability plane, and NOTHING else
@@ -505,7 +514,9 @@ def run_skills_arm(
     text). The counters record what the plane actually did.
     ``preload_capabilities`` (default OFF — arm S unchanged) adds the
     kernel's run-start preload: preloaded skills count in ``skills_loaded``
-    but NOT in ``capability_requests`` (those stay model-initiated)."""
+    and ``skills_preloaded`` but NOT in ``capability_requests`` (those stay
+    model-initiated). Arm P (``arm="P"``) is this function with the preload
+    ON — the ONLY difference from S."""
     runtime = _skills_capability_runtime(container.agent_capability_clients)
     record = run_kernel_arm(
         fixture,
@@ -517,12 +528,13 @@ def run_skills_arm(
         max_turns=max_turns,
         trace_dir=trace_dir,
         sandbox=sandbox,
-        arm="S",
+        arm=arm,
         capability_factory=_Factory(runtime),
         preload_capabilities=preload_capabilities,
     )
     record["capability_requests"] = runtime.requests
     record["skills_loaded"] = list(runtime.loaded)
+    record["skills_preloaded"] = list(runtime.preloaded)
     return record
 
 
@@ -775,6 +787,22 @@ def _run_one(
             sandbox=sandbox,
             trace_dir=trace_dir,
         )
+    elif arm == "P":
+        # Arm P = arm S with the run-start preload ON — the ONLY difference.
+        record = run_skills_arm(
+            fixture,
+            contract,
+            spec,
+            gateway,
+            sources,
+            runs,
+            max_turns=max_turns,
+            container=container,
+            sandbox=sandbox,
+            trace_dir=trace_dir,
+            arm="P",
+            preload_capabilities=True,
+        )
     else:
         record = run_naive_arm(
             fixture, contract, spec, gateway, sources, runs, max_turns=max_turns, sandbox=sandbox
@@ -792,7 +820,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--cases", default="", help="comma-separated fixture names (default: all 8)"
     )
-    parser.add_argument("--arms", default="K,N", help="comma subset of K,N,S")
+    parser.add_argument("--arms", default="K,N", help="comma subset of K,N,S,P")
     parser.add_argument("--repeat", type=int, default=3, help="runs per case per arm (default 3)")
     parser.add_argument("--parallel", type=int, default=4, help="concurrent runs (default 4)")
     parser.add_argument("--max-turns", type=int, default=12)
@@ -828,9 +856,9 @@ def main(argv: list[str] | None = None) -> int:
         print("no API key — set ACI_AGENT_MODEL_API_KEY or --api-key", file=sys.stderr)
         return 2
     arms = [a.strip().upper() for a in args.arms.split(",") if a.strip()]
-    unknown_arms = [a for a in arms if a not in ("K", "N", "S")]
+    unknown_arms = [a for a in arms if a not in ("K", "N", "S", "P")]
     if unknown_arms:
-        print(f"unknown arms {unknown_arms!r} — pick from K,N,S", file=sys.stderr)
+        print(f"unknown arms {unknown_arms!r} — pick from K,N,S,P", file=sys.stderr)
         return 2
     ablations = [a.strip() for a in args.ablate.split(",") if a.strip()]
     unknown = [a for a in ablations if a not in ABLATIONS]
@@ -840,13 +868,14 @@ def main(argv: list[str] | None = None) -> int:
     if ablations:
         apply_ablations(ablations)
         print(f"ABLATIONS ACTIVE: {ablations} (process-wide)", flush=True)
-    # Arm S's registry plane: ONE Container per process (the REST deployment
-    # shape) — built only when S is requested, so K/N runs stay DB-free.
+    # Arm S/P registry plane: ONE Container per process (the REST deployment
+    # shape) — built only when a skills arm is requested, so K/N runs stay
+    # DB-free.
     container = None
-    if "S" in arms:
+    if "S" in arms or "P" in arms:
         container = build_capability_container()
         print(
-            "arm S: registry capability plane wired (operational DB aci_bench, "
+            "arm S/P: registry capability plane wired (operational DB aci_bench, "
             "fastembed, one run-scoped client per run)",
             flush=True,
         )
@@ -954,6 +983,7 @@ def main(argv: list[str] | None = None) -> int:
         tokens_in = [float(r.get("tokens_in", 0)) for r in rows]
         tokens_out = [float(r.get("tokens_out", 0)) for r in rows]
         skills_loaded = [len(r.get("skills_loaded", ())) for r in rows]
+        skills_preloaded = [len(r.get("skills_preloaded", ())) for r in rows]
         return {
             "n": len(rows),
             "acceptance": sum(accepted) / len(accepted) if accepted else 0.0,
@@ -965,11 +995,12 @@ def main(argv: list[str] | None = None) -> int:
             "wall_stdev": statistics.stdev([r["wall_seconds"] for r in rows])
             if len(rows) > 1
             else 0.0,
-            # §44 cost next to outcome, for EVERY arm (S's plane is the
+            # §44 cost next to outcome, for EVERY arm (S/P's plane is the
             # interesting one; K/N carry the honest zeros).
             "tokens_in_mean": statistics.mean(tokens_in) if rows else 0.0,
             "tokens_out_mean": statistics.mean(tokens_out) if rows else 0.0,
             "skills_loaded_mean": statistics.mean(skills_loaded) if rows else 0.0,
+            "skills_preloaded_mean": statistics.mean(skills_preloaded) if rows else 0.0,
             "capability_requests_total": sum(int(r.get("capability_requests", 0)) for r in rows),
             "verification_rounds_mean": statistics.mean(r["verification_rounds"] for r in rows)
             if rows
@@ -1002,6 +1033,8 @@ def main(argv: list[str] | None = None) -> int:
             "process ceiling. S differs from K ONLY by the capability handler "
             "(the real registry plane: request_capability offered + its "
             "protocol text), so S-K isolates the registry-skill contribution; "
+            "P = S + the run-start preload (skills routed on the objective "
+            "and loaded BEFORE turn 1), so P-S isolates preload-vs-offered; "
             "N shares K's prompt base minus the capability protocol. This "
             "round carries the turn-budget note and the bwrap sandbox — NOT "
             "comparable to rounds <= 3."
@@ -1029,6 +1062,7 @@ def main(argv: list[str] | None = None) -> int:
             f"tokens_in {agg['tokens_in_mean']:.0f} "
             f"tokens_out {agg['tokens_out_mean']:.0f} "
             f"skills_loaded {agg['skills_loaded_mean']:.2f} "
+            f"skills_preloaded {agg['skills_preloaded_mean']:.2f} "
             f"(capability requests {agg['capability_requests_total']}) "
             f"verify_rounds {agg['verification_rounds_mean']:.1f} "
             f"(fails {agg['verification_fails_total']}, repairs {agg['repairs_total']}, "
