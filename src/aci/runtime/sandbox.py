@@ -347,9 +347,225 @@ def sandbox_refusal(reason: str) -> str:
     """The caller-visible refusal text (fail closed)."""
     return (
         f"process execution refused: the workspace sandbox is unavailable ({reason}); "
-        "the server operator must install bubblewrap and allow unprivileged user "
-        "namespaces, or explicitly opt out with ACI_AGENT_SANDBOX=none"
+        "the server operator must install the OS sandbox (bubblewrap on Linux, "
+        "Seatbelt/sandbox-exec on macOS) or explicitly opt out with ACI_AGENT_SANDBOX=none"
     )
+
+
+def _sbpl_quote(path: str) -> str:
+    """A double-quoted SBPL string literal. Seatbelt has no escape syntax, so
+    a `"` in a path cannot be represented — such paths are refused upstream."""
+    return '"' + path.replace('"', "") + '"'
+
+
+@dataclass
+class SeatbeltSandbox:
+    """macOS Seatbelt (sandbox-exec) profile — the bwrap counterpart for hosts
+    without Linux user namespaces. Same contract, same fail-closed rule.
+
+    What the profile grants (everything else is denied — `(deny default)`):
+
+    * READ access to the whole filesystem (Seatbelt cannot make the system
+      read-only the way `--ro-bind /usr` does; instead NOTHING outside the
+      workspace is writable, which is the property that matters);
+    * file writes ONLY under the run workspace (subpath allowlist) and the
+      fresh per-command TMPDIR (Seatbelt resolves /tmp to /private/tmp, so
+      the literal must be the resolved real path);
+    * NO network — `(deny network*)` blocks sockets for the whole process
+      tree (verified: curl inside the sandbox cannot connect);
+    * process execution only for the command's own binaries — the model's
+      command cannot spawn arbitrary host tools outside the allowlisted
+      interpreter prefixes and /usr/bin:/bin:/usr/sbin:/sbin;
+    * a CLEARED environment (env -i + the minimal allowlist, same rules as
+      bwrap: no server secrets, no host paths, HOME at the workspace).
+
+    Resource limits: Seatbelt has no prlimit(1); the command runs under
+    `/bin/sh -c 'ulimit ...; exec ...'` so setrlimit applies to the final
+    process (CPU, FSIZE, NPROC, NOFILE — RLIMIT_AS cannot be set on macOS;
+    memory is bounded by the workspace timeout, not an AS cap).
+
+    No PID/mount namespace exists on macOS: the process sees host paths
+    (read-only in effect) and host PIDs. That is the accepted delta vs
+    bwrap; the write-boundary and network boundary are what fail closed.
+    """
+
+    limits: ResourceLimits = field(default_factory=ResourceLimits)
+    sandbox_exec_path: str | None = None
+    #: Read-only "binds" are meaningless (everything is readable); what
+    #  matters is which prefixes may EXECUTE. Kept for settings symmetry.
+    ro_prefixes: Sequence[str] | None = None
+    extra_ro_binds: Sequence[str] = ()
+    name: str = "seatbelt"
+
+    def __post_init__(self) -> None:
+        self._sandbox_exec = (
+            self.sandbox_exec_path or shutil.which("sandbox-exec") or "/usr/bin/sandbox-exec"
+        )
+        prefixes = list(self.ro_prefixes) if self.ro_prefixes is not None else None
+        self._prefixes = prefixes if prefixes is not None else interpreter_prefixes()
+        self._local_reason: str | None = None
+        self._probed = False
+
+    # -- profile ------------------------------------------------------------
+
+    def _exec_prefixes(self) -> list[str]:
+        """Interpreter prefixes allowed to execute (normpath'd, existing)."""
+        out: list[str] = []
+        for raw in [*self._prefixes, *self.extra_ro_binds]:
+            if not raw or not os.path.isabs(raw) or not os.path.isdir(raw):
+                continue
+            path = os.path.normpath(raw)
+            if _system_covered(path):
+                continue  # already inside /usr or the standard links
+            out.append(path)
+        return list(dict.fromkeys(out))
+
+    def _write_paths(self, workspace: Path) -> list[str]:
+        """The ONLY writable subpaths: the workspace (real path) + a fresh
+        per-command TMPDIR under it. A workspace path containing `"` cannot
+        be expressed in SBPL — refused at prepare, never silently wider."""
+        real = os.path.realpath(workspace)
+        return [real, str(Path(real) / "tmp")]
+
+    def profile(self, workspace: Path) -> str:
+        """The SBPL profile for one command in `workspace`. Pure. The exact
+        operation set was verified on macOS 26 (sandbox-exec rejects unknown
+        filter names — e.g. `file-read-metadata*`/`process-signal` are NOT
+        valid here; `mach-lookup` takes no wildcard)."""
+        writes = " ".join(
+            f"(allow file-write* (subpath {_sbpl_quote(p)}))" for p in self._write_paths(workspace)
+        )
+        return (
+            "(version 1)\n"
+            "(deny default)\n"
+            # Read the filesystem (read-only in effect: writes are denied
+            # below unless under the workspace).
+            "(allow file-read*)\n"
+            # The command's own process tree: exec + fork (signals and wait
+            # are covered by same-process semantics; no explicit filter).
+            "(allow process-exec)\n"
+            "(allow process-fork)\n"
+            # No network sockets for any process in the sandbox.
+            "(deny network*)\n"
+            # Mach lookups the runtime needs (bootstrap, dyld) — plain
+            # `mach-lookup` allows any service name; the wildcard form
+            # `mach-lookup*` is a syntax error in this SBPL version.
+            "(allow mach-lookup)\n"
+            # Character devices every tool expects (logging to /dev/null,
+            # seeding from /dev/urandom): writable, but they are devices —
+            # no filesystem path is exposed by allowing them.
+            '(allow file-write* (literal "/dev/null"))\n'
+            '(allow file-write* (literal "/dev/urandom"))\n'
+            '(allow file-write* (literal "/dev/random"))\n'
+            '(allow file-write* (literal "/dev/zero"))\n'
+            f"{writes}\n"
+        )
+
+    def _ulimit_sh(self, command: Sequence[str]) -> list[str]:
+        """`sh -c` wrapper applying the rlimits then exec'ing the command.
+        RLIMIT_AS (`ulimit -v`) cannot be set on macOS (jetsam owns memory
+        policy; sh refuses with EINVAL) — the address-space limit is
+        enforced by the workspace timeout + file-size/nproc/nofile instead."""
+        lim = self.limits
+        script = (
+            f"ulimit -t {lim.cpu_seconds} "
+            f"-f {lim.file_size_bytes // 1024} "
+            f"-u {lim.max_processes} "
+            f"-n {lim.open_files}; "
+        )
+        quoted = " ".join("'" + c.replace("'", "'\\''") + "'" for c in command)
+        return ["/bin/sh", "-c", script + "exec " + quoted]
+
+    def sandbox_env(self, workspace: Path | None = None) -> dict[str, str]:  # noqa: ARG002
+        """The minimal env (same allowlist as bwrap) with HOME at the
+        workspace and PATH reduced to system dirs + the exec prefixes."""
+        env = minimal_process_env(WORKSPACE_MOUNT)
+        visible = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        for p in self._exec_prefixes():
+            visible += [str(Path(p) / "bin"), str(Path(p) / "sbin")]
+        env["PATH"] = os.pathsep.join(dict.fromkeys(e for e in visible if os.path.isdir(e)))
+        return env
+
+    def build_argv(self, command: Sequence[str], workspace: Path) -> list[str]:
+        """The full sandbox-exec argv. Pure (no process is started). The
+        profile file lives under the workspace (the one writable place) at
+        a fixed dot-name; `prepare` writes it right before Popen."""
+        env = self.sandbox_env(workspace)
+        # env -i: the profile inherits NOTHING from the server process.
+        return [
+            "/usr/bin/env",
+            "-i",
+            *[f"{k}={v}" for k, v in sorted(env.items())],
+            self._sandbox_exec,
+            "-f",
+            str(Path(os.path.realpath(workspace)) / ".aci-sandbox-profile.sb"),
+            *self._ulimit_sh(command),
+        ]
+
+    def _write_profile(self, workspace: Path) -> Path:
+        """Write the SBPL profile into the workspace; returns its path."""
+        target = Path(os.path.realpath(workspace)) / ".aci-sandbox-profile.sb"
+        target.write_text(self.profile(workspace), encoding="utf-8")
+        return target
+
+    # -- usability ----------------------------------------------------------
+
+    def _probe(self) -> str | None:
+        if not os.access(self._sandbox_exec, os.X_OK):
+            return "sandbox-exec (Seatbelt) is not installed"
+        if sys.platform != "darwin":
+            return "Seatbelt is macOS-only (this host is not Darwin)"
+        if '"' in Path.home().name or '"' in os.getcwd():
+            return "a protected path contains a quote (cannot be expressed in SBPL)"
+        with tempfile.TemporaryDirectory(prefix="aci-sandbox-probe-") as tmp:
+            ws = Path(tmp)
+            try:
+                profile = self._write_profile(ws)
+                argv = self.build_argv([sys.executable, "-c", "pass"], ws)
+                proc = subprocess.run(
+                    argv,
+                    cwd=tmp,
+                    env=self.sandbox_env(ws),
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    timeout=_PROBE_TIMEOUT_SECONDS,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return f"seatbelt probe could not run ({type(exc).__name__})"
+            finally:
+                profile.unlink(missing_ok=True)
+        if proc.returncode != 0:
+            detail = proc.stderr.decode("utf-8", errors="replace").strip().splitlines()
+            hint = detail[-1][:200] if detail else f"exit {proc.returncode}"
+            return f"seatbelt probe failed ({hint})"
+        return None
+
+    def unavailable_reason(self) -> str | None:
+        """Probe once per profile per process (cached; thread-safe)."""
+        if self._probed:
+            return self._local_reason
+        key = (self._sandbox_exec, *self._exec_prefixes())
+        with _PROBE_LOCK:
+            if key not in _PROBE_CACHE:
+                _PROBE_CACHE[key] = self._probe()
+            self._local_reason = _PROBE_CACHE[key]
+            self._probed = True
+        return self._local_reason
+
+    def prepare(self, command: Sequence[str], workspace: Path) -> SandboxedCommand:
+        reason = self.unavailable_reason()
+        if reason is None and '"' in os.path.realpath(workspace):
+            reason = "workspace path contains a quote (cannot be expressed in SBPL)"
+        if reason is not None:
+            raise DomainError(ErrorCode.PERMISSION_DENIED, sandbox_refusal(reason))
+        self._write_profile(workspace)
+        return SandboxedCommand(
+            argv=self.build_argv(command, workspace),
+            env=self.sandbox_env(workspace),
+            cwd=workspace,
+            workspace_alias=WORKSPACE_MOUNT,
+        )
 
 
 def build_process_sandbox(
@@ -361,9 +577,30 @@ def build_process_sandbox(
     """Settings → sandbox. Unknown kinds raise (no silent fallback)."""
     if kind == "bwrap":
         return BwrapSandbox(limits=limits or ResourceLimits(), extra_ro_binds=extra_ro_binds)
+    if kind == "seatbelt":
+        return SeatbeltSandbox(limits=limits or ResourceLimits(), extra_ro_binds=extra_ro_binds)
     if kind == "none":
         return NoSandbox()
-    raise ValueError(f"unknown agent sandbox {kind!r} (expected 'bwrap' or 'none')")
+    raise ValueError(f"unknown agent sandbox {kind!r} (expected 'bwrap', 'seatbelt' or 'none')")
+
+
+#: The sandbox kind that isolates commands on THIS platform: bubblewrap on
+#: Linux, Seatbelt on macOS. The settings default routes through this so a
+#: deployment on either platform gets the OS sandbox, never a silent none.
+PLATFORM_SANDBOX_KIND: str = "seatbelt" if sys.platform == "darwin" else "bwrap"
+
+
+def build_platform_default_sandbox(
+    *,
+    limits: ResourceLimits | None = None,
+    extra_ro_binds: Sequence[str] = (),
+) -> ProcessSandbox:
+    """The safe default for code that cannot take a settings-derived kind
+    (AgentRunService's constructor default, H-bench): the OS sandbox for
+    this platform, fail closed when unusable."""
+    return build_process_sandbox(
+        PLATFORM_SANDBOX_KIND, limits=limits, extra_ro_binds=extra_ro_binds
+    )
 
 
 __all__ = [
@@ -373,6 +610,9 @@ __all__ = [
     "ProcessSandbox",
     "ResourceLimits",
     "SandboxedCommand",
+    "SeatbeltSandbox",
+    "PLATFORM_SANDBOX_KIND",
+    "build_platform_default_sandbox",
     "build_process_sandbox",
     "interpreter_prefixes",
     "minimal_process_env",

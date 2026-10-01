@@ -45,9 +45,14 @@ REASON = "simulated: bubblewrap is not installed"
 
 @pytest.fixture
 def unusable_bwrap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every BwrapSandbox in this test probes as unusable (fresh cache)."""
+    """Every BwrapSandbox (and, on macOS, every SeatbeltSandbox) in this
+    test probes as unusable (fresh cache)."""
     monkeypatch.setattr(sandbox_mod, "_PROBE_CACHE", {})
     monkeypatch.setattr(BwrapSandbox, "_probe", lambda self: REASON)
+    if sys.platform == "darwin":
+        from aci.runtime.sandbox import SeatbeltSandbox
+
+        monkeypatch.setattr(SeatbeltSandbox, "_probe", lambda self: REASON)
 
 
 def _sandbox(tmp_path: Path, **kwargs: Any) -> BwrapSandbox:
@@ -213,12 +218,14 @@ class TestFailClosed:
         assert result.detail.startswith("refused: process execution refused")
         assert not (tmp_path / "ws" / "ran.txt").exists()
 
-    def test_service_default_is_bwrap_and_refuses_a_verified_run_up_front(
+    @pytest.mark.usefixtures("unusable_bwrap")
+    def test_service_default_is_the_os_sandbox_and_refuses_a_verified_run_up_front(
         self, tmp_path: Path
     ) -> None:
-        """No `process_sandbox` kwarg = BwrapSandbox (safe default): a run
-        whose verifier would execute is a caller-visible PERMISSION_DENIED
-        before any workspace copy exists."""
+        """No `process_sandbox` kwarg = the PLATFORM sandbox (bwrap on Linux,
+        Seatbelt on macOS — both simulated unusable here): a run whose
+        verifier would execute is a caller-visible PERMISSION_DENIED before
+        any workspace copy exists."""
         service = _service(tmp_path, [FinalCandidate(summary="done")], sandbox=None)
         with pytest.raises(DomainError) as exc:
             service.run(
@@ -289,7 +296,7 @@ class TestWiring:
         with pytest.raises(ValueError):
             build_process_sandbox("docker")
 
-    def test_default_setting_is_bwrap_with_limits_from_settings(self) -> None:
+    def test_default_setting_is_the_platform_sandbox_with_limits_from_settings(self) -> None:
         settings = Settings(
             agent_sandbox_cpu_seconds=11,
             agent_sandbox_memory_mb=512,
@@ -297,9 +304,14 @@ class TestWiring:
             agent_sandbox_max_processes=40,
             agent_sandbox_open_files=128,
         )
-        assert settings.agent_sandbox == "bwrap"
+        assert settings.agent_sandbox == sandbox_mod.PLATFORM_SANDBOX_KIND
         sb = build_sandbox(settings)
-        assert isinstance(sb, BwrapSandbox)
+        if sys.platform == "darwin":
+            from aci.runtime.sandbox import SeatbeltSandbox
+
+            assert isinstance(sb, SeatbeltSandbox)
+        else:
+            assert isinstance(sb, BwrapSandbox)
         assert sb.limits == ResourceLimits(
             cpu_seconds=11,
             address_space_bytes=512 * 1024**2,
@@ -309,10 +321,12 @@ class TestWiring:
         )
 
     @pytest.mark.usefixtures("unusable_bwrap")
-    def test_unusable_bwrap_logs_a_startup_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_unusable_sandbox_logs_a_startup_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         with caplog.at_level(logging.WARNING, logger="aci.agent_runs"):
             sb = build_sandbox(Settings(agent_process_prefixes=[PY]))
-        assert isinstance(sb, BwrapSandbox)
+        assert sb.name == sandbox_mod.PLATFORM_SANDBOX_KIND
         assert any("UNUSABLE" in r.getMessage() for r in caplog.records)
         assert any(REASON in r.getMessage() for r in caplog.records)
 

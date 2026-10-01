@@ -94,8 +94,9 @@ def build_sandbox(settings: Settings) -> ProcessSandbox:
     if reason is not None:
         logger.warning(
             "agent-run process sandbox UNUSABLE (%s) — every run_command and "
-            "verification_command will be REFUSED until bubblewrap works or "
-            "ACI_AGENT_SANDBOX=none is set explicitly",
+            "verification_command will be REFUSED until the OS sandbox works "
+            "(bubblewrap on Linux, Seatbelt on macOS) or ACI_AGENT_SANDBOX=none "
+            "is set explicitly",
             reason,
         )
     return sandbox

@@ -220,6 +220,10 @@ _ALLOWED_ENV = {
     "PYTHONUNBUFFERED",
     "TZ",
 }
+if sys.platform == "darwin":
+    # macOS CoreFoundation injects this into every child process; it is not
+    # something the server (or the model) controls.
+    _ALLOWED_ENV.add("__CF_USER_TEXT_ENCODING")
 
 
 def _child_env(ws: LocalWorkspace) -> dict[str, str]:

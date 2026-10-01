@@ -1,5 +1,6 @@
 """Runtime config. Env-loaded; no secrets in repo."""
 
+import sys
 from typing import Literal
 
 from pydantic import Field
@@ -82,13 +83,18 @@ class Settings(BaseSettings):
     api_token: str = ""
     #: OS sandbox for every agent-run process — the model's run_command AND
     #: the client's verification_command (harness.md §16.5, user decision
-    #: 2026-10-01). "bwrap" (default): bubblewrap — read-only system +
+    #: 2026-10-01). "bwrap" (Linux default): bubblewrap — read-only system +
     #: interpreter, the run workspace read-write at /workspace, no network,
-    #: no $HOME/repo/data, cleared env, rlimits below. FAIL CLOSED: if bwrap
-    #: is unusable on this host every command is REFUSED (PERMISSION_DENIED,
-    #: startup warning) — never a silent unsandboxed run. "none": explicit
-    #: opt-out, runs as the bare server user (loud startup warning).
-    agent_sandbox: Literal["bwrap", "none"] = "bwrap"
+    #: no $HOME/repo/data, cleared env, rlimits below. "seatbelt" (macOS
+    #: default): the same contract via sandbox-exec/Seatbelt — writes only
+    #: under the workspace, no network, cleared env, ulimit rlimits. FAIL
+    #: CLOSED: if the OS sandbox is unusable on this host every command is
+    #: REFUSED (PERMISSION_DENIED, startup warning) — never a silent
+    #: unsandboxed run. "none": explicit opt-out, runs as the bare server
+    #: user (loud startup warning).
+    agent_sandbox: Literal["bwrap", "seatbelt", "none"] = (
+        "seatbelt" if sys.platform == "darwin" else "bwrap"
+    )
     #: Per-process rlimits inside the bwrap sandbox.
     agent_sandbox_cpu_seconds: int = Field(default=600, gt=0)
     agent_sandbox_memory_mb: int = Field(default=4096, gt=0)

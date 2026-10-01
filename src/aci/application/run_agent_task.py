@@ -46,7 +46,11 @@ from aci.runtime.run_controller import (
     cancel_paused,
     check_resume_input,
 )
-from aci.runtime.sandbox import BwrapSandbox, ProcessSandbox, sandbox_refusal
+from aci.runtime.sandbox import (
+    ProcessSandbox,
+    build_platform_default_sandbox,
+    sandbox_refusal,
+)
 from aci.runtime.verification import VerifierCallable
 from aci.runtime.workspace import command_within_prefixes
 
@@ -221,12 +225,13 @@ class AgentRunService:
         self._event_bus = event_bus if event_bus is not None else EventBus()
         self._run_store = run_store
         # §16.5: every workspace process (run_command + verification) runs in
-        # this sandbox. Omitted = the SAFE default: bwrap, probed lazily on the
+        # this sandbox. Omitted = the SAFE default: the OS sandbox for this
+        # platform (bwrap on Linux, Seatbelt on macOS), probed lazily on the
         # first command (runs that never execute never probe), and FAIL CLOSED
-        # (commands refused) where bwrap is unusable. Opt-out is explicit only:
+        # (commands refused) where it is unusable. Opt-out is explicit only:
         # pass NoSandbox().
         self._process_sandbox: ProcessSandbox = (
-            process_sandbox if process_sandbox is not None else BwrapSandbox()
+            process_sandbox if process_sandbox is not None else build_platform_default_sandbox()
         )
         self._cancel_tokens: dict[str, CancelToken] = {}
         self._results: dict[str, RunResult] = {}
