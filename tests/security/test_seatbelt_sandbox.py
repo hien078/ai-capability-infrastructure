@@ -212,6 +212,24 @@ def test_commands_can_fork_on_a_busy_host(ws: LocalWorkspace) -> None:
     assert "forked" in result.stdout
 
 
+def test_parent_repository_and_config_are_not_the_workspaces(tmp_path: Path) -> None:
+    """No mount namespace on macOS: a workspace nested in a host repo must not
+    discover that repo (git) — GIT_CEILING_DIRECTORIES stops at the workspace."""
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:
+        pytest.skip("git not installed")
+    host_repo = tmp_path / "host-repo"
+    host_repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(host_repo)], check=True)
+    sandbox = seatbelt_or_skip()
+    ws = LocalWorkspace(host_repo / "runs" / "run_a", sandbox=sandbox)
+    result = ws.execute(["git", "rev-parse", "--show-toplevel"], timeout_ms=30_000)
+    assert result.exit_code != 0
+    assert str(host_repo) not in result.stdout
+
+
 # -- resource limits ----------------------------------------------------------------
 
 

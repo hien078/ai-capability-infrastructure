@@ -593,6 +593,9 @@ class SeatbeltSandbox:
         env["PATH"] = os.pathsep.join(dict.fromkeys(e for e in visible if os.path.isdir(e)))
         if real is not None:
             env["TMPDIR"] = str(Path(real) / "tmp")
+            # No mount namespace: stop git from discovering a repository
+            # ABOVE the workspace (it would see the host's repo as its own).
+            env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(real)
         return env
 
     def build_argv(

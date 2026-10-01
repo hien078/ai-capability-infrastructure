@@ -145,10 +145,12 @@ class TestArgv:
         # tmp/ (the only writable places).
         assert env_pairs["HOME"] == os.path.realpath(ws)
         assert env_pairs["TMPDIR"] == os.path.join(os.path.realpath(ws), "tmp")
+        assert env_pairs["GIT_CEILING_DIRECTORIES"] == os.path.dirname(os.path.realpath(ws))
         assert set(env_pairs) <= {
             "PATH",
             "HOME",
             "TMPDIR",
+            "GIT_CEILING_DIRECTORIES",
             "LANG",
             "LC_ALL",
             "PYTHONDONTWRITEBYTECODE",

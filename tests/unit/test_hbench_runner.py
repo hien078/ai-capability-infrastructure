@@ -792,3 +792,18 @@ class TestPrivateSetAndArmR:
         assert k_record.get("skills_preloaded", []) == []
         assert k_record["skills_loaded"] == []
         assert k_record["capability_requests"] == 0
+
+
+def test_work_root_is_neutral_on_macos_and_overridable(monkeypatch, tmp_path):
+    """macOS Seatbelt has no mount namespace: workspaces under the repo would
+    see its pyproject.toml/.git as parent config — they must live outside."""
+    import run_hbench as rh
+
+    monkeypatch.delenv("ACI_HBENCH_WORK_ROOT", raising=False)
+    monkeypatch.setattr(rh.sys, "platform", "darwin")
+    root = rh.work_root()
+    assert not str(root.resolve()).startswith(str(rh.REPO_ROOT.resolve()))
+    monkeypatch.setattr(rh.sys, "platform", "linux")
+    assert rh.work_root() == rh.REPORT_ROOT
+    monkeypatch.setenv("ACI_HBENCH_WORK_ROOT", str(tmp_path))
+    assert rh.work_root() == tmp_path

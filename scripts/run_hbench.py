@@ -87,6 +87,7 @@ Writes a JSON report to data/hbench/ (gitignored) and prints the table.
 import argparse
 import hashlib
 import json
+import os
 import statistics
 import sys
 import time
@@ -148,6 +149,7 @@ from aci.runtime.run_controller import (  # noqa: E402
     turn_budget_note,
 )
 from aci.runtime.sandbox import (  # noqa: E402
+    PLATFORM_SANDBOX_KIND,
     ProcessSandbox,
     build_platform_default_sandbox,
     build_process_sandbox,
@@ -161,6 +163,25 @@ from aci.runtime.workspace_tools import (  # noqa: E402
 )
 
 REPORT_ROOT = REPO_ROOT / "data" / "hbench"
+
+
+def work_root() -> Path:
+    """Where run workspaces (sources/ + runs/) are materialized. bwrap mounts
+    each workspace at /workspace, so on Linux nothing above it is visible and
+    the report dir is fine. macOS Seatbelt has NO mount namespace: a
+    workspace under the repo sees the repo's pyproject.toml / .git as
+    PARENT config (pytest rootdir discovery, git discovery) — measured: N on
+    verified x flash fell to 1/8 because pytest crashed on the parent config.
+    So on macOS the workspaces live under a neutral root outside any repo
+    (ACI_HBENCH_WORK_ROOT overrides on any platform)."""
+    override = os.environ.get("ACI_HBENCH_WORK_ROOT")
+    if override:
+        return Path(override)
+    if sys.platform == "darwin":
+        return Path("/tmp/aci-hbench")  # nosec B108 — neutral, not a secret store
+    return REPORT_ROOT
+
+
 VERIFICATION = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
 #: Deployment process ceiling (INV-02) — IDENTICAL in both arms so the A/B
 #: measures harness mechanisms, not sandboxing. sys.executable covers the
@@ -1022,11 +1043,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--sandbox",
-        choices=["bwrap", "none"],
-        default="bwrap",
+        choices=["bwrap", "seatbelt", "none"],
+        default=PLATFORM_SANDBOX_KIND,
         help=(
-            "process sandbox for BOTH arms (§16.5; default bwrap — the run "
-            "refuses to start when bwrap is unusable; `none` = explicit opt-out)"
+            "process sandbox for BOTH arms (§16.5; default = this platform's OS "
+            "sandbox: bwrap on Linux, seatbelt on macOS — the run refuses to start "
+            "when it is unusable; `none` = explicit opt-out)"
         ),
     )
     parser.add_argument("--out", default="", help="report path (default data/hbench/<ts>.json)")
@@ -1082,7 +1104,7 @@ def main(argv: list[str] | None = None) -> int:
         fixtures = [f for f in fixtures if f["name"] in wanted]
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    root = REPORT_ROOT / stamp
+    root = work_root() / stamp
     sources = root / "sources"
     runs = root / "runs"
     sources.mkdir(parents=True, exist_ok=True)
