@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
 """ACI worker queue — resource-controlled launcher for delegated GLM-5.3 agent jobs.
 
-A small standard-library-only Linux queue for invoking Claude Code / OpenCode
+A small standard-library-only queue for invoking Claude Code / OpenCode
 (GLM-5.3) jobs from a JSON manifest with a dependency graph, persistent
 state/logs/session-ids, admission control against live host resources, and
-per-worker systemd user-service resource containment.
+per-worker resource containment. TWO backends behind one seam
+(select_backend/make_host_controls):
+
+- systemd (Linux, default there): each worker runs in its OWN transient
+  systemd user service with kernel-enforced cgroup limits.
+- darwin (macOS, default there): no systemd/cgroups exist — each worker
+  runs in its OWN process group/session (start_new_session) under
+  `nice -n 10` through the SAME /bin/sh exit-receipt wrapper; the
+  per-worker memory cap is enforced by POLLING the process-group RSS
+  (`ps -o rss= -g <pgid>`) and SIGINT -> grace -> SIGKILL of the whole
+  GROUP (macOS does not enforce RLIMIT_AS). Ownership before ANY signal:
+  the recorded pgid + leader pid + leader start time + command line must
+  all match (never signal by name). The honest guarantee differences are
+  listed in docs/operations/aci-worker-queue.md (macOS section).
 
 Design constraints (see docs/operations/aci-worker-queue.md and
 data/aci-improvement/BOOTSTRAP.md):
@@ -46,11 +59,11 @@ data/aci-improvement/BOOTSTRAP.md):
   interrupted/deferred jobs (claude --resume with the persisted session id).
 
 Usage:
-  python scripts/aci_worker_queue.py run MANIFEST.json [--dry-run]
-  python scripts/aci_worker_queue.py status [--state FILE]
+  python scripts/aci_worker_queue.py run MANIFEST.json [--dry-run] [--backend systemd|darwin]
+  python scripts/aci_worker_queue.py status [--state FILE] [--backend systemd|darwin]
   python scripts/aci_worker_queue.py resume JOB [--state FILE]
   python scripts/aci_worker_queue.py defer-all [--state FILE] [--reason TEXT]
-  python scripts/aci_worker_queue.py host-snapshot
+  python scripts/aci_worker_queue.py host-snapshot [--backend systemd|darwin]
 """
 
 from __future__ import annotations
@@ -60,6 +73,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -133,15 +147,41 @@ JOB_STATUSES = frozenset(
 # Only these statuses satisfy a dependency: exit 0 is NOT verification.
 DEP_SATISFIED_STATUSES = frozenset({"finished-needs-review", "verified"})
 
-CLAUDE_BIN = (
+CLAUDE_BIN = os.environ.get("ACIQ_CLAUDE_BIN") or (
     "/home/hien/.antigravity-ide/extensions/anthropic.claude-code-2.1.286-linux-x64"
     "/resources/native-binary/claude"
 )
-OPENCODE_BIN = "/home/hien/.opencode/bin/opencode"
+
+
+def _default_opencode_bin() -> str:
+    # Linux: the original deployment path. macOS: the official installer path
+    # (verified present on the Mac worker host). ACIQ_OPENCODE_BIN overrides.
+    if platform.system() == "Darwin":
+        return os.path.expanduser("~/.opencode/bin/opencode")
+    return "/home/hien/.opencode/bin/opencode"
+
+
+OPENCODE_BIN = os.environ.get("ACIQ_OPENCODE_BIN") or _default_opencode_bin()
 MODEL_ID = "OneNexus/glm-5.3"
 OPENCODE_MODEL_ID = "local-gateway/OneNexus/glm-5.3"
 #: RuntimeMaxSec = job timeout + this margin (SIGINT grace + finalization).
 RUNTIME_MAX_MARGIN_S = 120
+
+# --- darwin (macOS) backend policy ------------------------------------------------
+# Same per-worker resource POLICY as the systemd unit values, but enforced
+# differently (no cgroups on macOS — see DarwinHostControls for the honest list
+# of what is kernel-enforced vs supervisor-polled).
+
+#: `nice -n 10` prefix: the worker runs at a LOWER CPU priority than the
+#: supervisor (nice is an INCREMENT on the parent's nice, capped at 20).
+DARWIN_WORKER_NICE = 10
+#: Per-worker memory cap = the Linux MemoryMax policy (2 GiB). NOT kernel
+#: enforced (macOS ignores RLIMIT_AS): enforced by polling the process-group
+#: RSS every scheduler poll and SIGINT -> grace -> SIGKILL the group.
+DARWIN_MEM_CAP_BYTES = UNIT_MEMORY_MAX_BYTES
+#: Worker handle: the process-group id, `pgid-<pid>` (start_new_session makes
+#: the spawned child the group leader, so pgid == leader pid).
+DARWIN_HANDLE_RE = re.compile(r"^pgid-(\d+)$")
 
 # The wrapper runs INSIDE the unit cgroup (so the CLI and all its descendants
 # are contained) and leaves a durable exit receipt the supervisor reads after
@@ -215,6 +255,99 @@ class HostSnapshot:
 
 def host_snapshot() -> HostSnapshot:
     return HostSnapshot(mem_available_gib(), cpu_busy_pct(), load1())
+
+
+# --- darwin (macOS) host sampling (pure reads) -----------------------------------
+
+
+def _run_checked(cmd: list[str]) -> str:
+    """Run a read-only host command; ANY failure is a caller-visible QueueError
+    (fail closed — an unmeasurable host is never silently treated as healthy)."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise QueueError(f"{cmd[0]} failed: {exc}") from exc
+    if r.returncode != 0:
+        raise QueueError(f"{cmd[0]} failed: {r.stderr.strip() or f'exit {r.returncode}'}")
+    return r.stdout
+
+
+def parse_vm_stat(text: str) -> tuple[int, float]:
+    """(page_size, available_bytes) from `vm_stat` output.
+
+    available ≈ free + inactive + speculative pages — the honest "can we
+    admit more work" number, the Darwin analog of Linux MemAvailable
+    (purgeable pages are already counted inside free/inactive)."""
+    m = re.search(r"page size of (\d+) bytes", text)
+    if m is None:
+        raise QueueError("vm_stat output has no page size — cannot sample memory")
+    page_size = int(m.group(1))
+    pages = 0
+    for name in ("Pages free:", "Pages inactive:", "Pages speculative:"):
+        pm = re.search(re.escape(name) + r"\s+(\d+)\.", text)
+        if pm is None:
+            raise QueueError(f"vm_stat output missing {name!r} — cannot sample memory")
+        pages += int(pm.group(1))
+    return page_size, float(pages * page_size)
+
+
+def parse_loadavg_sysctl(text: str) -> float:
+    """load1 from `sysctl -n vm.loadavg` output ('{ 3.75 3.01 3.83 }')."""
+    m = re.search(r"(\d+(?:\.\d+)?)", text)
+    if m is None:
+        raise QueueError(f"vm.loadavg output unparsable: {text.strip()!r}")
+    return float(m.group(1))
+
+
+def parse_ps_cpu_pct(text: str, ncpu: int) -> float:
+    """CPU busy % from `ps -A -o %cpu=` output, normalized by core count.
+
+    ps %cpu is a per-process DECAYING AVERAGE, not an instantaneous sample
+    like /proc/stat deltas: a burst shows up smeared over seconds. It is
+    the honest approximation available without top(1)'s multi-second
+    sampling loop; documented as such in the operations doc."""
+    total = 0.0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            total += float(line)
+        except ValueError:
+            continue  # ps header noise / truncated line: never a sampling error
+    return max(0.0, min(100.0, total / max(1, ncpu)))
+
+
+def parse_ps_rss_sum_kib(text: str) -> int:
+    """Total resident set size (KiB) of a process group from
+    `ps -o rss= -g <pgid>` output (one rss value per group member)."""
+    total = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            total += int(line)
+        except ValueError:
+            continue
+    return total
+
+
+def darwin_mem_available_gib() -> float:
+    _page_size, available = parse_vm_stat(_run_checked(["vm_stat"]))
+    return available / (1024 * 1024 * 1024)
+
+
+def darwin_cpu_busy_pct() -> float:
+    return parse_ps_cpu_pct(_run_checked(["ps", "-A", "-o", "%cpu="]), os.cpu_count() or 1)
+
+
+def darwin_load1() -> float:
+    return parse_loadavg_sysctl(_run_checked(["sysctl", "-n", "vm.loadavg"]))
+
+
+def darwin_host_snapshot() -> HostSnapshot:
+    return HostSnapshot(darwin_mem_available_gib(), darwin_cpu_busy_pct(), darwin_load1())
 
 
 # --- admission / pressure ------------------------------------------------------
@@ -336,6 +469,14 @@ class JobState:
     ended_at: float | None = None
     error: str | None = None
     attempts: int = 0
+    # Darwin backend identity (ignored by the systemd backend): the worker runs
+    # as a process GROUP; these four fields are the ownership record — pgid +
+    # leader pid + leader start time + leader command line must ALL match
+    # before any signal. Additive to schema 2: old state files default None.
+    pgid: int | None = None
+    leader_pid: int | None = None
+    leader_start: str | None = None
+    leader_cmd: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
@@ -699,6 +840,321 @@ def parse_run_log_text(text: str, require_result: bool = False) -> tuple[str | N
     return session, is_error
 
 
+# --- darwin (macOS) backend --------------------------------------------------------
+
+
+def darwin_worker_env(job_env: dict[str, str]) -> dict[str, str]:
+    """A defined minimal worker environment (the Darwin analog of the systemd
+    user manager's environment): the session basics a CLI needs, then the
+    job's explicit vars on top (PWD included — the CLIs resolve their
+    project from $PWD, not getcwd())."""
+    base: dict[str, str] = {}
+    for key in ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "TZ"):
+        val = os.environ.get(key)
+        if val:
+            base[key] = val
+    return {**base, **job_env}
+
+
+class DarwinHostControls:
+    """macOS worker backend — the SAME scheduler contract as HostControls.
+
+    There is no systemd and no cgroup on macOS, so the containment
+    guarantees are rebuilt from process primitives, honestly:
+
+    - each worker runs in its OWN process group/session (start_new_session)
+      under `nice -n 10`, through the SAME /bin/sh exit-receipt wrapper;
+    - the per-worker memory cap is enforced by POLLING the process-group
+      RSS (`ps -o rss= -g <pgid>`) and SIGINT -> grace -> SIGKILL of the
+      whole GROUP — the kernel does not enforce RLIMIT_AS on macOS;
+    - ownership before ANY signal: the recorded pgid, leader pid, leader
+      start time AND command line must all match (never signal by name);
+    - a wall-clock timeout interrupts the group exactly like the Linux
+      timeout path (the scheduler owns the clock).
+
+    Honest differences vs the systemd backend (no kernel memory cap, no
+    cgroup accounting of escaped double-forked children, ...) are listed in
+    docs/operations/aci-worker-queue.md (macOS section).
+    """
+
+    def __init__(self) -> None:
+        # handle -> Popen of the DIRECT child (the sh wrapper). poll() both
+        # reaps the zombie and answers liveness. Adopted (post-restart)
+        # workers have no Popen here and are checked via ps.
+        self._popens: dict[str, Any] = {}
+        # handle -> the nice value `nice -n 10` must have produced (verified
+        # numerically after spawn, like the systemd unit properties).
+        self._expected_nice: dict[str, int] = {}
+
+    # -- overridable process primitives (tests stub these) ----------------------
+
+    def _ps(self, args: list[str]) -> str:
+        """ps(1) query. ps exits 1 with EMPTY output for a missing pid/group —
+        that is 'gone', not an error; callers parse the text."""
+        try:
+            r = subprocess.run(["ps", *args], capture_output=True, text=True, timeout=10)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise QueueError(f"ps {args} failed: {exc}") from exc
+        return r.stdout
+
+    def _spawn(
+        self, cmd: list[str], env: dict[str, str], cwd: str, log_path: Path
+    ) -> subprocess.Popen[bytes]:
+        """Start the worker: own session (pgid == pid), nice -n 10. The sh
+        wrapper's OWN stderr (e.g. an exec failure) is appended to the
+        per-attempt log — evidence, never lost."""
+        log_fh = open(log_path, "ab")
+        try:
+            return subprocess.Popen(
+                cmd,
+                env=env,
+                cwd=cwd,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=log_fh,
+            )
+        finally:
+            log_fh.close()
+
+    def _kill(self, pgid: int, sig: int) -> bool:
+        """Signal a whole process GROUP by its NUMERIC id (never by name).
+        A group that already exited is success (the interrupt goal is met).
+        A non-positive pgid is refused — kill(-0) would signal THIS process's
+        own group (only reachable via a corrupted state file)."""
+        if pgid <= 0:
+            log.error("refusing to signal non-positive process group %r", pgid)
+            return False
+        try:
+            os.kill(-pgid, sig)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        return True
+
+    def _getpriority(self, pid: int) -> int:
+        return os.getpriority(os.PRIO_PROCESS, pid)
+
+    @staticmethod
+    def _pgid_of(unit: str) -> int | None:
+        """The numeric process-group id from a worker handle — None for a
+        malformed handle or a non-positive pgid (kill(-0) would signal THIS
+        process's own group; only reachable via a corrupted state file)."""
+        m = DARWIN_HANDLE_RE.match(unit)
+        if m is None:
+            return None
+        pgid = int(m.group(1))
+        return pgid if pgid > 0 else None
+
+    # -- backend contract ---------------------------------------------------------
+
+    def available(self) -> bool:
+        """Fail closed unless every primitive the backend needs exists."""
+        if platform.system() != "Darwin":
+            log.warning("darwin backend selected on non-macOS (%s)", platform.system())
+            return False
+        missing = [t for t in ("ps", "sysctl", "vm_stat", "nice") if shutil.which(t) is None]
+        missing += [p for p in ("/bin/sh", "/usr/bin/nice") if not Path(p).exists()]
+        if missing:
+            log.warning("darwin backend tools missing: %s", ", ".join(missing))
+            return False
+        return True
+
+    def snapshot(self) -> HostSnapshot:
+        return darwin_host_snapshot()
+
+    def start_worker_unit(
+        self,
+        state: QueueState,
+        job: JobSpec,
+        argv: list[str],
+        env: dict[str, str],
+        log_path: Path,
+        receipt_path: Path,
+    ) -> str:
+        """Start the job in its OWN process group/session under nice -n 10,
+        through the same /bin/sh exit-receipt wrapper, and record the
+        ownership identity (pgid/leader pid/start time/command line) into
+        the PERSISTENT job state BEFORE anything can signal it."""
+        js = state.jobs.get(job.id)
+        if js is None:
+            raise QueueError(f"job {job.id} has no state — cannot record worker identity")
+        full_env = darwin_worker_env(env)
+        full_env["ACIQ_LOG"] = str(log_path)
+        full_env["ACIQ_RECEIPT"] = str(receipt_path)
+        cmd = [
+            "/usr/bin/nice",
+            "-n",
+            str(DARWIN_WORKER_NICE),
+            "/bin/sh",
+            "-c",
+            WRAPPER_SH,
+            "worker",
+            *argv,
+        ]
+        supervisor_nice = self._getpriority(0)
+        popen = self._spawn(cmd, full_env, job.cwd, log_path)
+        handle = f"pgid-{popen.pid}"
+        self._popens[handle] = popen
+        # `nice -n 10` INCREMENTS the parent's nice (capped at 20): the exact
+        # expected value is recorded and verified numerically after spawn.
+        self._expected_nice[handle] = min(20, supervisor_nice + DARWIN_WORKER_NICE)
+        # start_new_session makes the child the group leader: pgid == pid.
+        js.pgid = popen.pid
+        js.leader_pid = popen.pid
+        try:
+            js.leader_start = self._ps(["-ww", "-o", "lstart=", "-p", str(popen.pid)]).strip()
+            js.leader_cmd = self._ps(["-ww", "-o", "command=", "-p", str(popen.pid)]).strip()
+        except QueueError:
+            # a worker we cannot IDENTIFY must never keep running unowned
+            self._kill(popen.pid, signal.SIGKILL)
+            raise
+        return handle
+
+    def verify_unit_resource_limits(self, unit: str) -> tuple[bool, str]:
+        """Verify the containment properties that CAN be verified on Darwin
+        before the job is allowed to run (fail closed on mismatch, like the
+        systemd path): the worker leads its OWN process group and the nice
+        increment applied. The memory cap is NOT verifiable here — macOS has
+        no kernel enforcement; it is enforced by poll_worker_limits."""
+        pid = self._pgid_of(unit)
+        if pid is None:
+            return False, f"bad worker handle {unit!r}"
+        popen = self._popens.get(unit)
+        if popen is not None and popen.poll() is not None:
+            return False, f"worker leader {pid} exited during start verification"
+        pgid_out = self._ps(["-o", "pgid=", "-p", str(pid)]).strip()
+        if not pgid_out:
+            return False, f"worker leader {pid} not found — group verification failed"
+        if int(pgid_out) != pid:
+            return False, f"worker {pid} is not a process-group leader (pgid={pgid_out})"
+        expected_nice = self._expected_nice.get(unit)
+        if expected_nice is None:
+            return False, f"worker {pid} has no recorded nice expectation"
+        nice = self._getpriority(pid)
+        if nice < expected_nice:
+            return False, f"worker nice {nice} < expected {expected_nice} — nice not applied"
+        return True, "ok"
+
+    def validate_ownership(self, state: QueueState, job: JobSpec, unit: str) -> tuple[bool, str]:
+        """A worker may only be touched when the RECORDED identity matches the
+        LIVE process: the handle carries the recorded pgid, the leader pid is
+        alive AND in the recorded process group, the leader start time matches
+        (pid-reuse protection), and the leader command line matches the
+        recorded one AND contains the expected CLI binary. Never by name."""
+        js = state.jobs.get(job.id)
+        if js is None:
+            return False, f"job {job.id} has no state"
+        if unit != js.unit_name:
+            return False, f"worker handle {unit!r} is not job {job.id}'s recorded {js.unit_name!r}"
+        pgid, pid = js.pgid, js.leader_pid
+        if pgid is None or pid is None or pgid != pid or pgid <= 0:
+            return False, f"job {job.id} has no complete recorded worker identity"
+        if self._pgid_of(unit) != pgid:
+            return False, f"worker handle {unit!r} does not carry the recorded pgid {pgid}"
+        # 1. the leader is alive and still in the recorded group
+        pgid_out = self._ps(["-o", "pgid=", "-p", str(pid)]).strip()
+        if not pgid_out:
+            return False, f"worker leader {pid} is gone"
+        if int(pgid_out) != pgid:
+            return False, f"pid {pid} is not in the recorded process group {pgid} (pgid={pgid_out})"
+        # 2. the leader start time matches — a reused pid is NOT our worker
+        lstart = self._ps(["-ww", "-o", "lstart=", "-p", str(pid)]).strip()
+        if js.leader_start and lstart != js.leader_start:
+            return False, f"worker leader {pid} start time changed (pid reused?): {lstart!r}"
+        # 3. the command line matches the recorded one and carries the CLI
+        command = self._ps(["-ww", "-o", "command=", "-p", str(pid)]).strip()
+        if js.leader_cmd and command != js.leader_cmd:
+            return False, f"worker leader {pid} command line changed: {command[:120]!r}"
+        if job.exe_path() not in command:
+            return False, f"worker leader {pid} command line does not contain {job.exe_path()}"
+        return True, "ok"
+
+    def send_sigint_to_unit(self, unit: str) -> bool:
+        """SIGINT the whole process GROUP by its recorded numeric pgid
+        (the scheduler validates ownership BEFORE calling this)."""
+        pgid = self._pgid_of(unit)
+        if pgid is None:
+            log.error("refusing SIGINT to malformed handle %r", unit)
+            return False
+        return self._kill(pgid, signal.SIGINT)
+
+    def stop_worker_unit(self, unit: str) -> bool:
+        """SIGKILL the whole process GROUP by its recorded numeric pgid
+        (the Linux analog: systemctl stop's final kill of the cgroup)."""
+        pgid = self._pgid_of(unit)
+        if pgid is None:
+            log.error("refusing SIGKILL to malformed handle %r", unit)
+            return False
+        return self._kill(pgid, signal.SIGKILL)
+
+    def unit_active(self, unit: str) -> bool:
+        popen = self._popens.get(unit)
+        if popen is not None:
+            # direct child: poll() reaps the zombie AND answers liveness
+            return popen.poll() is None
+        pid = self._pgid_of(unit)
+        if pid is None:
+            return False
+        # adopted worker (started by a previous supervisor): leader-alive via
+        # ps. A reused pid is indistinguishable HERE — validate_ownership
+        # (which checks the recorded start time) guards every signal path.
+        return bool(self._ps(["-o", "pid=", "-p", str(pid)]).strip())
+
+    def poll_worker_limits(self, job: JobSpec, js: JobState) -> str | None:
+        """Darwin memory cap: the kernel does not enforce RLIMIT_AS, so the
+        per-worker cap is enforced HERE — poll the process-group RSS and
+        report a violation (the scheduler then SIGINTs the group, waits the
+        grace window, and SIGKILLs the stragglers)."""
+        pgid = self._pgid_of(js.unit_name or "")
+        if pgid is None or js.pgid is None or pgid != js.pgid:
+            return None
+        rss_kib = parse_ps_rss_sum_kib(self._ps(["-o", "rss=", "-g", str(js.pgid)]))
+        if rss_kib <= 0:
+            return None  # group gone: unit_active finalizes the job
+        rss_bytes = rss_kib * 1024
+        if rss_bytes > DARWIN_MEM_CAP_BYTES:
+            return (
+                f"memory cap exceeded: process-group RSS {rss_bytes // (1024 * 1024)} MiB"
+                f" > cap {DARWIN_MEM_CAP_BYTES // (1024 * 1024)} MiB"
+            )
+        return None
+
+    def cleanup_finished_unit(self, state: QueueState, job: JobSpec, unit: str) -> None:
+        """No systemd bookkeeping exists on macOS — nothing to clean up. The
+        method exists so the scheduler stays backend-agnostic."""
+        return None
+
+    def read_exit_receipt(self, receipt_path: Path) -> int | None:
+        return read_exit_receipt(receipt_path)
+
+    def parse_run_log(
+        self, log_path: Path, require_result: bool = False
+    ) -> tuple[str | None, bool]:
+        return parse_run_log(log_path, require_result)
+
+
+# --- backend selection ---------------------------------------------------------------
+
+BACKENDS = ("systemd", "darwin")
+
+
+def select_backend(flag: str | None = None) -> str:
+    """Backend selection: an explicit flag wins, else the platform default
+    (darwin on macOS, systemd on Linux)."""
+    if flag is not None:
+        if flag not in BACKENDS:
+            raise QueueError(f"unknown backend {flag!r} (one of {'|'.join(BACKENDS)})")
+        return flag
+    return "darwin" if platform.system() == "Darwin" else "systemd"
+
+
+def make_host_controls(backend: str) -> HostControls | DarwinHostControls:
+    if backend == "darwin":
+        return DarwinHostControls()
+    return HostControls()
+
+
 # --- CLI invocation builders ------------------------------------------------------
 
 
@@ -781,8 +1237,20 @@ class HostControls:
     def systemd_available(self) -> bool:
         return systemd_available()
 
+    def available(self) -> bool:
+        """Backend availability — the scheduler's fail-closed gate (the
+        generic seam both backends implement)."""
+        return self.systemd_available()
+
     def snapshot(self) -> HostSnapshot:
         return host_snapshot()
+
+    def poll_worker_limits(self, job: JobSpec, js: JobState) -> str | None:
+        """systemd enforces the per-worker limits IN THE KERNEL
+        (MemoryMax/CPUQuota/TasksMax, verified numerically at start) — there
+        is nothing to poll while the worker runs. The Darwin backend uses
+        this hook to enforce its polled memory cap."""
+        return None
 
     def verify_unit_resource_limits(self, unit: str) -> tuple[bool, str]:
         return verify_unit_resource_limits(unit)
@@ -839,7 +1307,7 @@ class WorkerQueue:
         logs_dir: Path,
         *,
         dry_run: bool = False,
-        host_ctl: HostControls | None = None,
+        host_ctl: HostControls | DarwinHostControls | None = None,
         sleep_fn: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -905,10 +1373,8 @@ class WorkerQueue:
     # -- main loop ------------------------------------------------------------------
 
     def run(self) -> int:
-        if not self.dry_run and not self.host_ctl.systemd_available():
-            raise QueueError(
-                "systemd user session/cgroups unavailable — FAIL CLOSED, refusing to run unbounded"
-            )
+        if not self.dry_run and not self.host_ctl.available():
+            raise QueueError("worker backend unavailable — FAIL CLOSED, refusing to run unbounded")
         self._reconcile_previous_run()
         rc = 0
         while True:
@@ -920,12 +1386,20 @@ class WorkerQueue:
                 self._interrupt_active(reason="supervisor signal", defer_queued=False)
                 rc = EXIT_SIGNALLED
                 break
-            # finalize exited units / apply timeouts
+            # finalize exited units / apply timeouts / enforce per-worker limits
             for _jid, (job, js) in list(self._active.items()):
                 unit = js.unit_name or ""
                 if not self.host_ctl.unit_active(unit):
                     self._finalize_job(job, js, unit)
-                elif js.started_at is not None and (self.clock() - js.started_at >= job.timeout_s):
+                    continue
+                # backend limit enforcement while the worker runs (the Darwin
+                # memory cap; a no-op on systemd, whose limits are in-kernel)
+                violation = self.host_ctl.poll_worker_limits(job, js)
+                if violation:
+                    log.warning("job %s resource violation: %s", job.id, violation)
+                    self._interrupt_job(job, js, unit, reason=violation, graceful=True)
+                    continue
+                if js.started_at is not None and (self.clock() - js.started_at >= job.timeout_s):
                     log.warning("job %s exceeded timeout (%ss)", job.id, job.timeout_s)
                     self._interrupt_job(
                         job, js, unit, reason=f"timeout after {job.timeout_s}s", graceful=True
@@ -1353,6 +1827,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         getattr(args, "admit_gib", None),
         getattr(args, "pressure_gib", None),
     )
+    backend = select_backend(getattr(args, "backend", None))
+    host_ctl = make_host_controls(backend)
     manifest_path = Path(args.manifest).resolve()
     jobs = load_manifest(manifest_path)
     state_path = Path(args.state) if args.state else _default_state_path(manifest_path)
@@ -1365,7 +1841,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         state.load()
         bind_state_to_manifest(state, jobs)
         if args.dry_run:
-            snap = host_snapshot()
+            snap = host_ctl.snapshot()
+            print(f"[dry-run] backend: {backend}")
             print(f"[dry-run] manifest: {len(jobs)} job(s); state: {state_path}")
             print(f"[dry-run] host: {snap.to_dict()}")
             for j in jobs:
@@ -1373,11 +1850,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                     state, jobs, logs_dir, dry_run=True
                 )._deps_satisfied(j)
                 decision = evaluate_admission(0, snap)
+                if backend == "darwin":
+                    worker_id = "pgid-<pid> (assigned at spawn)"
+                else:
+                    worker_id = state.unit_for(j)
                 print(
                     f"[dry-run] job {j.id} kind={j.kind} cwd={j.cwd} "
                     f"deps={'ok' if dep_ok else dep_reason} "
                     f"admission={'ok' if decision.admitted else decision.reason} "
-                    f"unit={state.unit_for(j)}"
+                    f"worker={worker_id}"
                 )
             return 0
         # We hold the lock, so any pending control request targeted a supervisor
@@ -1395,7 +1876,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         for j in jobs:
             state.jobs.setdefault(j.id, JobState(status="queued"))
         state.save()
-        queue = WorkerQueue(state, jobs, logs_dir)
+        queue = WorkerQueue(state, jobs, logs_dir, host_ctl=host_ctl)
         # Signal handlers are installed HERE (real run only — never in
         # WorkerQueue.__init__, so dry-run/tests never touch process signals)
         # and restored afterwards.
@@ -1416,7 +1897,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 1
     state = QueueState(state_path)
     state.load()
-    snap = host_snapshot()
+    snap = make_host_controls(select_backend(getattr(args, "backend", None))).snapshot()
     print(f"state: {state_path}")
     print(f"unit token: {state.unit_token}")
     print(f"host: {snap.to_dict()}")
@@ -1495,8 +1976,9 @@ def cmd_defer_all(args: argparse.Namespace) -> int:
         state.release_lock()
 
 
-def cmd_host_snapshot(_: argparse.Namespace) -> int:
-    print(json.dumps(host_snapshot().to_dict(), indent=2))
+def cmd_host_snapshot(args: argparse.Namespace) -> int:
+    snap = make_host_controls(select_backend(getattr(args, "backend", None))).snapshot()
+    print(json.dumps(snap.to_dict(), indent=2))
     return 0
 
 
@@ -1509,6 +1991,12 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("manifest")
     p_run.add_argument("--state", help="state file path (default: alongside manifest)")
     p_run.add_argument("--dry-run", action="store_true", help="admission + plan only, no launch")
+    p_run.add_argument(
+        "--backend",
+        choices=list(BACKENDS),
+        default=None,
+        help="worker backend (default: auto — darwin on macOS, systemd on Linux)",
+    )
     p_run.add_argument(
         "--max-workers", type=int, default=None, help=f"override (default {MAX_CONCURRENT_WORKERS})"
     )
@@ -1529,6 +2017,12 @@ def main(argv: list[str] | None = None) -> int:
 
     p_status = sub.add_parser("status", help="show persisted queue status")
     p_status.add_argument("--state", help="state file path")
+    p_status.add_argument(
+        "--backend",
+        choices=list(BACKENDS),
+        default=None,
+        help="host-sampling backend (default: auto — darwin on macOS, systemd on Linux)",
+    )
     p_status.set_defaults(func=cmd_status)
 
     p_resume = sub.add_parser(
@@ -1544,6 +2038,12 @@ def main(argv: list[str] | None = None) -> int:
     p_defer.set_defaults(func=cmd_defer_all)
 
     p_snap = sub.add_parser("host-snapshot", help="print host resource snapshot")
+    p_snap.add_argument(
+        "--backend",
+        choices=list(BACKENDS),
+        default=None,
+        help="host-sampling backend (default: auto — darwin on macOS, systemd on Linux)",
+    )
     p_snap.set_defaults(func=cmd_host_snapshot)
 
     args = parser.parse_args(argv)

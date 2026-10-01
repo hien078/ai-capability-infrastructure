@@ -93,6 +93,14 @@ class FakeHostControls:
     def systemd_available(self) -> bool:
         return self.systemd_ok
 
+    def available(self) -> bool:
+        # the scheduler's generic fail-closed gate (backend seam)
+        return self.systemd_ok
+
+    def poll_worker_limits(self, job: q.JobSpec, js: q.JobState) -> str | None:
+        # systemd enforces limits in-kernel: nothing to poll (backend seam)
+        return None
+
     def verify_unit_resource_limits(self, unit: str) -> tuple[bool, str]:
         if not self.limits_ok:
             return False, "MemoryHigh=0 != expected 1610612736"
@@ -1175,7 +1183,16 @@ def test_stale_control_request_does_not_defer_a_new_explicit_run(tmp_path, monke
     host.start_worker_unit = start_and_finish  # type: ignore[method-assign]
     monkeypatch.setattr(q, "HostControls", lambda: host)
     monkeypatch.setattr(q, "POLL_INTERVAL_S", 0.0)
-    args = type("Args", (), {"manifest": str(manifest), "state": str(state_path), "dry_run": False})
+    args = type(
+        "Args",
+        (),
+        {
+            "manifest": str(manifest),
+            "state": str(state_path),
+            "dry_run": False,
+            "backend": "systemd",
+        },
+    )
     assert q.cmd_run(args()) == 0
     st = q.QueueState(state_path)
     st.load()
@@ -1447,9 +1464,16 @@ def test_cmd_run_installs_handlers_only_for_real_runs(tmp_path, monkeypatch):
     monkeypatch.setattr(q, "host_snapshot", lambda: q.HostSnapshot(8.0, 10.0, 1.0))
     manifest = tmp_path / "m.json"
     manifest.write_text(json.dumps({"jobs": [job_raw("a", tmp_path)]}))
-    # dry-run: NO signal handlers
+    # dry-run: NO signal handlers (backend pinned: hermetic on macOS too)
     args = type(
-        "Args", (), {"manifest": str(manifest), "state": str(tmp_path / "st.json"), "dry_run": True}
+        "Args",
+        (),
+        {
+            "manifest": str(manifest),
+            "state": str(tmp_path / "st.json"),
+            "dry_run": True,
+            "backend": "systemd",
+        },
     )()
     assert q.cmd_run(args) == 0
     assert calls == [], "--dry-run must not install signal handlers"
@@ -1468,7 +1492,12 @@ def test_cmd_run_installs_handlers_only_for_real_runs(tmp_path, monkeypatch):
     args2 = type(
         "Args",
         (),
-        {"manifest": str(manifest), "state": str(tmp_path / "st2.json"), "dry_run": False},
+        {
+            "manifest": str(manifest),
+            "state": str(tmp_path / "st2.json"),
+            "dry_run": False,
+            "backend": "systemd",
+        },
     )()
     assert q.cmd_run(args2) == 0
     sigs = [sig for sig, _h in calls]
