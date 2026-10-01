@@ -11,3 +11,5 @@ build/
 data/
 .claude/
 .opencode/node_modules/
+# host-local compose override (e.g. publish the dev DB on a Tailscale IP only)
+docker-compose.override.yml
