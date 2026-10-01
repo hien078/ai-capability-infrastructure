@@ -342,6 +342,7 @@ def test_route_run_records_composer_version_and_estimate_sources() -> None:
     composition = run.stages["composition"]
     assert composition["version"] == "2"
     assert composition["max_context_tokens"] == 6000
+    assert composition["oversized_policy"] == "stop"  # the shipped default
     assert composition["spent_tokens"] == 2000
     assert composition["items"] == [
         {
@@ -350,5 +351,6 @@ def test_route_run_records_composer_version_and_estimate_sources() -> None:
             "estimated_tokens": 2000,
             "estimate_source": "artifact_entry",
             "included": True,
+            "excluded_reason": None,
         }
     ]

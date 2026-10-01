@@ -134,8 +134,14 @@ class ResolutionResult(BaseModel):
 #: fallbacks when no size is known: the trusted routing summary's length, or
 #: a flat default when even that is empty.
 TokenEstimateSource = Literal["artifact_entry", "routing_summary", "default"]
-#: Which budget ended composition early.
+#: Which budget excluded a resolved item from the bundle.
 CompositionStopReason = Literal["max_items", "max_context_tokens"]
+#: What the composer does with a candidate whose cost does not fit the
+#: REMAINING context budget (ADR-008): ``stop`` (the shipped default) ends
+#: composition at the first oversized candidate — every later candidate is
+#: excluded too; ``skip`` excludes only that candidate and keeps composing
+#: later candidates that fit (max_items and rank order unchanged).
+CompositionOversizedPolicy = Literal["stop", "skip"]
 
 
 class ComposedItemCost(BaseModel):
@@ -148,6 +154,10 @@ class ComposedItemCost(BaseModel):
     estimated_tokens: int = Field(ge=0)
     estimate_source: TokenEstimateSource
     included: bool
+    #: Which budget excluded this item (None when included) — stable
+    #: machine-readable code, per item, so a trace shows WHY each resolved
+    #: candidate is missing from the bundle, not just that composition ended.
+    excluded_reason: CompositionStopReason | None = None
 
 
 class CompositionTrace(BaseModel):
@@ -160,8 +170,15 @@ class CompositionTrace(BaseModel):
     max_items: int
     max_context_tokens: int
     spent_tokens: int = Field(ge=0)
-    #: Which budget ended composition early; None = every resolved item fit.
+    #: Which budget excluded resolved content: in ``stop`` mode the budget
+    #: that ended composition; in ``skip`` mode the item cap if it ended
+    #: composition, else the context budget if any candidate was skipped for
+    #: it. None = every resolved item fit (nothing was excluded).
     stop_reason: CompositionStopReason | None = None
+    #: Which oversized policy produced this trace (see
+    #: ``CompositionOversizedPolicy``); telemetry disambiguates the two
+    #: behaviours while they share one composer version.
+    oversized_policy: CompositionOversizedPolicy = "stop"
     items: list[ComposedItemCost] = Field(default_factory=list)
 
 

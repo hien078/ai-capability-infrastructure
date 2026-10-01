@@ -476,3 +476,136 @@ def test_memo_does_not_leak_across_resolves() -> None:
         i.candidate.capability_id
         for i in resolver.resolve([ranked("a", 1), ranked("b", 2)]).selected
     ] == ["a"]
+
+
+# ---------- oversized policy: stop (default) vs skip (candidate change) ----------
+
+
+def test_default_policy_is_stop() -> None:
+    """The shipped default must not change until the lead decides (§34)."""
+    composer = MinimalBundleComposer()
+    assert composer._oversized_policy == "stop"
+    result = compose_traced(resolution(("a", "primary", SUMMARY)))
+    assert result.trace.oversized_policy == "stop"
+
+
+def test_stop_policy_excludes_everything_after_first_oversized() -> None:
+    """Current rule: one oversized candidate ends composition — later
+    candidates that WOULD fit are excluded too, each with its reason."""
+    items = [("a", "primary", SUMMARY), ("b", "support", SUMMARY), ("c", "support", SUMMARY)]
+    sizes = {"a": 40_000, "b": 40, "c": 40}  # a=10000 tokens, b/c=10 tokens
+    result = compose_traced(resolution(*items), sizes=sizes, max_context_tokens=500)
+    assert [i.capability_id for i in result.bundle.items] == []
+    assert result.trace.stop_reason == "max_context_tokens"
+    assert [c.excluded_reason for c in result.trace.items] == [
+        "max_context_tokens",
+        "max_context_tokens",
+        "max_context_tokens",
+    ]
+    assert result.trace.spent_tokens == 0
+
+
+def test_skip_policy_skips_oversized_and_keeps_later_candidates() -> None:
+    """Candidate change: an oversized candidate is excluded alone; later
+    candidates that fit the REMAINING budget are still included."""
+    items = [("a", "primary", SUMMARY), ("b", "support", SUMMARY), ("c", "support", SUMMARY)]
+    sizes = {"a": 40_000, "b": 40, "c": 40}
+    composer = MinimalBundleComposer(FakePayloadSizes(sizes), oversized_policy="skip")
+    result = composer.compose(
+        resolution(*items),
+        RouteCapabilitiesCommand(task_text="t", max_context_tokens=500),
+        route_run_id="r",
+        now=NOW,
+    )
+    assert [i.capability_id for i in result.bundle.items] == ["b", "c"]
+    assert result.bundle.execution_order == ["b", "c"]  # rank order unchanged
+    assert result.trace.spent_tokens == 20
+    assert result.trace.stop_reason == "max_context_tokens"  # the budget excluded a
+    assert result.trace.oversized_policy == "skip"
+    assert [(c.capability_id, c.included, c.excluded_reason) for c in result.trace.items] == [
+        ("a", False, "max_context_tokens"),
+        ("b", True, None),
+        ("c", True, None),
+    ]
+
+
+def test_skip_policy_rank_one_oversized_no_longer_empties_the_bundle() -> None:
+    """The measured defect: one oversized rank-1 skill emptied whole bundles
+    under stop; under skip the rest of the selection survives."""
+    items = [("big", "primary", SUMMARY), ("small", "support", SUMMARY)]
+    composer = MinimalBundleComposer(
+        FakePayloadSizes({"big": 41_896, "small": 400}), oversized_policy="skip"
+    )
+    result = composer.compose(
+        resolution(*items),
+        RouteCapabilitiesCommand(task_text="t"),  # default budget 8000
+        route_run_id="r",
+        now=NOW,
+    )
+    assert [i.capability_id for i in result.bundle.items] == ["small"]
+    assert result.trace.stop_reason == "max_context_tokens"
+    assert result.trace.items[0].excluded_reason == "max_context_tokens"
+
+
+def test_skip_policy_stops_at_max_items_unchanged() -> None:
+    """max_items is a hard cap in BOTH policies (job spec: unchanged)."""
+    items = [("a", "primary", SUMMARY), ("b", "support", SUMMARY), ("c", "support", SUMMARY)]
+    composer = MinimalBundleComposer(FakePayloadSizes({}), oversized_policy="skip")
+    result = composer.compose(
+        resolution(*items),
+        RouteCapabilitiesCommand(task_text="t", max_items=2, max_context_tokens=10_000),
+        route_run_id="r",
+        now=NOW,
+    )
+    assert [i.capability_id for i in result.bundle.items] == ["a", "b"]
+    assert result.trace.stop_reason == "max_items"
+    assert result.trace.items[2].excluded_reason == "max_items"
+
+
+def test_skip_policy_stop_reason_none_when_everything_fits() -> None:
+    composer = MinimalBundleComposer(FakePayloadSizes({"a": 40}), oversized_policy="skip")
+    result = composer.compose(
+        resolution(("a", "primary", SUMMARY)),
+        RouteCapabilitiesCommand(task_text="t"),
+        route_run_id="r",
+        now=NOW,
+    )
+    assert result.trace.stop_reason is None
+    assert result.bundle.items  # nothing excluded
+
+
+def test_skip_policy_max_items_wins_over_budget_skips() -> None:
+    """When both budgets exclude content, stop_reason names the one that
+    ended composition (max_items); the budget skips stay per-item."""
+    items = [
+        ("a", "primary", SUMMARY),
+        ("b", "support", SUMMARY),
+        ("c", "support", SUMMARY),
+        ("d", "support", SUMMARY),
+    ]
+    composer = MinimalBundleComposer(
+        FakePayloadSizes({"a": 40_000, "b": 40, "c": 40, "d": 40}),
+        oversized_policy="skip",
+    )
+    result = composer.compose(
+        resolution(*items),
+        RouteCapabilitiesCommand(task_text="t", max_items=2, max_context_tokens=500),
+        route_run_id="r",
+        now=NOW,
+    )
+    # a skipped (budget), b+c included (cap reached), d excluded (max_items)
+    assert [i.capability_id for i in result.bundle.items] == ["b", "c"]
+    assert result.trace.stop_reason == "max_items"
+    assert [c.excluded_reason for c in result.trace.items] == [
+        "max_context_tokens",
+        None,
+        None,
+        "max_items",
+    ]
+
+
+def test_stop_policy_reasons_are_per_item() -> None:
+    """Stop mode also records WHY each excluded item is out (max_items)."""
+    items = [("a", "primary", SUMMARY), ("b", "support", SUMMARY)]
+    result = compose_traced(resolution(*items), sizes={"a": 40, "b": 40}, max_items=1)
+    assert [c.excluded_reason for c in result.trace.items] == [None, "max_items"]

@@ -14,6 +14,12 @@ back to the trusted routing summary's length and records that per item in the
 composition trace. Version history (route_runs.composer_version):
 ``1`` charged every item ``len(summary)/4`` — a ≤2000-char summary, so the
 token budget effectively never bound; ``2`` charges real entry-file size.
+
+Oversized candidates (cost > remaining budget) are handled by the
+``oversized_policy`` constructor option: ``stop`` (default, the shipped
+rule) ends composition at the first one; ``skip`` excludes only that
+candidate and keeps composing later candidates that fit. Both record the
+per-item ``excluded_reason``; the trace carries the policy that ran.
 """
 
 from datetime import datetime
@@ -29,6 +35,7 @@ from aci.domain.capability.models import (
 )
 from aci.domain.routing.models import (
     ComposedItemCost,
+    CompositionOversizedPolicy,
     CompositionResult,
     CompositionStopReason,
     CompositionTrace,
@@ -72,13 +79,31 @@ class MinimalBundleComposer:
 
     ``payload_sizes`` is optional so pure unit wiring still works; without it
     every item is costed by the summary fallback (visible in the trace).
+
+    ``oversized_policy`` (ADR-008) selects what happens when a candidate's
+    cost does not fit the REMAINING context budget:
+
+    - ``stop`` (default — the shipped behaviour): composition ends at the
+      first oversized candidate; every later candidate is excluded too,
+      even ones that would have fit the remaining budget.
+    - ``skip``: only the oversized candidate is excluded (recorded per item
+      as ``excluded_reason``); later candidates that fit are still included.
+
+    ``max_items`` and the rank order are unchanged in both policies — the
+    composer takes the resolver's selection in rank order and never pads.
     """
 
     implementation = IMPLEMENTATION
     version = VERSION
 
-    def __init__(self, payload_sizes: PayloadSizeSource | None = None) -> None:
+    def __init__(
+        self,
+        payload_sizes: PayloadSizeSource | None = None,
+        *,
+        oversized_policy: CompositionOversizedPolicy = "stop",
+    ) -> None:
         self._payload_sizes = payload_sizes
+        self._oversized_policy = oversized_policy
 
     def compose(
         self,
@@ -98,27 +123,36 @@ class MinimalBundleComposer:
         costs: list[ComposedItemCost] = []
         spent = 0
         stop_reason: CompositionStopReason | None = None
+        skipped_for_budget = False
         for resolved in resolution.selected:
             key = (resolved.candidate.capability_id, resolved.candidate.version)
             cost, source = item_cost(resolved.document_text, sizes.get(key))
-            included = False
-            if stop_reason is None:
-                if len(items) >= command.max_items:
+            excluded_reason: CompositionStopReason | None = None
+            if self._oversized_policy == "stop" and stop_reason is not None:
+                # Composition already ended: every later candidate is
+                # excluded, with the budget that ended it as the reason.
+                excluded_reason = stop_reason
+            elif len(items) >= command.max_items:
+                if stop_reason is None:
                     stop_reason = "max_items"  # budget: max items reached
-                elif spent + cost > command.max_context_tokens:
-                    stop_reason = "max_context_tokens"  # budget: context cost exceeded
+                excluded_reason = "max_items"
+            elif spent + cost > command.max_context_tokens:
+                excluded_reason = "max_context_tokens"  # budget: context cost exceeded
+                if self._oversized_policy == "stop":
+                    stop_reason = "max_context_tokens"
                 else:
-                    included = True
+                    skipped_for_budget = True
             costs.append(
                 ComposedItemCost(
                     capability_id=key[0],
                     version=key[1],
                     estimated_tokens=cost,
                     estimate_source=source,
-                    included=included,
+                    included=excluded_reason is None,
+                    excluded_reason=excluded_reason,
                 )
             )
-            if not included:
+            if excluded_reason is not None:
                 continue
             items.append(
                 BundleItem(
@@ -132,6 +166,12 @@ class MinimalBundleComposer:
                 )
             )
             spent += cost
+
+        # In skip mode the context budget never ends composition — but if it
+        # excluded anything, the trace must say so (None would read as
+        # "every resolved item fit").
+        if stop_reason is None and skipped_for_budget:
+            stop_reason = "max_context_tokens"
 
         bundle = CapabilityBundle(
             bundle_id=f"bun_{uuid4().hex}",
@@ -151,6 +191,7 @@ class MinimalBundleComposer:
             max_context_tokens=command.max_context_tokens,
             spent_tokens=spent,
             stop_reason=stop_reason,
+            oversized_policy=self._oversized_policy,
             items=costs,
         )
         return CompositionResult(bundle=bundle, trace=trace)
