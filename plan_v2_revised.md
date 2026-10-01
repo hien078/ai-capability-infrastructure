@@ -1,5 +1,7 @@
 # AI Capability Infrastructure — Architecture & Implementation Plan V2
 
+> **Current-status pointer (2026-10-01):** this document is the locked DESIGN source of truth (14 ADRs in `docs/adr/`, 001–014). For what is actually implemented / enabled by default / built-but-frozen / merely proposed, see `docs/architecture-current.md`; for the current actionable improvement plan see `docs/plans/aci-improvement-2026-10.md`. Operational record: `AGENTS.md`. Nothing in this plan is rewritten by those files; where a status line here reads as history, AGENTS.md supersedes it.
+
 > **Status:** Proposed architecture — supersedes the original `plan.md` design.
 >
 > **Design date:** 2026-09-27

@@ -4,10 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-AI Capability Infrastructure (ACI) — a Capability Registry + Skill Intelligence + Multi-Adapter Delivery system for composable agent skills. **Not** an agent platform. Status: V1 + V2 complete, V3 alive (real executor + A2A), V4-1 Evaluation live, two real clients (OpenCode + Antigravity) — REAL-CLIENT ERA, operating.
+AI Capability Infrastructure (ACI) — a Capability Registry + Skill Intelligence + Multi-Adapter Delivery system for composable agent skills. Not a *generalized* agent platform, but it does have a real service-side agent execution plane (HarnessKernel, ADR-014) — capability WHAT, optional kernel HOW, client-side global DAG. Status: V1 + V2 complete, V3 alive (real executor + A2A), V4-1 Evaluation live, three real clients (OpenCode + Antigravity + Goose) — REAL-CLIENT ERA, operating.
 
 - `AGENTS.md` — detailed repo state, gotchas, measured results, and build order. Read it before doing anything non-trivial; it is the operational source of truth alongside this file.
-- `plan_v2_revised.md` — the architecture plan (single source of truth for design). Follow it; do not invent a competing design. `docs/adr/` holds 13 accepted ADRs — read the relevant ADR before implementing its phase.
+- `plan_v2_revised.md` — the architecture plan (single source of truth for design). Follow it; do not invent a competing design. `docs/adr/` holds 14 accepted ADRs (001–014) — read the relevant ADR before implementing its phase.
+- `docs/architecture-current.md` — concise current-state overview (Vietnamese, 2026-10-01): what is actually implemented / enabled by default / built-but-frozen / merely proposed.
+- `docs/plans/aci-improvement-2026-10.md` — the current actionable improvement plan (Vietnamese): staged reopening of targeted features, ownership, acceptance checks, rollback, measurement limits.
 
 ## Freeze decision (2026-09-29, amended 2026-09-30 — do not relitigate without new evidence)
 
@@ -76,3 +78,5 @@ Layered, dependency-inward, enforced by boundary tests (`tests/unit/test_archite
 - Agent-run processes (`run_command`, `verification_command`, H-bench post-hoc) run in a bubblewrap sandbox (ADR-014 amendment 13): they need `bwrap` + unprivileged user namespaces or they are REFUSED; set `ACI_AGENT_SANDBOX=none` only on a disposable host.
 - Do not grow the skill corpus for count; grow it targeted to domain gaps (§55). Do not tune router weights on tiny samples (§34) — use `DEV_CASES` paired A/B instead.
 - Registry skills on the kernel path showed NO fix-rate value in any H-bench round (tests_pass never moved; the only measured positive is completion discipline on flash at 2.7× tokens) — `ACI_AGENT_CAPABILITY_PRELOAD` stays OFF, `request_capability` stays offered; do not re-run the experiment without a new axis (genuinely weak model / non-public knowledge / corpus past the human gate / fixtures verified reach-in-budget). See ADR-014 amendment 16/17.
+- Composer v2 budgets bundles by the REAL `SKILL.md` size (`application/payload_sizes.py`), `DEFAULT_MAX_CONTEXT_TOKENS = 8000` (ADR-008 amended); the reranker is v3 (min-max calibrated). Any further ranking/budget change needs a paired A/B on `DEV_CASES`/`KERNEL_QUERY_CASES` (§34).
+- Corpus cleanup C1+C2 was applied to `aci_bench` and then ROLLED BACK by the user the same day (2026-10-01) — 0 relations again, 37 production releases unchanged; current routing = pre-cleanup. C3/C4 (claude-api split) deliberately deferred.
