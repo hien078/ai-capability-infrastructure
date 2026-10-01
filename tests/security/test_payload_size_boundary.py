@@ -47,4 +47,6 @@ def test_size_source_and_composer_take_no_object_store() -> None:
     size_params = set(inspect.signature(ArtifactPayloadSizes.__init__).parameters)
     assert size_params == {"self", "capabilities", "artifacts"}
     composer_params = set(inspect.signature(MinimalBundleComposer.__init__).parameters)
-    assert composer_params == {"self", "payload_sizes"}
+    # ``oversized_policy`` is the ADR-008 stop/skip enum (a Literal, no
+    # content); the composer still takes no store and no text source.
+    assert composer_params == {"self", "payload_sizes", "oversized_policy"}

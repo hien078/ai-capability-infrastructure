@@ -88,6 +88,11 @@ class EmbeddingRetriever:
         self._embedder = embedder
         self._embeddings = embeddings
 
+    @property
+    def model_id(self) -> str:
+        """The embedder's model id (§46 cache key for this retriever's vectors)."""
+        return self._embedder.model_id
+
     def retrieve(
         self, query: str, eligible: list[EligibleCandidate], *, limit: int = 30
     ) -> RetrievalResult:
