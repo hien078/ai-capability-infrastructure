@@ -21,6 +21,17 @@ tệ hơn không trả gì.
     (`DEFAULT_MAX_CONTEXT_TOKENS`, một chỗ duy nhất): DEV_CASES paired replay
     6000 → hit 28/31, 8000 → 30/31; 8000 vượt p90 kích thước một skill (~6.7k).
     Budget vẫn strict — không ép item hạng 1 vượt budget (xem Rejected).
+  - Amendment 2026-10-02 (§3.1, m7 — paired A/B held-out, KHÔNG áp dụng): composer có
+    tùy chọn `oversized_policy="skip"` (loại riêng item không vừa budget còn lại, tiếp
+    tục compose các item sau; mặc định vẫn `"stop"`). Replay chỉ đọc
+    (`scripts/routing_replay.py`) trên HELDOUT/DEV/KERNEL (30/31/29): held-out
+    hit-in-bundle 17 → 21, 0 case hit→miss, nhưng luật đăng ký trước (c) trượt — 2 case
+    có item sai xếp trên item đúng trong bundle; token trung bình ~1.9×, misroute ~2×,
+    abstention đúng 2/4 → 0/4. Luật "dừng ở item quá cỡ đầu tiên" đang vô tình lọc
+    nhiễu hạng 4–5 ở corpus 36 skill. Cùng đợt: điểm similarity không hữu hạn (NaN)
+    bị chặn ở biên retrieval (`LOWEST_SIMILARITY`, đếm trong trace) — replay 90 case
+    byte-identical trước/sau; resolver memo theo từng resolve (ADR-014 mục 25) —
+    bundle giống hệt.
 - Quan hệ V1 chỉ `REQUIRES / CONFLICTS_WITH / CHECKS` (§18); không graph DB.
 
 ## Consequences

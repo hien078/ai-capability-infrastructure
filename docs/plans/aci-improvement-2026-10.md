@@ -69,6 +69,12 @@ giai đoạn này.
 > 42 fix-landed-unclaimed khỏi 9 nothing-landed) với chi phí +4.2% token input. Báo cáo:
 > `data/hbench/REPORT-E1.md`; ghi chi tiết: ADR-014 amendment 18.
 
+> **E1b (2026-10-02, Mac): ✗ — KHÔNG TÌM ĐƯỢC FIXTURE CÓ KHOẢNG TRỐNG.** Phase A chỉ arm N,
+> 78 run, 0 INVALID: verified×flash 24/24, verified×glm-5.3 22/24, horizon(16 turn)×flash
+> 15/15, horizon×glm-5.3 12/15 — không tổ hợp nào trong cửa sổ đăng ký trước [0.25, 0.75]
+> → phase B không chạy. Trần của E1 không phải do 8 fixture; đóng băng kernel giữ nguyên.
+> Ứng viên E1b′: horizon×glm-5.3, n lớn hơn, đăng ký lại. Ghi chi tiết: ADR-014 amendment 23.
+
 ### E2 — Skill có giá trị khi mang tri thức **phi công khai**?
 
 - **Vì sao:** trục còn mở duy nhất của amendment 16/17; domain round cho thấy tri thức công khai
@@ -98,6 +104,14 @@ giai đoạn này.
 > trị chỉ cho PRELOAD tri thức riêng — routing/acquisition KHÔNG đo (handler ghim vào case;
 > 0/40 capability request); acceptance nhiễu (atlas p=0.21) — tests_pass_at_end là yardstick
 > kết luận. Báo cáo: `data/hbench/REPORT-E2.md`; ghi chi tiết: ADR-014 amendment 19.
+
+> **E2B (2026-10-02, Mac): ✓ registry + router giữ trần và hơn "doc nằm trong repo".**
+> n=10/case/arm, registry = bản sao `aci_e2b`: R (pin) 17/20; **F (file trong repo) 9/20**;
+> **Bp (registry + router, preload) 19/20 — hit hạng 1 20/20**; Bq (preload OFF,
+> request_capability) 9/20 — model hỏi 12/20; K sạch 0/20. F vs R p=0.019, Bp vs F p=0.0013.
+> Nút thắt của doc-trong-repo là việc model tự tìm doc (~52%). Không đổi default; preload
+> ON cho kho tri thức riêng là quyết định treo (cần người dùng + vòng đăng ký trước trên
+> use case thật). Ghi chi tiết: ADR-014 amendment 24.
 
 ### E3 — Có dùng thật không?
 

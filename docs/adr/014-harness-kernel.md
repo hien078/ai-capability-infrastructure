@@ -304,6 +304,64 @@ aci-improvement-2026-10.md` §2 (E1/E2/E3 + bảng rẽ nhánh).
     mà không có vòng mới. Kết quả âm tính của E1 được ghi lại như bằng chứng (giữ
     nguyên, không xóa); tín hiệu dương của E2 được ghi với giới hạn phạm vi của nó.
 
+## Amendment 2026-10-02 (b) — E1b, E2B và tính hợp lệ của phép đo trên macOS
+
+Mọi số dưới đây được lead **tính lại từ hàng run trong JSON** (không từ aggregate của
+runner); JSON + báo cáo worker: `data/aci-improvement/mac/` (máy Mac worker; bản sao trên
+Linux). Model glm-5.3 / glm-5.3-flash qua gateway local của Mac; run `MODEL_FAILURE` là
+INVALID, bị loại và chạy bù.
+
+22. **Môi trường đo trên macOS (Seatbelt) — mọi vòng H-bench trên Mac TRƯỚC các bản sửa
+    là INVALID.** Ba lỗi chỉ-macOS làm model gần như không làm được việc: (a) PATH của
+    Seatbelt đặt `/usr/bin` trước interpreter → `python3` là stub Xcode không có pytest;
+    (b) `ulimit -u` trên macOS đếm MỌI tiến trình của user → mọi fork (`sh -c`, pipe,
+    git) fail; (c) workspace nằm trong repo và macOS không có mount namespace → pytest
+    lấy `pyproject.toml` của repo làm config cha và crash. Triệu chứng: N verified×flash
+    1/8 trên Mac so với 0.83 lưu trữ Linux; sau sửa (`fe9ca8a`, `7af721c`) **7/8**. Lỗi
+    thứ tư do E2B tự phát hiện: work root dùng chung (`/tmp/aci-hbench`) đọc được → 3/20
+    run K tìm thấy doc của arm F trong workspace anh em (các pass duy nhất của K) — sửa
+    `68bb135` (Seatbelt ẩn work root, mỗi run chỉ đọc workspace của nó). Seatbelt cũng
+    ẩn nội dung `/Users`, `/Volumes`, temp per-user, home của root và của server
+    (`384988b`). Bài học: một sandbox không có mount namespace phải được kiểm chứng bằng
+    vòng anchor so với lưu trữ Linux TRƯỚC khi đo.
+
+23. **E1b — tìm fixture có "khoảng trống" cho vòng lặp ngây thơ: ✗ KHÔNG TÌM ĐƯỢC
+    (dừng sau phase A theo luật đăng ký trước).** Phase A chỉ chạy arm N (không nhìn K),
+    `--repeat 3`, 4 tổ hợp, 78 run, 0 INVALID, 0 false success: verified(12 turn)×flash
+    **24/24**, verified×glm-5.3 **22/24**, horizon(16 turn, `--set horizon` — 5 fixture
+    dài, prompt chỉ triệu chứng, 2 fixture có 2 bug)×flash **15/15**, horizon×glm-5.3
+    **12/15 (0.80)**. Cửa sổ chọn đăng ký trước là [0.25, 0.75]; không tổ hợp nào lọt →
+    phase B (K vs N đủ power) KHÔNG chạy; 0.80 "gần đủ" bị từ chối đúng luật. Đọc: trần
+    của E1 (mục 18) KHÔNG phải artifact của 8 fixture — ở tier này vòng lặp ngây thơ giải
+    80–100% mọi pool fixture repo đang có. Đóng băng kernel (mục 21) giữ nguyên. Ứng viên
+    đầu cho một E1b′ tương lai: horizon×glm-5.3 với n lớn hơn, đăng ký lại trước.
+
+24. **E2B — registry + router so với "tài liệu nằm sẵn trong repo": ✓ registry+router
+    GIỮ trần và HƠN doc-trong-repo cho tri thức phi công khai.** `--set private`, n=10/
+    case/arm, glm-5.3, Seatbelt; registry = bản sao `aci_e2b` (37 skill production thật +
+    2 skill riêng ingest qua đường thật, gate thật — license MIT first-party, promote CHỈ
+    trong bản sao dùng-một-lần). tests_pass_at_end: **R (pin + preload) 17/20; F (chuẩn là
+    file `docs/standards/<skill>.md` trong workspace, không gợi ý) 9/20; Bp (registry +
+    router §14 + preload) 19/20 — router chọn đúng skill riêng ở hạng 1 trong 20/20 run,
+    narrowing giữ đúng 1 skill; Bq (preload OFF, chỉ `request_capability`) 9/20; K sạch
+    0/20** (vòng K+R sạch, không có doc F trên đĩa; R anchor 17/20 tái lập đúng vòng
+    chính). Fisher hai phía: F vs R 0.019; Bp vs F 0.0013; Bq vs K 0.0012; F vs K 0.0012;
+    Bp vs R 0.61. Cơ chế đo được: F tìm thấy doc ~52% run (tìm thấy → pass 82%, không
+    → 0%); Bq: model **gọi `request_capability` 12/20 (lần đầu ≠ 0 trong lịch sử dự án —
+    0/222 ở mục 16/17)**, gọi → pass 9/12, không gọi → 0/8. Tamper: 149 workspace, test
+    file byte-identical, không run nào giả pass. **Giới hạn (§34):** 2 chuẩn hư cấu, một
+    họ model, corpus 39 skill, skill riêng có tên đặc trưng (routing dễ); Bq hỏi có thể
+    vì prompt nói rõ "internal standard". **Không đổi default nào** (`ACI_AGENT_CAPABILITY_
+    PRELOAD` vẫn OFF) — nhưng đây là bằng chứng đầu tiên cho thấy với kho tri thức riêng,
+    preload ON (Bp 19/20) hơn mặc định hiện tại (Bq 9/20); đổi default cần quyết định của
+    người dùng + một vòng đăng ký trước trên use case thật.
+
+25. **Router N+1 (không phải kernel, ghi ở đây vì E2B lộ ra).** `DefaultDependencyResolver`
+    kiểm conflict theo cặp → 930/943 câu SQL mỗi `/v1/routes`. Memo theo từng resolve
+    (`ca01d10`): 90 case DEV+KERNEL+HELDOUT → bundle GIỐNG HỆT (id, version, role), câu SQL
+    84,859 → 3,859, wall 116 s → 10 s; route từ host cách DB 3 ms: 16 s → ~1 s (trước đó
+    plugin OpenCode timeout 2 s và fail-open thầm lặng mọi prompt).
+
 ## Verification
 
 - `tests/security/test_harness_invariants.py` — INV-04/06/07/08 + §7.6 trên đường
