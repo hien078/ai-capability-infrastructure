@@ -64,7 +64,7 @@ fixture through the false-success metric.
 Usage:
     ACI_AGENT_MODEL_API_KEY=... .venv/bin/python scripts/run_hbench.py \
         [--base-url http://localhost:20128/v1] [--model OneNexus/glm-5.3] \
-        [--set verified|domain|private] [--cases multi-config-precedence,...] \
+        [--set verified|domain|private|horizon] [--cases multi-config-precedence,...] \
         [--arms K,N,S,P,R] [--repeat 3] [--parallel 4] [--max-turns 12]
 
 Fixture sets (--set): 'verified' (default) = the 8 §80 multi/long fixtures;
@@ -80,6 +80,15 @@ fixture's rules are a fictional internal standard that did not exist
 before today, documented only in the fixture's private SKILL.md and pinned
 in the tests as sha256 digests. Arm R (the private-skill arm) requires
 this set; run K vs R on it for the E2 measurement (K−naked vs K+skill).
+'horizon' = the §80 long-horizon fixtures (scripts/horizon_tasks.py,
+verified by scripts/verify_horizon_fixtures.py with the STRONGER
+red-when-symptom-patched pin) — 8-10 file packages, symptom-only prompts,
+the bug 1-2 layers from the symptom; two fixtures carry two independent
+bugs. The E1b headroom pool: run K vs N on it where the verified pack
+sits at the ceiling (ADR-014 amendment 18). The PENDING H-cases
+(scripts/hbench_pending_cases.py) are NOT a set here: their knobs need
+scripted drivers (approval overlay, transient-failure injector,
+crash/resume), not the real-model K/N contract.
 
 Writes a JSON report to data/hbench/ (gitignored) and prints the table.
 """
@@ -101,6 +110,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from domain_tasks import DOMAIN_INTENDED_SKILLS, DOMAIN_TASKS  # noqa: E402
+from horizon_tasks import HORIZON_TASKS  # noqa: E402
 from private_tasks import PRIVATE_INTENDED_SKILLS, PRIVATE_TASKS  # noqa: E402
 from proof_loop import LONG_TASKS, MULTI_TASKS  # noqa: E402
 
@@ -206,6 +216,14 @@ H_REFS: dict[str, str] = {
     "long-order-pipeline": "H013",  # 4-6 module mini-app, context pressure
     "long-auth-session": "H013",
     "long-notify-fanout": "H013",
+    # §80 horizon fixtures (scripts/horizon_tasks.py) — the long-horizon
+    # exploration pack: 8-10 file packages, symptom-only prompts, the bug
+    # 1-2 layers from the symptom (two fixtures carry two independent bugs).
+    "horizon-ledger-reversal": "H013",
+    "horizon-scheduler-order": "H013",
+    "horizon-catalog-order": "H013",
+    "horizon-settings-migration": "H013",
+    "horizon-cache-tz": "H013",
 }
 PENDING_H_CASES = ["H005", "H006", "H007", "H008*", "H011"]  # *implicit via false-success
 
@@ -219,11 +237,19 @@ def _fixture_set(name: str) -> list[dict[str, Any]]:
     fixtures (the default — every existing round's pack, unchanged);
     'domain' = the domain-knowledge fixtures (domain_tasks.py);
     'private' = the private-knowledge fixtures (private_tasks.py, the E2
-    instrument — arm R's private-skill plane)."""
+    instrument — arm R's private-skill plane); 'horizon' = the §80
+    long-horizon fixtures (horizon_tasks.py — 8-10 file packages,
+    symptom-only prompts, verified by verify_horizon_fixtures.py with the
+    STRONGER red-when-symptom-patched pin). The PENDING H-cases
+    (hbench_pending_cases.py) are deliberately NOT a set here: their
+    knobs (approval overlay, transient-failure injector, crash/resume
+    driver) need scripted drivers, not the real-model K/N contract."""
     if name == "domain":
         return list(DOMAIN_TASKS)
     if name == "private":
         return list(PRIVATE_TASKS)
+    if name == "horizon":
+        return list(HORIZON_TASKS)
     return _all_fixtures()
 
 
@@ -1003,6 +1029,12 @@ def _run_one(
     return record
 
 
+def _sandbox_kind(arg: str) -> str:
+    """A --sandbox value → the sandbox kind ('' = the platform OS sandbox:
+    bwrap on Linux — every existing round's profile; seatbelt on macOS)."""
+    return arg or PLATFORM_SANDBOX_KIND
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://localhost:20128/v1")
@@ -1016,12 +1048,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--set",
         default="verified",
-        choices=["verified", "domain", "private"],
+        choices=["verified", "domain", "private", "horizon"],
         help=(
             "fixture set: 'verified' = the 8 §80 multi/long fixtures (default), "
             "'domain' = the domain-knowledge fixtures (domain_tasks.py), "
             "'private' = the private-knowledge fixtures (private_tasks.py, the "
-            "E2 instrument — arm R's set)"
+            "E2 instrument — arm R's set), "
+            "'horizon' = the §80 long-horizon fixtures (horizon_tasks.py — "
+            "verified fail-as-shipped/pass-when-fixed/red-when-symptom-patched)"
         ),
     )
     parser.add_argument("--arms", default="K,N", help="comma subset of K,N,S,P,R")
@@ -1091,12 +1125,16 @@ def main(argv: list[str] | None = None) -> int:
         )
     # ONE sandbox instance for the whole pack: both arms (and both post-hoc
     # yardsticks) execute model-written code under the identical profile.
-    sandbox = build_process_sandbox(args.sandbox)
+    # '' (the default) = the PLATFORM OS sandbox (bwrap on Linux — every
+    # existing round's profile; seatbelt on macOS) — an explicit --sandbox
+    # value overrides, and an unusable sandbox still fails closed below.
+    sandbox_kind = _sandbox_kind(args.sandbox)
+    sandbox = build_process_sandbox(sandbox_kind)
     unusable = sandbox.unavailable_reason()
     if unusable is not None:
         print(f"sandbox unusable: {unusable} — fix it or pass --sandbox none", file=sys.stderr)
         return 2
-    if args.sandbox == "none":
+    if sandbox_kind == "none":
         print("SANDBOX OFF (--sandbox none): model-written code runs as you", flush=True)
     fixtures = _fixture_set(args.set)
     if args.cases:
@@ -1231,7 +1269,7 @@ def main(argv: list[str] | None = None) -> int:
         "repeat": args.repeat,
         "max_turns": args.max_turns,
         "ablations": ablations,
-        "sandbox": args.sandbox,
+        "sandbox": sandbox_kind,
         "verification": VERIFICATION,
         "pending_h_cases": PENDING_H_CASES,
         "aggregate": {arm: _agg(arm) for arm in arms},

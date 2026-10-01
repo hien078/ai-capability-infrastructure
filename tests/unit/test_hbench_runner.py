@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 SCRIPTS = Path(__file__).resolve().parent.parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
@@ -108,6 +110,90 @@ class TestDomainFixtureSet:
             prompt = fixture["prompt"].lower()
             assert intended not in prompt, fixture["name"]
             assert intended.replace("-", " ") not in prompt, fixture["name"]
+
+
+class TestHorizonFixtureSet:
+    """The --set horizon selection (the E1b headroom pool, ADR-014 amendment
+    18): the §80 long-horizon fixtures run through the SAME K/N contract as
+    the verified pack — and adding the set changes NOTHING about the existing
+    sets/arms (every existing round stays byte-comparable)."""
+
+    def test_horizon_set_is_the_horizon_fixtures(self) -> None:
+        horizon = run_hbench._fixture_set("horizon")
+        assert [f["name"] for f in horizon] == [f["name"] for f in run_hbench.HORIZON_TASKS]
+        assert len(horizon) == 5
+
+    def test_horizon_set_is_disjoint_from_the_other_sets(self) -> None:
+        horizon = {f["name"] for f in run_hbench._fixture_set("horizon")}
+        assert not horizon & {f["name"] for f in run_hbench._fixture_set("verified")}
+        assert not horizon & {f["name"] for f in run_hbench._fixture_set("domain")}
+        assert not horizon & {f["name"] for f in run_hbench._fixture_set("private")}
+
+    def test_default_set_is_still_the_verified_eight(self) -> None:
+        """Adding 'horizon' must not change the default pack."""
+        assert [f["name"] for f in run_hbench._fixture_set("verified")] == [
+            f["name"] for f in run_hbench._all_fixtures()
+        ]
+
+    def test_horizon_fixtures_carry_the_runner_contract_shape(self) -> None:
+        for fixture in run_hbench._fixture_set("horizon"):
+            assert fixture["name"] and fixture["prompt"]
+            assert fixture["files"]
+            assert any(name.startswith("test_") for name in fixture["files"])
+
+    def test_every_horizon_fixture_is_gated_by_the_verify_script(self) -> None:
+        """The validity gate: every horizon fixture the runner can select is
+        covered by verify_horizon_fixtures.py's FIXTURE_FIXES/WRONG_FIXES —
+        the fail-as-shipped / pass-when-fixed / red-when-symptom-patched
+        pins (a fixture missing from either dict is EXCLUDED from runs)."""
+        import verify_horizon_fixtures as vh
+
+        names = {f["name"] for f in run_hbench._fixture_set("horizon")}
+        assert names == set(vh.FIXTURE_FIXES) == set(vh.WRONG_FIXES)
+
+    def test_horizon_fixtures_are_labeled_with_a_real_h_case(self) -> None:
+        for fixture in run_hbench._fixture_set("horizon"):
+            assert run_hbench.H_REFS[fixture["name"]] in HARNESS_CASE_IDS
+
+
+class TestSandboxDefault:
+    """The --sandbox default resolves to the PLATFORM OS sandbox (bwrap on
+    Linux — byte-identical to the old literal default; seatbelt on macOS),
+    so a real-model pack runs under the OS sandbox on every platform. An
+    explicit --sandbox value still wins, and an unusable sandbox still
+    fails closed (main returns 2 before any run)."""
+
+    def test_empty_sandbox_arg_resolves_to_the_platform_kind(self) -> None:
+        import aci.runtime.sandbox as sandbox_module
+
+        assert run_hbench._sandbox_kind("") == run_hbench.PLATFORM_SANDBOX_KIND
+        assert run_hbench.PLATFORM_SANDBOX_KIND is sandbox_module.PLATFORM_SANDBOX_KIND
+
+    def test_explicit_kinds_win_over_the_platform_default(self) -> None:
+        assert run_hbench._sandbox_kind("bwrap") == "bwrap"
+        assert run_hbench._sandbox_kind("seatbelt") == "seatbelt"
+        assert run_hbench._sandbox_kind("none") == "none"
+
+    def test_platform_default_is_usable_for_a_real_pack(self) -> None:
+        """The pack this job runs: the platform default sandbox must be
+        USABLE on the host it runs on (the runner refuses fail-closed
+        otherwise — main returns 2 before any run)."""
+        from aci.runtime.sandbox import build_process_sandbox
+
+        sandbox = build_process_sandbox(run_hbench.PLATFORM_SANDBOX_KIND)
+        reason = sandbox.unavailable_reason()
+        if reason is not None:
+            pytest.skip(f"platform sandbox unusable on this host: {reason}")
+        assert sandbox.name in ("bwrap", "seatbelt")
+
+    def test_explicit_bwrap_still_fails_closed_when_unusable(self) -> None:
+        """--sandbox bwrap on a host without bubblewrap (this Mac) still
+        refuses BEFORE any run — the fail-closed rule is unchanged."""
+        from aci.runtime.sandbox import BwrapSandbox
+
+        if BwrapSandbox().unavailable_reason() is None:
+            pytest.skip("bubblewrap usable on this host — nothing to refuse")
+        assert run_hbench.main(["--api-key", "k", "--sandbox", "bwrap"]) == 2
 
 
 class TestMechanismCounts:
