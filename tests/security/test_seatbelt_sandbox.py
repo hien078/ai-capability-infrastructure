@@ -172,6 +172,36 @@ def test_environment_carries_no_server_secret(
     assert env["TMPDIR"] == os.path.join(os.path.realpath(ws.root), "tmp")
 
 
+def test_home_writes_land_in_the_workspace(ws: LocalWorkspace) -> None:
+    """m9 job verification: HOME is the REAL workspace path (the bwrap
+    /workspace alias dangled on macOS — no mount namespace), so a tool
+    writing to ~ lands in the run's own workspace, never in the operator's
+    home."""
+    result = _py(ws, "import pathlib\n(pathlib.Path.home() / 'x').write_text('1')\n")
+    assert result.exit_code == 0, result.stderr
+    assert (ws.root / "x").read_text(encoding="utf-8") == "1"
+
+
+def test_tmpdir_is_writable_and_lands_in_the_workspace(ws: LocalWorkspace) -> None:
+    """m9 job verification: TMPDIR points at the per-command tmp dir under
+    the workspace (the profile's writable pair) — tempfile works inside the
+    sandbox, and the file lands in the run's workspace, never in the host
+    /tmp (which the profile denies)."""
+    result = _py(
+        ws,
+        "import os, tempfile\n"
+        "fd, path = tempfile.mkstemp()\n"
+        "os.write(fd, b'x')\n"
+        "os.close(fd)\n"
+        "print(path)\n",
+    )
+    assert result.exit_code == 0, result.stderr
+    created = result.stdout.strip().splitlines()[-1]
+    real = os.path.realpath(ws.root)
+    assert created.startswith(os.path.join(real, "tmp") + os.sep)
+    assert (ws.root / "tmp").is_dir()
+
+
 # -- the verifier's own command works -----------------------------------------------
 
 

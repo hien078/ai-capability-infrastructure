@@ -16,16 +16,21 @@ Findings, ranked by severity (each test names the finding it pins):
   ``RunResult.summary``); only the run dir is scrubbed, so any OTHER server
   path the command prints (e.g. ``sys.prefix``) reaches the client — a
   client-controlled read-back channel (the client picks the
-  ``verification_command``). XFAIL(strict): the fix is a wire-surface change
-  (decouple the client-facing summary from the model-facing repair hints);
-  see the result file.
+  ``verification_command``). FIXED here (m9): every caller-visible
+  verification summary is path-scrubbed — the client-facing
+  ``RunResult.summary`` and the client-facing evidence pack — with the
+  ADV-1 helper, now shared as ``aci.runtime.scrub.scrub_paths``; the MODEL
+  keeps the full output as repair feedback (its transcript is server-side).
 - ADV-3  An approval binds only the GATED call (call id + operation hash);
   the rest of the paused batch is not hash-bound, so a tampered checkpoint
   can smuggle extra calls past a one-shot approval (authority is still
   evaluated per call — the smuggle is bounded by grants, but the
   "approve = exactly the pending calls once" integrity contract is broken).
-  XFAIL(strict): the fix is a checkpoint-schema change (bind every pending
-  call); see the result file.
+  FIXED here (m9): the pause checkpoint carries ``batch_digest`` — sha256
+  over the canonical JSON of the WHOLE pending call list — computed at
+  pause time and verified at resume; a mismatch (or a checkpoint written
+  before the binding, which carries none) is refused RUN_NOT_RESUMABLE
+  before anything executes.
 - ADV-4  A workspace NAME that is a symlink escaped the workspace root: the
   per-run copy contained the symlink target's tree, where the model can read
   it (``read_file``) and echo it into the client-visible summary. Requires an
@@ -67,6 +72,7 @@ from aci.adapters.inbound.rest import agent_runs as rest_agent_runs
 from aci.adapters.inbound.rest.errors import register_error_handlers
 from aci.adapters.inbound.rest.wiring import Container, Settings
 from aci.application.run_agent_task import AgentRunService, ModelGatewayFactory
+from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.actions import (
     FinalCandidate,
     ToolCall,
@@ -76,7 +82,7 @@ from aci.domain.runtime.authority import ApprovalDecision, FilesystemScope, Gran
 from aci.domain.runtime.evidence import CheckResult, ResultContract
 from aci.domain.runtime.spec import LoopPolicy, RuntimeSpec
 from aci.domain.runtime.state import BudgetLedger
-from aci.domain.runtime.subtask import SubtaskContract
+from aci.domain.runtime.subtask import RunResult, SubtaskContract
 from aci.domain.runtime.tools import SideEffectReport, ToolAuthority, ToolSpec
 from aci.runtime.context_engine import ContextBudget, ContextEngine
 from aci.runtime.model_gateway import FakeModelGateway, ModelRequest, ModelResponse, ModelUsage
@@ -296,24 +302,17 @@ def test_adv1_sandbox_refusal_on_the_wire_carries_no_server_path(
 # client. Under the default bwrap sandbox the visible filesystem is /usr +
 # the interpreter prefixes + the run's own copy, so the leak is layout
 # disclosure; under ACI_AGENT_SANDBOX=none it is a read-back of ANY server
-# file the command can read.
+# file the command can read. FIXED (m9): the caller-visible summaries are
+# path-scrubbed (aci.runtime.scrub, the ADV-1 helper made shared); the model
+# keeps the full output as repair feedback — its transcript is server-side.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ADV-2: the verifier's raw command output reaches the client via "
-        "RunResult.summary with only the run dir scrubbed — sys.prefix (the "
-        "server's venv/repo location) leaks. Fix = decouple the client-facing "
-        "summary from the model-facing repair hints (the model keeps the full "
-        "output as repair feedback; the client gets check names), a wire-surface "
-        "change — see the m5 result file."
-    ),
-)
 def test_adv2_failed_verification_summary_does_not_echo_server_paths(roots: Roots) -> None:
     """A failing verification command that prints its interpreter prefix (as
     test runners print absolute paths) must not push that server path into
-    the client-facing summary."""
+    the client-facing summary. Workspace-relative paths (the run dir is
+    rewritten to ".") stay readable; the model keeps the FULL output as
+    repair feedback."""
     leaky = [PY, "-c", "import sys; print('PREFIX=' + sys.prefix); sys.exit(1)"]
     script = [_write("c1", "src/greet.py", GREET), *_done_repeatedly("src/greet.py")]
     service, _ = _service(script, roots)
@@ -327,13 +326,20 @@ def test_adv2_failed_verification_summary_does_not_echo_server_paths(roots: Root
 
 # -- ADV-3: an approval must bind the WHOLE pending batch ---------------------
 #
-# validate_for_resume binds calls[0] (the gated call) via gated_call_id +
-# operation_hash; the trailing calls of the paused batch are unbound. A
-# tampered checkpoint (store access) that keeps the gated call intact but
-# swaps a trailing call gets it executed by the approved resume — the client
-# approved ONE operation, N ran. Authority still evaluates every call, so the
-# smuggle is grants-bounded, but the approval-integrity contract ("approve =
-# exactly the pending calls once") is broken.
+# validate_for_resume used to bind only calls[0] (the gated call) via
+# gated_call_id + operation_hash; the trailing calls of the paused batch were
+# unbound. A tampered checkpoint (store access) that kept the gated call
+# intact but swapped a trailing call got it executed by the approved resume —
+# the client approved ONE operation, N ran. Authority still evaluated every
+# call, so the smuggle was grants-bounded, but the approval-integrity
+# contract ("approve = exactly the pending calls once") was broken.
+#
+# FIXED (m9): PendingInterrupt carries batch_digest — sha256 over the
+# canonical JSON of the whole pending call list — computed at pause time
+# and verified by validate_for_resume. A mismatch is refused
+# RUN_NOT_RESUMABLE before anything executes; a checkpoint written before
+# the binding (no digest) is refused too — nothing else binds the calls
+# behind the gated one, so resuming it is not provably safe.
 
 
 class _ScriptedModel:
@@ -386,36 +392,15 @@ def _fs_tools() -> list[ToolSpec]:
     ]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ADV-3: the approval binds only the gated call (gated_call_id + "
-        "operation_hash); a tampered checkpoint swaps a TRAILING call of the "
-        "paused batch and the approved resume executes it. Fix = bind every "
-        "pending call (per-call hashes or a batch hash on PendingInterrupt, "
-        "CHECKPOINT_SCHEMA_VERSION-aware) — a checkpoint-schema change, see "
-        "the m5 result file."
-    ),
-)
-def test_adv3_tampered_trailing_call_of_a_paused_batch_never_executes() -> None:
-    run_id = "run-adv3"
+def _adv3_kernel(actions: list[Any]) -> tuple[HarnessKernel, _RecordingDispatcher]:
+    """A kernel whose fs.write calls pause for approval, over recording tools."""
     dispatcher = _RecordingDispatcher()
     registry = ToolRegistry()
     for tool in _fs_tools():
         registry.register(tool)
-    model = _ScriptedModel(
-        [
-            ToolCallBatchAction(
-                calls=[
-                    ToolCall(call_id="w1", tool_id="fs.write", arguments={"path": "src/a.py"}),
-                    ToolCall(call_id="r1", tool_id="fs.read", arguments={"path": "README.md"}),
-                ]
-            )
-        ]
-    )
     kernel = HarnessKernel(
         state=StateManager(),
-        model_gateway=model,
+        model_gateway=_ScriptedModel(actions),
         tool_executor=ToolRuntime(registry, dispatcher),
         context_engine=ContextEngine(ContextBudget(total_tokens=60_000)),
         verifier=VerificationManager(
@@ -425,6 +410,10 @@ def test_adv3_tampered_trailing_call_of_a_paused_batch_never_executes() -> None:
         capability_runtime=object(),
         approval_required_tools=("fs.write",),
     )
+    return kernel, dispatcher
+
+
+def _adv3_run(kernel: HarnessKernel, run_id: str) -> RunResult:
     spec = RuntimeSpec(
         result_contract=ResultContract(contract_id="c", required_fields=["summary"]),
         loop_policy=LoopPolicy(),
@@ -433,82 +422,86 @@ def test_adv3_tampered_trailing_call_of_a_paused_batch_never_executes() -> None:
         created_at=datetime.now(UTC),
     )
     contract = SubtaskContract(task_id=run_id, objective="edit src", created_at=datetime.now(UTC))
-    paused = kernel.run(contract, spec, max_turns=10)
+    return kernel.run(contract, spec, max_turns=10)
+
+
+def _adv3_approval(paused: RunResult, *, approved: bool = True) -> ApprovalDecision:
+    return ApprovalDecision(
+        approval_id=paused.approval_id,
+        approved=approved,
+        decided_by="client",
+        decided_at=datetime.now(UTC),
+    )
+
+
+_ADV3_BATCH = ToolCallBatchAction(
+    calls=[
+        ToolCall(call_id="w1", tool_id="fs.write", arguments={"path": "src/a.py"}),
+        ToolCall(call_id="r1", tool_id="fs.read", arguments={"path": "README.md"}),
+    ]
+)
+
+
+def test_adv3_tampered_trailing_call_of_a_paused_batch_never_executes() -> None:
+    """Store tampering: the gated call stays byte-identical (its operation
+    hash binds it); the TRAILING read is swapped for a different path. The
+    pause checkpoint binds the WHOLE pending batch (batch_digest), so the
+    tampered payload no longer validates — resume is refused before
+    anything executes."""
+    run_id = "run-adv3"
+    kernel, dispatcher = _adv3_kernel([_ADV3_BATCH])
+    paused = _adv3_run(kernel, run_id)
     assert paused.status.value == "interrupted_approval"
     checkpoint = kernel.pending_checkpoint(run_id)
     assert checkpoint is not None and checkpoint.pending is not None
     gated, trailing = checkpoint.pending.calls
     assert gated.call_id == "w1" and trailing.call_id == "r1"
 
-    # Store tampering: the gated call stays byte-identical (the hash binds
-    # it); the TRAILING read is swapped for a different path.
     smuggled = ToolCall(call_id="r1", tool_id="fs.read", arguments={"path": "server-secret.txt"})
     tampered = checkpoint.model_copy(
         update={"pending": checkpoint.pending.model_copy(update={"calls": [gated, smuggled]})}
     )
-    kernel.resume(
-        tampered,
-        approval=ApprovalDecision(
-            approval_id=paused.approval_id,
-            approved=True,
-            decided_by="client",
-            decided_at=datetime.now(UTC),
-        ),
+    with pytest.raises(DomainError) as exc:
+        kernel.resume(tampered, approval=_adv3_approval(paused))
+    # Fail closed: RUN_NOT_RESUMABLE, and NOTHING executed — the refusal
+    # precedes any dispatch, so neither the approved gated call nor the
+    # smuggled trailing read ran.
+    assert exc.value.code is ErrorCode.RUN_NOT_RESUMABLE
+    assert dispatcher.calls == []
+
+
+def test_adv3_a_checkpoint_without_a_batch_digest_is_refused() -> None:
+    """A checkpoint written before the batch-integrity binding (no
+    ``batch_digest``) is NOT provably safe to resume — nothing binds the
+    calls behind the gated one, which is exactly the ADV-3 hole — so resume
+    is refused with a reason that says so, never silently trusted."""
+    run_id = "run-adv3-legacy"
+    kernel, dispatcher = _adv3_kernel([_ADV3_BATCH])
+    paused = _adv3_run(kernel, run_id)
+    assert paused.status.value == "interrupted_approval"
+    checkpoint = kernel.pending_checkpoint(run_id)
+    assert checkpoint is not None and checkpoint.pending is not None
+    legacy = checkpoint.model_copy(
+        update={"pending": checkpoint.pending.model_copy(update={"batch_digest": None})}
     )
-    # The approved gated call ran; the smuggled trailing call did NOT.
-    assert ("fs.read", {"path": "server-secret.txt"}) not in dispatcher.calls
-    assert ("fs.read", {"path": "README.md"}) in dispatcher.calls
+    with pytest.raises(DomainError) as exc:
+        kernel.resume(legacy, approval=_adv3_approval(paused))
+    assert exc.value.code is ErrorCode.RUN_NOT_RESUMABLE
+    assert "integrity digest" in str(exc.value)
+    assert dispatcher.calls == []
 
 
 def test_adv3_positive_control_the_honest_trailing_call_runs() -> None:
     """Not a finding: the design (ADR-014 amendment 14) executes the whole
     unexecuted rest of the paused batch on approve — the trailing call the
-    MODEL emitted in the same message runs. This pins that the xfail above is
-    about TAMPERING, not about the trailing call existing."""
+    MODEL emitted in the same message runs. This pins that the two tests
+    above are about TAMPERING, not about the trailing call existing."""
     run_id = "run-adv3b"
-    dispatcher = _RecordingDispatcher()
-    registry = ToolRegistry()
-    for tool in _fs_tools():
-        registry.register(tool)
-    batch = ToolCallBatchAction(
-        calls=[
-            ToolCall(call_id="w1", tool_id="fs.write", arguments={"path": "src/a.py"}),
-            ToolCall(call_id="r1", tool_id="fs.read", arguments={"path": "README.md"}),
-        ]
-    )
-    model = _ScriptedModel([batch, FinalCandidate(summary="done")])
-    kernel = HarnessKernel(
-        state=StateManager(),
-        model_gateway=model,
-        tool_executor=ToolRuntime(registry, dispatcher),
-        context_engine=ContextEngine(ContextBudget(total_tokens=60_000)),
-        verifier=VerificationManager(
-            [VerifierCallable("always", lambda s, c: CheckResult(name="always", passed=True))]
-        ),
-        recovery=RecoveryManager(),
-        capability_runtime=object(),
-        approval_required_tools=("fs.write",),
-    )
-    spec = RuntimeSpec(
-        result_contract=ResultContract(contract_id="c", required_fields=["summary"]),
-        loop_policy=LoopPolicy(),
-        budget=BudgetLedger(),
-        initial_grants=GrantEnvelope(filesystem=FilesystemScope(read=["."], write=["src"])),
-        created_at=datetime.now(UTC),
-    )
-    contract = SubtaskContract(task_id=run_id, objective="edit src", created_at=datetime.now(UTC))
-    paused = kernel.run(contract, spec, max_turns=10)
+    kernel, dispatcher = _adv3_kernel([_ADV3_BATCH, FinalCandidate(summary="done")])
+    paused = _adv3_run(kernel, run_id)
     checkpoint = kernel.pending_checkpoint(run_id)
     assert checkpoint is not None
-    resumed = kernel.resume(
-        checkpoint,
-        approval=ApprovalDecision(
-            approval_id=paused.approval_id,
-            approved=True,
-            decided_by="client",
-            decided_at=datetime.now(UTC),
-        ),
-    )
+    resumed = kernel.resume(checkpoint, approval=_adv3_approval(paused))
     assert resumed.status.value == "succeeded", resumed
     assert dispatcher.calls == [
         ("fs.write", {"path": "src/a.py"}),
