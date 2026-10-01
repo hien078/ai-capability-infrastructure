@@ -97,6 +97,13 @@ class CapabilityActivation(BaseModel):
     loaded_tools: list[str] = Field(default_factory=list)
     context_tokens: int = Field(default=0, ge=0)
     activated_at: datetime | None = None
+    #: The capability's instruction payload (``SKILL.md``), decoded from the
+    #: digest-VERIFIED bytes only and bounded by CapabilityRuntime. It lives
+    #: in authoritative run state (INV-01) so checkpoints carry it (INV-13)
+    #: and ContextEngine re-renders it every turn. Reference material only —
+    #: it never grants authority (AuthorityManager never reads it). Empty for
+    #: activations recorded before payloads were carried (backward compat).
+    instructions: str = ""
 
 
 class TranscriptEntry(BaseModel):

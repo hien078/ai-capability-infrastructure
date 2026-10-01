@@ -2,8 +2,15 @@
 one kernel per run from, plus the workspace settings (§16) it provisions
 per-run working copies with. The model gateway is a real provider client when
 ACI_AGENT_MODEL_BASE_URL is set; otherwise the run fails caller-visibly —
-the same honest-null rule as the A2A executor (§56.1)."""
+the same honest-null rule as the A2A executor (§56.1).
 
+Capabilities (harness.md §11): when the composition root supplies a
+``capability_client_factory`` (the REST Container does — a registry-backed
+ACIClient over the §14 router), every run gets a fresh CapabilityRuntime over
+a fresh run-scoped client. Without one (unit tests constructing the service
+directly) the honest null stays: a capability request loads nothing."""
+
+from collections.abc import Callable
 from typing import Any
 
 from aci.application.run_agent_task import AgentRunService
@@ -11,6 +18,7 @@ from aci.config import Settings
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.authority import ExecutionEnvelope
 from aci.domain.runtime.tools import ToolSpec
+from aci.runtime.capability_runtime import ACIClient, CapabilityRuntime
 from aci.runtime.context_engine import ContextBudget, ContextEngine
 from aci.runtime.model_gateway import OpenAICompatGateway
 from aci.runtime.protocols import ToolDispatchResult
@@ -39,12 +47,17 @@ class _NullDispatcher:
 
 
 class _NullCapabilityRuntime:
+    """No capability plane wired: a request honestly loads nothing."""
+
     def handle_request(self, request: object, snapshot: object) -> list[object]:  # noqa: ARG002
         return []
 
 
 def build_agent_run_service(
-    settings: Settings, *, run_store: object | None = None
+    settings: Settings,
+    *,
+    run_store: object | None = None,
+    capability_client_factory: Callable[[], ACIClient] | None = None,
 ) -> AgentRunService:
     if not settings.agent_runs_token:
         # Honest-default log, once per process: the surface is reachable by
@@ -74,7 +87,11 @@ def build_agent_run_service(
 
     class _CapabilityFactory:
         def build(self) -> object:
-            return _NullCapabilityRuntime()
+            if capability_client_factory is None:
+                return _NullCapabilityRuntime()
+            # Per run: the runtime's refresh budget + digest cache and the
+            # client's issued-selection allowlist never leak across runs.
+            return CapabilityRuntime(capability_client_factory())
 
     class _ContextFactory:
         def build(self) -> object:

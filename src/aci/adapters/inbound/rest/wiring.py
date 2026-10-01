@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import Request
 
 from aci.adapters.inbound.opencode.catalog import CatalogProjection
+from aci.adapters.outbound.agent_capabilities import RegistryCapabilityClientFactory
 from aci.adapters.outbound.model_provider.executor import OpenAICompatExecutor
 from aci.adapters.outbound.model_provider.hashing import HashingEmbedder
 from aci.adapters.outbound.model_provider.semantic import FastEmbedEmbedder
@@ -107,13 +108,17 @@ def _build_executor(
 
 
 def _build_agent_run_service(
-    settings: Settings, run_store: object | None = None
+    settings: Settings,
+    run_store: object | None = None,
+    capability_client_factory: RegistryCapabilityClientFactory | None = None,
 ) -> AgentRunService:
     """HarnessKernel wiring (ADR-014): a real model gateway when configured,
     else the run fails caller-visibly — never a silent default model."""
     from aci.adapters.inbound.rest.agent_run_wiring import build_agent_run_service
 
-    return build_agent_run_service(settings, run_store=run_store)
+    return build_agent_run_service(
+        settings, run_store=run_store, capability_client_factory=capability_client_factory
+    )
 
 
 class Container:
@@ -199,7 +204,14 @@ class Container:
         # The model gateway is a real provider client when
         # ACI_AGENT_MODEL_BASE_URL is set; otherwise the run fails
         # caller-visibly (the honest default, same rule as the A2A executor).
-        self.agent_run_service = _build_agent_run_service(settings, agent_run_store)
+        # Capabilities come from the SAME registry + §14 router /v1/routes uses
+        # (harness.md §11): one run-scoped registry client per kernel run.
+        self.agent_capability_clients = RegistryCapabilityClientFactory(
+            self.route_service, releases, capabilities, artifacts, objects
+        )
+        self.agent_run_service = _build_agent_run_service(
+            settings, agent_run_store, self.agent_capability_clients
+        )
         # Raw protocol handles, for inbound adapters that project the registry
         # directly (MCP skills extension reads releases/artifacts/objects).
         self.releases = releases
