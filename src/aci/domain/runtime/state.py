@@ -91,12 +91,21 @@ class CapabilityActivation(BaseModel):
 
     capability_id: str = Field(min_length=1)
     version: str = Field(min_length=1)
+    #: sha256 of the ENTRY file bytes (``SKILL.md``) the instructions were
+    #: decoded from after digest verification — the ENTRY digest, NOT the
+    #: package digest (``artifact.package_digest`` hashes the whole manifest).
     digest: str = Field(min_length=1)
     activation_id: str = Field(min_length=1)
     status: str = "ACTIVE"  # §49.1 lifecycle states
     loaded_tools: list[str] = Field(default_factory=list)
     context_tokens: int = Field(default=0, ge=0)
     activated_at: datetime | None = None
+    #: Registry provenance of the selection that produced this activation:
+    #: the §14 route run + routed bundle that chose this exact version. None
+    #: for selections from clients that carry no provenance (fakes, tests)
+    #: and for pre-provenance checkpoints (backward compatible).
+    route_run_id: str | None = None
+    bundle_id: str | None = None
     #: The capability's instruction payload (``SKILL.md``), decoded from the
     #: digest-VERIFIED bytes only and bounded by CapabilityRuntime. It lives
     #: in authoritative run state (INV-01) so checkpoints carry it (INV-13)

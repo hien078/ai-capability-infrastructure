@@ -61,6 +61,10 @@ OBJECTIVE = "fix the failing pytest in calc.py"
 CONSTRAINTS = ["python", "no new dependencies"]
 
 
+def _skill_digest() -> str:
+    return hashlib.sha256(SKILL_TEXT.encode()).hexdigest()
+
+
 def _contract() -> SubtaskContract:
     return SubtaskContract(
         task_id=RUN_ID,
@@ -153,11 +157,13 @@ class TestPreload:
         preload_at = types.index(CAPABILITY_PRELOAD)
         assert started < loaded_at < preload_at < first_turn
         (loaded,) = _events(bus, CAPABILITY_LOADED)
-        assert loaded.payload == {
-            "capability_id": "cap.pytest",
-            "version": "1.2.0",
-            "preload": True,
-        }
+        assert loaded.payload["capability_id"] == "cap.pytest"
+        assert loaded.payload["version"] == "1.2.0"
+        assert loaded.payload["preload"] is True
+        # Provenance of what was actually loaded (ids/digest only, no text).
+        assert loaded.payload["digest"] == _skill_digest()
+        assert loaded.payload["activation_id"].startswith("act-")
+        assert loaded.payload["context_tokens"] > 0
         (preload,) = _events(bus, CAPABILITY_PRELOAD)
         assert preload.payload == {"loaded": ["cap.pytest"], "count": 1}
         # ids only — never the skill text.

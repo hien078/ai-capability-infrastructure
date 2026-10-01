@@ -44,6 +44,11 @@ CAPABILITY_FEEDBACK = "capability.feedback"
 #: ``loaded`` (capability ids) + ``count``, or ``error`` (exception TYPE name
 #: only) when the best-effort preload failed and the run went on without it.
 CAPABILITY_PRELOAD = "capability.preload"
+#: OBSERVATIONAL join of a run's terminal outcome with the capabilities that
+#: were actually activated in it (ids + provenance only, never skill text).
+#: Emitted once per run at a TRUE terminal result (a pause is not terminal).
+#: "loaded in context" is NOT "caused the outcome" and never becomes one.
+CAPABILITY_EXPOSURE = "capability.exposure"
 
 TOOL_REQUESTED = "tool.requested"
 TOOL_AUTHORITY_EVALUATED = "tool.authority.evaluated"
@@ -95,6 +100,7 @@ ALL_EVENT_TYPES = frozenset(
         CAPABILITY_UNLOADED,
         CAPABILITY_FEEDBACK,
         CAPABILITY_PRELOAD,
+        CAPABILITY_EXPOSURE,
         TOOL_REQUESTED,
         TOOL_AUTHORITY_EVALUATED,
         TOOL_APPROVAL_REQUESTED,

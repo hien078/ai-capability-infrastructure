@@ -139,6 +139,11 @@ class CapabilityRuntime:
                 f"digest mismatch for {selection.capability_id}@{selection.version}: "
                 f"expected {selection.digest}, got {digest}"
             )
+        # Registry provenance (route run + bundle) rides along when the
+        # selection carries it; a client without provenance (fakes, tests)
+        # activates with None — never a fabricated id.
+        route_run_id = getattr(selection, "route_run_id", None)
+        bundle_id = getattr(selection, "bundle_id", None)
         activation = CapabilityActivation(
             capability_id=selection.capability_id,
             version=selection.version,
@@ -146,6 +151,8 @@ class CapabilityRuntime:
             activation_id=f"act-{hashlib.sha256(f'{run_id}:{key}'.encode()).hexdigest()[:12]}",
             status="ACTIVE",
             activated_at=datetime.now(UTC),
+            route_run_id=route_run_id if isinstance(route_run_id, str) else None,
+            bundle_id=bundle_id if isinstance(bundle_id, str) else None,
             instructions=bound_instructions(
                 payload,
                 instruction_limit_chars(

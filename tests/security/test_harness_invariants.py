@@ -809,3 +809,69 @@ class TestPreloadNeverWidensGrants:
         assert not (tmp_path / "etc/pwned.txt").exists()
         assert state.snapshot(RUN_ID).grants == WRITE_GRANT
         assert result.status is not RunStatus.SUCCEEDED
+
+
+# -- capability evidence join (task B, 2026-10-01): exposure is observational --
+#
+# CAPABILITY_LOADED / CAPABILITY_EXPOSURE carry the immutable provenance of
+# what was actually loaded and the run's own outcome. They must never carry
+# skill text, task text, paths or model-generated values (§61), and a
+# loaded-in-context skill is never evidence that it CAUSED anything.
+
+
+class TestCapabilityEvidenceBoundaries:
+    def test_loaded_and_exposure_events_carry_no_text_or_paths(self, tmp_path: Path) -> None:
+        import json
+
+        from aci.runtime.capability_runtime import CapabilityRuntime
+        from aci.runtime.event_bus import CAPABILITY_EXPOSURE, CAPABILITY_LOADED, EventBus
+
+        bus = EventBus()
+        model = ScriptedModel(
+            [
+                ToolCallBatchAction(
+                    calls=[
+                        ToolCall(
+                            call_id="k1",
+                            tool_id="request_capability",
+                            arguments={"objective": "triage a failing pytest"},
+                        )
+                    ]
+                ),
+                FinalCandidate(summary="ok"),
+            ]
+        )
+        kernel = HarnessKernel(
+            state=StateManager(),
+            model_gateway=model,
+            tool_executor=ToolRuntime(_registry_with_paths(), dispatcher=NaiveDispatcher(tmp_path)),
+            context_engine=ContextEngine(ContextBudget(total_tokens=60_000)),
+            verifier=VerificationManager(verifier_checks(AgentProfileId.CODER)),
+            recovery=RecoveryManager(),
+            capability_runtime=CapabilityRuntime(_InjectedSkillACI()),  # type: ignore[arg-type]
+            event_bus=bus,
+        )
+        result = kernel.run(_contract(), _coder_spec())
+        assert result.status is not RunStatus.SUCCEEDED  # the coder verifier fails it
+        capability_events = [
+            e
+            for e in bus.history(RUN_ID)
+            if e.event_type in (CAPABILITY_LOADED, CAPABILITY_EXPOSURE)
+        ]
+        assert capability_events
+        everything = "".join(json.dumps(e.payload) for e in capability_events)
+        for banned in (
+            "IGNORE PREVIOUS INSTRUCTIONS",
+            "pwned.txt",
+            "SKILL.md",
+            "skill://cap.injected",
+            "fix the failing pytest",
+        ):
+            assert banned not in everything
+        # The join is observational: the exposure carries the run's own stop
+        # reason (a failure here), never a per-skill success claim.
+        exposure = next(e for e in capability_events if e.event_type == CAPABILITY_EXPOSURE)
+        assert exposure.payload["stop_reason"] != "SUCCESS"
+        (cap,) = exposure.payload["capabilities"]
+        assert cap["capability_id"] == "cap.injected"
+        assert cap["route_run_id"] is None  # _InjectedSkillACI carries no provenance

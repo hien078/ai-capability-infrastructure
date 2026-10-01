@@ -10,7 +10,7 @@ it within the context budget (INV-09).
 
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
@@ -55,6 +55,7 @@ from aci.runtime.checkpoints import (
 )
 from aci.runtime.context_engine import AssembledContext, estimate_tokens, select_transcript
 from aci.runtime.event_bus import (
+    CAPABILITY_EXPOSURE,
     CAPABILITY_LOADED,
     CAPABILITY_PRELOAD,
     CHECKPOINT_RESTORED,
@@ -1253,7 +1254,19 @@ class HarnessKernel:
             payload: dict[str, object] = {
                 "capability_id": activation.capability_id,
                 "version": activation.version,
+                # Immutable provenance of what was actually loaded (§11.7):
+                # the ENTRY digest (not the package digest), the activation id
+                # and the context cost of the rendered block. Route/bundle ids
+                # only when the selection carried them. Never skill text, task
+                # text, paths or model-generated values.
+                "digest": activation.digest,
+                "activation_id": activation.activation_id,
+                "context_tokens": activation.context_tokens,
             }
+            if activation.route_run_id is not None:
+                payload["route_run_id"] = activation.route_run_id
+            if activation.bundle_id is not None:
+                payload["bundle_id"] = activation.bundle_id
             if preload:
                 payload["preload"] = True
             self._emit(CAPABILITY_LOADED, r.run_id, payload=payload)
@@ -1522,15 +1535,72 @@ class HarnessKernel:
         )
 
     def _emit_terminal(self, result: RunResult) -> None:
+        """The single terminal seam: the lifecycle event, then — at a TRUE
+        terminal result, never a pause — the observational capability
+        exposure join (§11.8 evidence bridge). Loaded-in-context is never
+        causation: the payload carries ids + provenance + the run's own
+        stop/verdict, nothing that asserts a skill caused anything."""
         stop = result.stop_reason.value if result.stop_reason else None
         if result.status is RunStatus.SUCCEEDED:
             self._emit(RUN_COMPLETED, result.run_id, payload={"stop_reason": stop})
         elif result.status is RunStatus.CANCELLED:
             self._emit(RUN_CANCELLED, result.run_id)
         elif result.status in (RunStatus.INTERRUPTED, RunStatus.INTERRUPTED_APPROVAL):
+            # A pause is NOT terminal: no exposure join here. The resumed
+            # segment's own terminal result joins from the restored state.
             self._emit(RUN_PAUSED, result.run_id, payload={"detail_code": result.detail_code})
+            return
         else:
             self._emit(RUN_FAILED, result.run_id, payload={"stop_reason": stop})
+        self._record_capability_evidence(result)
+
+    def _record_capability_evidence(self, result: RunResult) -> None:
+        """CAPABILITY_EXPOSURE + the §11.8 feedback seam at a true terminal
+        result, for the actually activated set only. Best effort in both
+        directions: a failure to record must never fail or alter the finished
+        run (telemetry, not a dependency) — the whole body is guarded, so no
+        future addition here can replace the terminal RunResult with a raise.
+        A run with no activated capabilities has nothing to join and emits
+        nothing."""
+        try:
+            activations = self._state.snapshot(result.run_id).active_capabilities
+            if not activations:
+                return
+            stop = result.stop_reason.value if result.stop_reason else None
+            verdict = result.evidence.verification_verdict if result.evidence is not None else None
+            refs = list(result.evidence.evidence_refs) if result.evidence is not None else []
+            self._emit(
+                CAPABILITY_EXPOSURE,
+                result.run_id,
+                payload=capability_exposure_payload(
+                    stop_reason=stop,
+                    verifier_verdict=verdict,
+                    evidence_refs=refs,
+                    activations=activations,
+                ),
+            )
+            # The optional feedback seam (CapabilityRuntime.report_outcome): the
+            # outcome is the RUN's own, joined to each activated capability —
+            # never a claim that a skill caused it. Unwired (REST) or failing:
+            # a no-op that the finished run never feels.
+            report = getattr(self._capabilities, "report_outcome", None)
+            if not callable(report):
+                return
+            outcome = f"run_{(stop or 'unknown').lower()}"
+            failure_class = stop if result.status is RunStatus.FAILED else None
+            for activation in activations:
+                try:
+                    report(
+                        capability_id=activation.capability_id,
+                        version=activation.version,
+                        outcome=outcome,
+                        failure_class=failure_class,
+                        evidence_refs=refs,
+                    )
+                except Exception:  # noqa: BLE001 — feedback must never fail the run
+                    continue
+        except Exception:  # noqa: BLE001 — telemetry, never a run dependency
+            return
 
     def _emit(
         self,
@@ -1595,6 +1665,35 @@ CANCELLED_WHILE_PAUSED = "CANCELLED_WHILE_PAUSED"
 SUPERSEDED_BY_REVISION = "SUPERSEDED_BY_REVISION"
 
 
+def capability_exposure_payload(
+    *,
+    stop_reason: str | None,
+    verifier_verdict: str | None,
+    evidence_refs: list[str],
+    activations: Sequence[CapabilityActivation],
+) -> dict[str, object]:
+    """The CAPABILITY_EXPOSURE payload: the run's own stop/verdict joined
+    with the actually activated set — ids + immutable provenance only.
+    Never skill text, task text, paths, secrets or model-generated values;
+    never a claim that a skill caused the outcome."""
+    return {
+        "stop_reason": stop_reason,
+        "verifier_verdict": verifier_verdict,
+        "evidence_refs": list(evidence_refs),
+        "capabilities": [
+            {
+                "capability_id": a.capability_id,
+                "version": a.version,
+                "digest": a.digest,
+                "activation_id": a.activation_id,
+                "route_run_id": a.route_run_id,
+                "bundle_id": a.bundle_id,
+            }
+            for a in activations
+        ],
+    }
+
+
 def cancel_paused(
     checkpoint: Checkpoint,
     *,
@@ -1612,7 +1711,8 @@ def cancel_paused(
     The CALLER claims the checkpoint first (at most one of resume / cancel /
     revise wins it); this function never consumes anything. A checkpoint
     whose snapshot is not paused is RUN_NOT_RESUMABLE (checked before any
-    write)."""
+    write). CANCELLED is terminal, so the observational capability exposure
+    join is emitted here too (the run has no live loop to emit it)."""
     snapshot = checkpoint.snapshot
     if snapshot.run.run_id != checkpoint.run_id or snapshot.run.status not in (
         RunStatus.INTERRUPTED,
@@ -1634,6 +1734,17 @@ def cancel_paused(
         run_id=checkpoint.run_id,
         payload={"while_paused": kind, "detail_code": detail_code},
     )
+    if snapshot.active_capabilities:
+        event_bus.emit(
+            CAPABILITY_EXPOSURE,
+            run_id=checkpoint.run_id,
+            payload=capability_exposure_payload(
+                stop_reason=StopReason.CANCELLED.value,
+                verifier_verdict=None,
+                evidence_refs=[],
+                activations=snapshot.active_capabilities,
+            ),
+        )
     return RunResult(
         run_id=checkpoint.run_id,
         status=final.run.status,
