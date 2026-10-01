@@ -135,3 +135,10 @@ jobs:
             [[allowlists]]
             description = "guardrail tests: fake secrets are the fixtures under test"
             paths = ['''^tests/unit/test_guardrails\.py$''']
+
+            [[allowlists]]
+            description = "worker-queue tests: fixed fake unit_token fixture (16 hex, not a credential)"
+            condition = "AND"
+            paths = ['''^tests/unit/test_aci_worker_queue(_darwin)?\.py$''']
+            regexTarget = "line"
+            regexes = ['''"unit_token": "0123456789abcdef"''']
