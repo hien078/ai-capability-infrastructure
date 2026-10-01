@@ -366,6 +366,17 @@ def sandbox_refusal(reason: str) -> str:
     )
 
 
+#: Trees whose file contents a Seatbelt-sandboxed process may not read (the
+#: server's own $HOME is added at profile time). `/private/var/folders` is the
+#: per-user temp/cache tree; `/private/var/root` is root's home.
+HIDDEN_READ_ROOTS: tuple[str, ...] = (
+    "/Users",
+    "/Volumes",
+    "/private/var/folders",
+    "/private/var/root",
+)
+
+
 def _sbpl_quote(path: str) -> str:
     """A double-quoted SBPL string literal. Seatbelt has no escape syntax, so
     a `"` in a path cannot be represented — such paths are refused upstream."""
@@ -379,9 +390,17 @@ class SeatbeltSandbox:
 
     What the profile grants (everything else is denied — `(deny default)`):
 
-    * READ access to the whole filesystem (Seatbelt cannot make the system
-      read-only the way `--ro-bind /usr` does; instead NOTHING outside the
-      workspace is writable, which is the property that matters);
+    * READ access to the system (Seatbelt cannot make the system read-only
+      the way `--ro-bind /usr` does; instead NOTHING outside the workspace
+      is writable) — but file CONTENTS under the user/secret trees
+      (`/Users`, `/Volumes`, the per-user temp/cache tree, root's home and
+      the server's $HOME — `HIDDEN_READ_ROOTS`) are NOT readable, except the
+      workspace itself and the interpreter install trees re-allowed after
+      the deny (SBPL: the last matching rule wins). That keeps the model's
+      commands away from API keys, ssh keys, other repos and the operator's
+      files, as bwrap's "no $HOME/repo/data" does. Metadata (stat) stays
+      allowed so path resolution works; directory LISTINGS are file data
+      and are denied;
     * file writes ONLY under the run workspace (subpath allowlist) and the
       fresh per-command TMPDIR (Seatbelt resolves /tmp to /private/tmp, so
       the literal must be the resolved real path);
@@ -398,17 +417,19 @@ class SeatbeltSandbox:
     process (CPU, FSIZE, NPROC, NOFILE — RLIMIT_AS cannot be set on macOS;
     memory is bounded by the workspace timeout, not an AS cap).
 
-    No PID/mount namespace exists on macOS: the process sees host paths
-    (read-only in effect) and host PIDs. That is the accepted delta vs
-    bwrap; the write-boundary and network boundary are what fail closed.
+    No PID/mount namespace exists on macOS: the process sees host PIDs and
+    system paths (read-only in effect). That is the accepted delta vs bwrap;
+    the write, network and user-data read boundaries are what fail closed.
     """
 
     limits: ResourceLimits = field(default_factory=ResourceLimits)
     sandbox_exec_path: str | None = None
-    #: Read-only "binds" are meaningless (everything is readable); what
-    #  matters is which prefixes may EXECUTE. Kept for settings symmetry.
+    #: The interpreter trees: re-allowed for READ under the hidden roots
+    #  (a venv under $HOME) and added to PATH for execution.
     ro_prefixes: Sequence[str] | None = None
     extra_ro_binds: Sequence[str] = ()
+    #: Extra trees whose file contents are hidden (beyond HIDDEN_READ_ROOTS).
+    extra_hidden_paths: Sequence[str] = ()
     name: str = "seatbelt"
 
     def __post_init__(self) -> None:
@@ -434,6 +455,31 @@ class SeatbeltSandbox:
             out.append(path)
         return list(dict.fromkeys(out))
 
+    def _hidden_paths(self) -> list[str]:
+        """Trees whose file CONTENTS the sandboxed process may not read:
+        the fixed user/secret roots + the server's $HOME (both spellings)."""
+        out: list[str] = []
+        for raw in [*HIDDEN_READ_ROOTS, str(Path.home()), *self.extra_hidden_paths]:
+            if raw and os.path.isabs(raw):
+                out += [os.path.normpath(raw), os.path.realpath(raw)]
+        return list(dict.fromkeys(out))
+
+    def _read_paths(self, workspace: Path) -> list[str]:
+        """Re-allowed for READ after the hidden-root deny: the workspace and
+        the interpreter install trees (configured + symlink-resolved — Seatbelt
+        matches the resolved path; a venv may symlink into another tree).
+        A prefix that is a hidden root or an ANCESTOR of one (e.g. `$HOME`,
+        `/Users`, `/`) is dropped — re-allowing it would re-open the tree."""
+        hidden = self._hidden_paths()
+        out = [os.path.realpath(workspace)]
+        for raw in [*self._prefixes, *self.extra_ro_binds]:
+            if not raw or not os.path.isabs(raw) or not os.path.isdir(raw):
+                continue
+            for path in (os.path.normpath(raw), os.path.realpath(raw)):
+                if not any(_is_within(h, path) for h in hidden):
+                    out.append(path)
+        return list(dict.fromkeys(out))
+
     def _write_paths(self, workspace: Path) -> list[str]:
         """The ONLY writable subpaths: the workspace (real path) + a fresh
         per-command TMPDIR under it. A workspace path containing `"` cannot
@@ -449,12 +495,19 @@ class SeatbeltSandbox:
         writes = " ".join(
             f"(allow file-write* (subpath {_sbpl_quote(p)}))" for p in self._write_paths(workspace)
         )
+        hidden = " ".join(f"(subpath {_sbpl_quote(p)})" for p in self._hidden_paths())
+        reread = " ".join(f"(subpath {_sbpl_quote(p)})" for p in self._read_paths(workspace))
         return (
             "(version 1)\n"
             "(deny default)\n"
-            # Read the filesystem (read-only in effect: writes are denied
-            # below unless under the workspace).
+            # Read the system (read-only in effect: writes are denied below
+            # unless under the workspace) ...
             "(allow file-read*)\n"
+            # ... but NOT file contents under the user/secret trees ...
+            f"(deny file-read-data {hidden})\n"
+            # ... except the workspace and the interpreter trees (the last
+            # matching rule wins, so this re-allow must come AFTER the deny).
+            f"(allow file-read-data {reread})\n"
             # The command's own process tree: exec + fork (signals and wait
             # are covered by same-process semantics; no explicit filter).
             "(allow process-exec)\n"
@@ -624,6 +677,7 @@ __all__ = [
     "ProcessSandbox",
     "ResourceLimits",
     "SandboxedCommand",
+    "HIDDEN_READ_ROOTS",
     "SeatbeltSandbox",
     "PLATFORM_SANDBOX_KIND",
     "build_platform_default_sandbox",

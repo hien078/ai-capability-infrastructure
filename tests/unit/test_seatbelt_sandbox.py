@@ -72,6 +72,42 @@ class TestProfile:
         assert "(allow process-exec)" in profile
         assert "(allow process-fork)" in profile
 
+    def test_user_trees_and_home_contents_are_hidden(self, tmp_path: Path) -> None:
+        """File CONTENTS under /Users, /Volumes, the per-user temp tree,
+        root's home and the server's $HOME are denied (API keys, ssh keys,
+        other repos) — the bwrap "no $HOME/repo/data" property."""
+        profile = _sandbox(tmp_path).profile(tmp_path)
+        deny = next(
+            line for line in profile.splitlines() if line.startswith("(deny file-read-data")
+        )
+        for root in (*sandbox_mod.HIDDEN_READ_ROOTS, str(Path.home())):
+            assert f'(subpath "{os.path.normpath(root)}")' in deny
+
+    def test_workspace_and_interpreter_are_reallowed_after_the_deny(self, tmp_path: Path) -> None:
+        """SBPL: the last matching rule wins — the re-allow (workspace +
+        interpreter trees) must come AFTER the hidden-root deny."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        lines = _sandbox(tmp_path).profile(ws).splitlines()
+        deny_at = next(i for i, ln in enumerate(lines) if ln.startswith("(deny file-read-data"))
+        allow_at = next(i for i, ln in enumerate(lines) if ln.startswith("(allow file-read-data"))
+        assert allow_at > deny_at
+        assert f'(subpath "{os.path.realpath(ws)}")' in lines[allow_at]
+        assert f'(subpath "{os.path.realpath(tmp_path / "interp")}")' in lines[allow_at]
+
+    @pytest.mark.parametrize("ancestor", ["/", "/Users", "HOME"])
+    def test_a_prefix_that_contains_a_hidden_root_is_never_reallowed(
+        self, tmp_path: Path, ancestor: str
+    ) -> None:
+        """Re-allowing `/`, `/Users` or `$HOME` as an "interpreter prefix"
+        would re-open the hidden trees — such prefixes are dropped."""
+        path = str(Path.home()) if ancestor == "HOME" else ancestor
+        sandbox = _sandbox(tmp_path, ro_prefixes=[path], extra_ro_binds=[path])
+        lines = sandbox.profile(tmp_path).splitlines()
+        allow = next(ln for ln in lines if ln.startswith("(allow file-read-data"))
+        assert f'(subpath "{os.path.normpath(path)}")' not in allow
+        assert f'(subpath "{os.path.realpath(path)}")' not in allow
+
     def test_quote_in_workspace_path_is_refused_at_prepare(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

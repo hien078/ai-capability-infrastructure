@@ -102,6 +102,56 @@ def test_writes_land_only_in_the_workspace(tmp_path: Path, ws: LocalWorkspace) -
     assert (ws.root / "abs.txt").read_text(encoding="utf-8") == "absolute"
 
 
+# -- filesystem read boundary ------------------------------------------------------
+
+
+def test_hidden_trees_are_unreadable_but_the_workspace_is(tmp_path: Path) -> None:
+    """A secret OUTSIDE the workspace in a hidden tree cannot be read or
+    listed; the workspace (inside that same tree) and the interpreter can."""
+    secret_dir = tmp_path / "operator-home"
+    secret_dir.mkdir()
+    (secret_dir / "api-key.json").write_text('{"apiKey": "sk-not-real"}', encoding="utf-8")
+    sandbox = SeatbeltSandbox(extra_hidden_paths=[str(tmp_path)])
+    if sandbox.unavailable_reason() is not None:
+        pytest.skip("seatbelt sandbox unusable on this host")
+    ws = LocalWorkspace(tmp_path / "runs" / "run_a", sandbox=sandbox)
+    (ws.root / "own.txt").write_text("mine", encoding="utf-8")
+    result = _py(
+        ws,
+        "import json, os, sys\n"
+        "out = {'own': open('own.txt').read(), 'listing': len(os.listdir('.'))}\n"
+        f"for name, fn in [('read', lambda: open({str(secret_dir / 'api-key.json')!r}).read()),\n"
+        f"                 ('list', lambda: os.listdir({str(secret_dir)!r}))]:\n"
+        "    try:\n"
+        "        fn(); out[name] = 'READ'\n"
+        "    except Exception as e:\n"
+        "        out[name] = type(e).__name__\n"
+        "print(json.dumps(out))\n",
+    )
+    assert result.exit_code == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert out["own"] == "mine" and out["listing"] >= 1
+    assert out["read"] == "PermissionError"
+    assert out["list"] == "PermissionError"
+    assert "sk-not-real" not in result.stdout
+
+
+def test_server_home_listing_is_denied(ws: LocalWorkspace) -> None:
+    """The server user's $HOME (where API keys and other repos live) cannot
+    be listed or read from inside the sandbox."""
+    home = str(Path.home())
+    result = _py(
+        ws,
+        "import os, sys\n"
+        "try:\n"
+        f"    os.listdir({home!r}); print('LISTED')\n"
+        "except PermissionError:\n"
+        "    print('DENIED')\n",
+    )
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == "DENIED"
+
+
 # -- environment / identity -------------------------------------------------------
 
 
