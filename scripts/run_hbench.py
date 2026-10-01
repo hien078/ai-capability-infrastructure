@@ -40,6 +40,30 @@ outcomes?", not "does the model?"):
       private set isolates what a skill carrying NON-PUBLIC knowledge
       adds — the open axis of ADR-014 amendment 17 (public knowledge was
       proven ungated by the domain round: brand-palette 3/3 naked).
+  F — file-in-repo arm (E2B, --set private ONLY): arm K's wiring EXACTLY
+      (null capability plane, no preload) with ONE difference — the case's
+      skill text sits in the run workspace as a plain repo document
+      (``docs/standards/<skill_id>.md``, materialized into the F source
+      root before the run). The objective is NOT changed: a real repo does
+      not announce its docs, so the model must find (or miss) the file on
+      its own. F−K isolates what a passive in-repo document adds over no
+      document; R−F isolates push-into-context over discoverable-on-disk
+      — together they answer "is ACI's registry+router worth it over
+      docs-in-repo?" for non-public knowledge.
+  Bp — registry-routed preload arm (E2B, --set private ONLY): arm K + the
+      REAL registry capability plane pointed at the EXPERIMENT registry
+      copy (``--registry-db-url`` + ``--object-store-root``; the same
+      Container composition arms S/P use, fastembed semantics) with the
+      kernel's run-start preload ON — the §14 router picks from the
+      objective among the real corpus PLUS the two ingested private
+      skills (scripts/e2b_setup_registry.py). Per run the record carries
+      which skills were preloaded and whether the case's private skill
+      was among them, at which rank. Bp−R isolates registry+router over
+      the pinned handler; Bp−F isolates routed preload over a plain file.
+  Bq — registry-routed default arm (E2B, --set private ONLY): the same
+      experiment registry plane with the preload OFF — today's product
+      default (request_capability offered only). Bq−K isolates what the
+      OFF default actually delivers when the knowledge is non-public.
 
 The delta K−N is what the kernel adds. The headline metric is FALSE
 SUCCESS (§44): N reports "done" the verifier refutes; K can only report
@@ -65,7 +89,8 @@ Usage:
     ACI_AGENT_MODEL_API_KEY=... .venv/bin/python scripts/run_hbench.py \
         [--base-url http://localhost:20128/v1] [--model OneNexus/glm-5.3] \
         [--set verified|domain|private|horizon] [--cases multi-config-precedence,...] \
-        [--arms K,N,S,P,R] [--repeat 3] [--parallel 4] [--max-turns 12]
+        [--arms K,N,S,P,R,F,Bp,Bq] [--repeat 3] [--parallel 4] [--max-turns 12] \
+        [--registry-db-url URL] [--object-store-root DIR]
 
 Fixture sets (--set): 'verified' (default) = the 8 §80 multi/long fixtures;
 'domain' = the domain-knowledge fixtures (scripts/domain_tasks.py, verified
@@ -75,11 +100,12 @@ MCP manifest conventions, brand values, design tells). The domain set is
 the SKILL axis: run K vs P on it and the report records, per run, whether
 the fixture's INTENDED skill (DOMAIN_INTENDED_SKILLS) was preloaded.
 'private' = the private-knowledge fixtures (scripts/private_tasks.py,
-verified by scripts/verify_private_fixtures.py) — the E2 instrument: each
-fixture's rules are a fictional internal standard that did not exist
+verified by scripts/verify_private_fixtures.py) — the E2/E2B instrument:
+each fixture's rules are a fictional internal standard that did not exist
 before today, documented only in the fixture's private SKILL.md and pinned
-in the tests as sha256 digests. Arm R (the private-skill arm) requires
-this set; run K vs R on it for the E2 measurement (K−naked vs K+skill).
+in the tests as sha256 digests. Arms R/F/Bp/Bq require this set; run
+K,R,F,Bp,Bq on it for the E2B measurement (naked vs preloaded-skill vs
+file-in-repo vs registry-routed-preload vs registry-routed-default).
 'horizon' = the §80 long-horizon fixtures (scripts/horizon_tasks.py,
 verified by scripts/verify_horizon_fixtures.py with the STRONGER
 red-when-symptom-patched pin) — 8-10 file packages, symptom-only prompts,
@@ -205,6 +231,33 @@ PROCESS_PREFIXES = [sys.executable, "python -m pytest", "python3 -m pytest"]
 #: content-addressed object store: the same deployment the REST server runs.
 ACI_BENCH_DATABASE_URL = "postgresql+psycopg://aci:aci@localhost:5432/aci_bench"
 ACI_OBJECT_STORE_ROOT = REPO_ROOT / "data" / "objects"
+
+#: The databases an EXPERIMENT arm (Bp/Bq) must NEVER point at: `aci` is the
+#: dev/test DB (pytest fixtures accumulate there — once polluted, they ROUTED),
+#: `aci_bench` is the operational corpus + telemetry. Both live on the Linux
+#: box; an experiment copy (e.g. aci_e2b) is the only acceptable target.
+OPERATIONAL_DATABASES = frozenset({"aci", "aci_bench"})
+
+
+def database_name_from_url(url: str) -> str:
+    """The database name from a SQLAlchemy URL (the last path segment)."""
+    from urllib.parse import urlparse
+
+    return urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
+
+
+def refuse_operational_database(url: str) -> str | None:
+    """None when an experiment arm may use ``url``; otherwise the refusal
+    reason (the runner exits 2 on it — fail closed, never a warning)."""
+    name = database_name_from_url(url)
+    if name in OPERATIONAL_DATABASES:
+        return (
+            f"refusing to point an experiment arm at the database {name!r} — "
+            "aci/aci_bench are the dev-test and OPERATIONAL databases; use a "
+            "disposable experiment copy (e.g. aci_e2b)"
+        )
+    return None
+
 
 #: fixture name → (Appendix D case it most directly exercises)
 H_REFS: dict[str, str] = {
@@ -340,6 +393,9 @@ class _CountingCapabilityRuntime(CapabilityRuntime):
         self.requests = 0
         self.loaded: list[str] = []
         self.preloaded: list[str] = []
+        #: The run-scoped client (kept public for the registry arms' evidence
+        #: read-out: its ``decisions`` carry the kernel's kept/dropped ranks).
+        self.client = aci
 
     def preload(
         self, request: CapabilityRequest, snapshot: RuntimeStateSnapshot
@@ -383,6 +439,25 @@ def build_capability_container() -> Any:
         Settings(
             database_url=ACI_BENCH_DATABASE_URL,
             object_store_root=str(ACI_OBJECT_STORE_ROOT),
+            embedder="fastembed",
+        )
+    )
+
+
+def build_experiment_capability_container(database_url: str, object_store_root: str) -> Any:
+    """Arms Bp/Bq ONLY: the SAME registry + §14 router composition as
+    build_capability_container (the REST deployment shape, the semantic
+    embedder, the same Settings-default selection policy) pointed at the
+    EXPERIMENT registry copy — a disposable database + its object-store
+    copy, NEVER the operational aci_bench or the dev/test aci (main()
+    refuses those names before this is called)."""
+    from aci.adapters.inbound.rest.wiring import Container
+    from aci.config import Settings
+
+    return Container(
+        Settings(
+            database_url=database_url,
+            object_store_root=object_store_root,
             embedder="fastembed",
         )
     )
@@ -734,6 +809,182 @@ def run_private_arm(
     return record
 
 
+# ---------------------------------------------------------------------------
+# Arm F — file-in-repo (E2B, --set private ONLY): arm K's wiring EXACTLY, but
+# the case's skill text sits in the run workspace as a plain repo document.
+# NO capability plane, NO preload, NO hint in the objective — the model must
+# find (or miss) the file on its own, exactly as it would in a real repo.
+# ---------------------------------------------------------------------------
+
+
+def file_arm_docs_path(skill_id: str) -> str:
+    """Where arm F writes the case's skill text: ONE plain repo document."""
+    return f"docs/standards/{skill_id}.md"
+
+
+def materialize_file_arm_source(fixture: dict[str, Any], target: Path) -> Path:
+    """Arm F's source root: the fixture's files byte-identical to every other
+    arm's PLUS the case's skill text as one plain document at
+    ``docs/standards/<skill_id>.md``. The objective is NOT changed — a real
+    repo does not announce its docs, so nothing tells the model the file
+    exists. Returns the fixture's source directory."""
+    task_dir = target / str(fixture["name"])
+    task_dir.mkdir(parents=True, exist_ok=True)
+    for rel, content in fixture["files"].items():
+        path = task_dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    docs = task_dir / file_arm_docs_path(str(fixture["skill_id"]))
+    docs.parent.mkdir(parents=True, exist_ok=True)
+    docs.write_text(str(fixture["skill"]), encoding="utf-8")
+    return task_dir
+
+
+def run_file_arm(
+    fixture: dict[str, Any],
+    contract: SubtaskContract,
+    spec: Any,
+    gateway: OpenAICompatGateway,
+    runs: Path,
+    *,
+    max_turns: int,
+    sources_f: Path,
+    ablations: list[str] | None = None,
+    sandbox: ProcessSandbox | None = None,
+    trace_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Arm F = arm K's wiring EXACTLY (null capability plane, no preload,
+    same fixtures/tools/sandbox/max_turns/verification/turn-budget note)
+    with ONE difference: the run's workspace source is the F root
+    (``materialize_file_arm_source``), so the case's skill text is present
+    in the run workspace as a plain document at
+    ``docs/standards/<skill_id>.md``. F−K isolates what a passive in-repo
+    document adds over no document at all."""
+    record = run_kernel_arm(
+        fixture,
+        contract,
+        spec,
+        gateway,
+        sources_f,
+        runs,
+        max_turns=max_turns,
+        ablations=ablations,
+        trace_dir=trace_dir,
+        sandbox=sandbox,
+        arm="F",
+    )
+    record["docs_file"] = file_arm_docs_path(str(fixture["skill_id"]))
+    return record
+
+
+# ---------------------------------------------------------------------------
+# Arms Bp/Bq — registry-routed (E2B, --set private ONLY): arm K + the REAL
+# registry capability plane pointed at the EXPERIMENT registry copy (the
+# same Container composition arms S/P use), preload ON (Bp) / OFF (Bq).
+# ---------------------------------------------------------------------------
+
+
+def private_skill_evidence(client: Any, skill_id: str) -> dict[str, Any]:
+    """Per-run router evidence for the case's private skill, read from the
+    run-scoped registry client's selection decisions: ``kept`` entries are
+    what the kernel activated (in rank order), ``dropped`` entries were
+    routed but narrowed out (reason code). Absent from both = never routed.
+    ``private_skill_rank`` is the 1-based position among the kept entries of
+    the decision that selected it (the preload decision for Bp; whichever
+    model request loaded it for Bq)."""
+    decisions: list[dict[str, Any]] = []
+    selected = False
+    rank: int | None = None
+    drop_reason: str | None = None
+    for decision in getattr(client, "decisions", []):
+        kept = [
+            {
+                "capability_id": e.capability_id,
+                "version": e.version,
+                "score": e.score,
+                "reason": e.reason,
+            }
+            for e in decision.kept
+        ]
+        dropped = [
+            {
+                "capability_id": e.capability_id,
+                "version": e.version,
+                "score": e.score,
+                "reason": e.reason,
+            }
+            for e in decision.dropped
+        ]
+        decisions.append(
+            {
+                "kept": kept,
+                "dropped": dropped,
+                "scores_available": decision.scores_available,
+            }
+        )
+        if not selected:
+            for position, entry in enumerate(decision.kept, start=1):
+                if entry.capability_id == skill_id:
+                    selected = True
+                    rank = position
+        if drop_reason is None:
+            drop_reason = next(
+                (e.reason for e in decision.dropped if e.capability_id == skill_id), None
+            )
+    return {
+        "private_skill_selected": selected,
+        "private_skill_rank": rank,
+        "private_skill_drop_reason": drop_reason,
+        "capability_decisions": decisions,
+    }
+
+
+def run_registry_arm(
+    fixture: dict[str, Any],
+    contract: SubtaskContract,
+    spec: Any,
+    gateway: OpenAICompatGateway,
+    sources: Path,
+    runs: Path,
+    *,
+    max_turns: int,
+    container: Any,
+    sandbox: ProcessSandbox | None = None,
+    trace_dir: Path | None = None,
+    arm: str = "Bp",
+    preload_capabilities: bool = False,
+) -> dict[str, Any]:
+    """Arms Bp/Bq = arm K + the REAL registry capability plane pointed at
+    the EXPERIMENT registry copy (``container`` = the experiment Container
+    built by build_experiment_capability_container): the same run_kernel_arm
+    path arms S/P use — one run-scoped RegistryCapabilityClient per run, the
+    model OFFERED request_capability — with the kernel's run-start preload ON
+    (Bp) or OFF (Bq, today's product default). Beyond arm S/P's counters the
+    record carries the case's private-skill routing evidence
+    (``private_skill_evidence``): selected + rank among the kept, or the
+    narrowing's drop reason when routed but not kept."""
+    runtime = _skills_capability_runtime(container.agent_capability_clients)
+    record = run_kernel_arm(
+        fixture,
+        contract,
+        spec,
+        gateway,
+        sources,
+        runs,
+        max_turns=max_turns,
+        trace_dir=trace_dir,
+        sandbox=sandbox,
+        arm=arm,
+        capability_factory=_Factory(runtime),
+        preload_capabilities=preload_capabilities,
+    )
+    record["capability_requests"] = runtime.requests
+    record["skills_loaded"] = list(runtime.loaded)
+    record["skills_preloaded"] = list(runtime.preloaded)
+    record.update(private_skill_evidence(runtime.client, str(fixture["skill_id"])))
+    return record
+
+
 #: Recovery actions that end the run — not a repair/retry that was taken.
 _TERMINAL_ACTIONS = frozenset({"FAIL", "RETURN_PARTIAL", "ESCALATE"})
 _NO_MECHANISM = {
@@ -954,6 +1205,8 @@ def _run_one(
     trace_dir: Path | None = None,
     sandbox: ProcessSandbox | None = None,
     container: Any = None,
+    sources_f: Path | None = None,
+    registry_container: Any = None,
 ) -> dict[str, Any]:
     contract, spec = _contract_spec(fixture)
     gateway = OpenAICompatGateway(
@@ -1016,6 +1269,41 @@ def _run_one(
             sandbox=sandbox,
             trace_dir=trace_dir,
         )
+    elif arm == "F":
+        # Arm F = arm K's wiring exactly, but the workspace source is the F
+        # root (fixture files + the skill text as a plain repo document).
+        if sources_f is None:
+            raise ValueError("arm F needs its materialized source root (sources_f)")
+        record = run_file_arm(
+            fixture,
+            contract,
+            spec,
+            gateway,
+            runs,
+            max_turns=max_turns,
+            sources_f=sources_f,
+            ablations=ablations,
+            sandbox=sandbox,
+            trace_dir=trace_dir,
+        )
+    elif arm in ("Bp", "Bq"):
+        # Arms Bp/Bq = arm K + the REAL registry plane pointed at the
+        # EXPERIMENT registry copy; Bp preloads at run start, Bq (today's
+        # product default) offers request_capability only.
+        record = run_registry_arm(
+            fixture,
+            contract,
+            spec,
+            gateway,
+            sources,
+            runs,
+            max_turns=max_turns,
+            container=registry_container,
+            sandbox=sandbox,
+            trace_dir=trace_dir,
+            arm=arm,
+            preload_capabilities=arm == "Bp",
+        )
     else:
         record = run_naive_arm(
             fixture, contract, spec, gateway, sources, runs, max_turns=max_turns, sandbox=sandbox
@@ -1053,15 +1341,35 @@ def main(argv: list[str] | None = None) -> int:
             "fixture set: 'verified' = the 8 §80 multi/long fixtures (default), "
             "'domain' = the domain-knowledge fixtures (domain_tasks.py), "
             "'private' = the private-knowledge fixtures (private_tasks.py, the "
-            "E2 instrument — arm R's set), "
+            "E2/E2B instrument — arms R/F/Bp/Bq's set), "
             "'horizon' = the §80 long-horizon fixtures (horizon_tasks.py — "
             "verified fail-as-shipped/pass-when-fixed/red-when-symptom-patched)"
         ),
     )
-    parser.add_argument("--arms", default="K,N", help="comma subset of K,N,S,P,R")
+    parser.add_argument(
+        "--arms",
+        default="K,N",
+        help="comma subset of K,N,S,P,R,F,Bp,Bq (Bp/Bq: experiment registry arms)",
+    )
     parser.add_argument("--repeat", type=int, default=3, help="runs per case per arm (default 3)")
     parser.add_argument("--parallel", type=int, default=4, help="concurrent runs (default 4)")
     parser.add_argument("--max-turns", type=int, default=12)
+    parser.add_argument(
+        "--registry-db-url",
+        default="",
+        help=(
+            "EXPERIMENT registry database for arms Bp/Bq ONLY (a disposable copy "
+            "like aci_e2b — NEVER aci/aci_bench, refused; required with Bp/Bq)"
+        ),
+    )
+    parser.add_argument(
+        "--object-store-root",
+        default="",
+        help=(
+            "object-store root matching --registry-db-url for arms Bp/Bq ONLY "
+            "(the experiment copy's blobs; required with Bp/Bq)"
+        ),
+    )
     parser.add_argument(
         "--ablate",
         default="",
@@ -1094,16 +1402,46 @@ def main(argv: list[str] | None = None) -> int:
     if not api_key:
         print("no API key — set ACI_AGENT_MODEL_API_KEY or --api-key", file=sys.stderr)
         return 2
-    arms = [a.strip().upper() for a in args.arms.split(",") if a.strip()]
-    unknown_arms = [a for a in arms if a not in ("K", "N", "S", "P", "R")]
+    arms = []
+    for raw in args.arms.split(","):
+        label = raw.strip().upper()
+        if not label:
+            continue
+        # Canonical labels: the experiment arms are Bp/Bq (mixed case reads
+        # better in the report than BP/BQ); everything else is uppercase.
+        arms.append("Bp" if label == "BP" else "Bq" if label == "BQ" else label)
+    unknown_arms = [a for a in arms if a not in ("K", "N", "S", "P", "R", "F", "Bp", "Bq")]
     if unknown_arms:
-        print(f"unknown arms {unknown_arms!r} — pick from K,N,S,P,R", file=sys.stderr)
+        print(f"unknown arms {unknown_arms!r} — pick from K,N,S,P,R,F,Bp,Bq", file=sys.stderr)
         return 2
     if "R" in arms and args.set != "private":
         # Arm R preloads the case's private skill (fixture['skill']) — the
         # private set is the only one that carries one.
         print("arm R needs --set private (the private-skill fixtures)", file=sys.stderr)
         return 2
+    if "F" in arms and args.set != "private":
+        # Arm F writes the case's skill text (fixture['skill']) into the
+        # workspace — only the private set carries one.
+        print("arm F needs --set private (the private-skill fixtures)", file=sys.stderr)
+        return 2
+    if "Bp" in arms or "Bq" in arms:
+        if args.set != "private":
+            print(
+                "arms Bp/Bq need --set private (they route the private-skill fixtures)",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.registry_db_url or not args.object_store_root:
+            print(
+                "arms Bp/Bq need BOTH --registry-db-url and --object-store-root "
+                "(the EXPERIMENT registry copy + its blobs — never a guess)",
+                file=sys.stderr,
+            )
+            return 2
+        refusal = refuse_operational_database(args.registry_db_url)
+        if refusal is not None:
+            print(refusal, file=sys.stderr)
+            return 2
     ablations = [a.strip() for a in args.ablate.split(",") if a.strip()]
     unknown = [a for a in ablations if a not in ABLATIONS]
     if unknown:
@@ -1120,6 +1458,19 @@ def main(argv: list[str] | None = None) -> int:
         container = build_capability_container()
         print(
             "arm S/P: registry capability plane wired (operational DB aci_bench, "
+            "fastembed, one run-scoped client per run)",
+            flush=True,
+        )
+    # Arms Bp/Bq registry plane: the EXPERIMENT copy (a SEPARATE Container —
+    # both can coexist; S/P keep aci_bench untouched).
+    registry_container = None
+    if "Bp" in arms or "Bq" in arms:
+        registry_container = build_experiment_capability_container(
+            args.registry_db_url, args.object_store_root
+        )
+        print(
+            "arm Bp/Bq: EXPERIMENT registry capability plane wired "
+            f"(database {database_name_from_url(args.registry_db_url)!r}, "
             "fastembed, one run-scoped client per run)",
             flush=True,
         )
@@ -1153,6 +1504,14 @@ def main(argv: list[str] | None = None) -> int:
             path = target / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
+    # Arm F's source root: the fixture files + the case's skill text as ONE
+    # plain repo document (materialized once, before the pool starts — the
+    # per-run workspace copies come from provision_workspace as usual).
+    sources_f: Path | None = None
+    if "F" in arms:
+        sources_f = root / "sources-f"
+        for fixture in fixtures:
+            materialize_file_arm_source(fixture, sources_f)
 
     jobs = [
         (fixture, arm, repeat)
@@ -1179,6 +1538,8 @@ def main(argv: list[str] | None = None) -> int:
                 trace_dir=trace_dir,
                 sandbox=sandbox,
                 container=container,
+                sources_f=sources_f,
+                registry_container=registry_container,
             ): (fixture, arm, repeat)
             for fixture, arm, repeat in jobs
         }
@@ -1205,6 +1566,14 @@ def main(argv: list[str] | None = None) -> int:
                     "tokens_out": 0,
                     "capability_requests": 0,
                     "skills_loaded": [],
+                    # The experiment arms' honest zeros (a crashed run routed
+                    # nothing, preloaded nothing, wrote no docs file).
+                    "skills_preloaded": [],
+                    "private_skill_selected": False,
+                    "private_skill_rank": None,
+                    "private_skill_drop_reason": None,
+                    "capability_decisions": [],
+                    "docs_file": None,
                     **_NO_MECHANISM,
                 }
             record["repeat"] = repeat
@@ -1285,9 +1654,13 @@ def main(argv: list[str] | None = None) -> int:
             "protocol text), so S-K isolates the registry-skill contribution; "
             "P = S + the run-start preload (skills routed on the objective "
             "and loaded BEFORE turn 1), so P-S isolates preload-vs-offered; "
-            "N shares K's prompt base minus the capability protocol. This "
-            "round carries the turn-budget note and the bwrap sandbox — NOT "
-            "comparable to rounds <= 3."
+            "N shares K's prompt base minus the capability protocol. "
+            "E2B arms (--set private): F = K's wiring + the case's skill text "
+            "as a plain repo document (objective unchanged); Bp = K + the "
+            "EXPERIMENT registry plane with the preload ON; Bq = the same "
+            "plane with the preload OFF (today's product default). This "
+            "round carries the turn-budget note and the "
+            f"{args.sandbox} sandbox — NOT comparable to rounds <= 3."
         ),
     }
     if container is not None:
@@ -1296,6 +1669,22 @@ def main(argv: list[str] | None = None) -> int:
             "embedder": "fastembed",
             "object_store_root": str(ACI_OBJECT_STORE_ROOT),
             "selection_policy": "Settings defaults (agent_capability_policy)",
+        }
+    if registry_container is not None:
+        report["arm_bp_bq_registry"] = {
+            "database": database_name_from_url(args.registry_db_url),
+            "embedder": "fastembed",
+            "object_store_root": str(Path(args.object_store_root)),
+            "selection_policy": "Settings defaults (agent_capability_policy)",
+            "note": (
+                "EXPERIMENT copy (disposable) — the private skills were ingested "
+                "by scripts/e2b_setup_registry.py; S/P above stay on aci_bench"
+            ),
+        }
+    if sources_f is not None:
+        report["arm_f_docs"] = {
+            "path": "docs/standards/<skill_id>.md (in the run workspace)",
+            "objective_changed": False,
         }
     if args.set == "domain":
         # The skill axis: which production skill each fixture's fix needs —
