@@ -677,9 +677,12 @@ class TestApprovalNeverWidensAuthority:
         self, tmp_path: Path
     ) -> None:
         """Even if a pending out-of-scope call reached resume (a forged
-        checkpoint with a recomputed binding), the one-shot approval only
-        satisfies REQUIRE_APPROVAL — authority still DENIES the write."""
-        from aci.runtime.checkpoints import operation_hash
+        checkpoint with EVERY binding recomputed — the m9 batch digest
+        refuses a lazy tamper, but a store-write attacker can reforge it
+        consistently), the one-shot approval only satisfies REQUIRE_APPROVAL
+        — authority still DENIES the write. The digest and authority are
+        two independent layers; this pins the second."""
+        from aci.runtime.checkpoints import operation_hash, pending_calls_digest
 
         model = ScriptedModel(
             [_write("c1", "out/app.py"), FinalCandidate(summary="ok", changes=["out/app.py"])]
@@ -695,7 +698,14 @@ class TestApprovalNeverWidensAuthority:
         forged = checkpoint.model_copy(
             update={
                 "pending": checkpoint.pending.model_copy(
-                    update={"calls": [evil], "operation_hash": operation_hash(evil)}
+                    update={
+                        "calls": [evil],
+                        "operation_hash": operation_hash(evil),
+                        # ADV-3 (m9): recomputed so the forge is INTERNALLY
+                        # consistent — a stale digest would be refused at
+                        # validation (see test_agent_run_adversarial.py).
+                        "batch_digest": pending_calls_digest([evil]),
+                    }
                 )
             }
         )

@@ -52,6 +52,7 @@ from aci.runtime.checkpoints import (
     CheckpointError,
     PendingInterrupt,
     operation_hash,
+    pending_calls_digest,
     validate_for_resume,
 )
 from aci.runtime.context_engine import AssembledContext, estimate_tokens, select_transcript
@@ -549,6 +550,10 @@ class HarnessKernel:
             approval_id=approval_id,
             gated_call_id=gate.call.call_id,
             operation_hash=operation_hash(gate.call),
+            # ADV-3 (m9): bind the WHOLE unexecuted batch, not only the gated
+            # call — resume verifies this digest and refuses a tampered (or
+            # pre-binding) checkpoint before anything executes.
+            batch_digest=pending_calls_digest(gate.remaining),
             calls=list(gate.remaining),
             reason=gate.reason,
         )

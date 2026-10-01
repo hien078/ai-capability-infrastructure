@@ -13,6 +13,7 @@ contract + spec + turn ceiling + usage so far, and the pending interrupt
 
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -38,6 +39,23 @@ def operation_hash(call: ToolCall) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def pending_calls_digest(calls: Sequence[ToolCall]) -> str:
+    """ADV-3 (m9) — what an approval binds to BEYOND the gated call: the
+    WHOLE unexecuted pending batch. Canonical JSON of every pending call
+    (id + tool + arguments, order included), sha256 — computed at pause
+    time, stored on the checkpoint, verified by ``validate_for_resume``. A
+    tampered payload that keeps the gated call byte-identical but swaps or
+    appends a TRAILING call no longer validates, so a one-shot approval can
+    never be made to execute calls the client never saw."""
+    canonical = json.dumps(
+        [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": c.arguments} for c in calls],
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class PendingInterrupt(BaseModel):
     """What a paused run is waiting for (§13.6 / §7.5).
 
@@ -54,6 +72,14 @@ class PendingInterrupt(BaseModel):
     gated_call_id: str | None = None
     operation_hash: str | None = None
     calls: list[ToolCall] = Field(default_factory=list)
+    #: ADV-3 (m9): sha256 over the canonical JSON of ``calls`` — the whole
+    #: pending batch, not only the gated call (whose binding is
+    #: ``gated_call_id`` + ``operation_hash``). Computed at pause time,
+    #: verified by ``validate_for_resume``; a checkpoint whose approval pause
+    #: carries none (written before the binding existed) is refused rather
+    #: than trusted. Clarification pauses never execute anything from the
+    #: checkpoint, so they carry no digest.
+    batch_digest: str | None = None
     reason: str = ""
     question: str = ""
 
@@ -197,9 +223,12 @@ class CheckpointCoordinator:
 
 def validate_for_resume(checkpoint: Checkpoint) -> Checkpoint:
     """§17.4 steps 1–2 for a PAUSE checkpoint: schema version, strict JSON
-    round-trip, and the self-contained resume context. Grant expiry is NOT
-    a refusal here — expired grants stay expired and the resumed run ends
-    AUTHORITY_EXPIRED on its next tool batch (never renewed by a resume)."""
+    round-trip, the self-contained resume context, and — for an approval
+    pause — BOTH approval bindings: the gated call (id + operation hash) and
+    the whole pending batch (``batch_digest``, ADV-3/m9). Grant expiry is
+    NOT a refusal here — expired grants stay expired and the resumed run
+    ends AUTHORITY_EXPIRED on its next tool batch (never renewed by a
+    resume)."""
     if checkpoint.schema_version != CHECKPOINT_SCHEMA_VERSION:
         raise CheckpointError(
             f"checkpoint schema {checkpoint.schema_version} != "
@@ -226,6 +255,21 @@ def validate_for_resume(checkpoint: Checkpoint) -> Checkpoint:
             raise CheckpointError(
                 f"checkpoint {checkpoint.checkpoint_id}: pending operation does not match "
                 "its approval binding (§27.4)"
+            )
+        if pending.batch_digest is None:
+            # Not provably safe: without the digest nothing binds the calls
+            # BEHIND the gated one, so a tampered batch could ride a one-shot
+            # approval (ADV-3). Refuse — never trust a pre-binding pause.
+            raise CheckpointError(
+                f"checkpoint {checkpoint.checkpoint_id}: the pending batch carries no "
+                "integrity digest (written before the batch-integrity binding) — resume "
+                "refused; revise the run instead"
+            )
+        if pending_calls_digest(pending.calls) != pending.batch_digest:
+            raise CheckpointError(
+                f"checkpoint {checkpoint.checkpoint_id}: the pending batch does not match "
+                "its integrity digest (tampered checkpoint?) — resume refused, nothing "
+                "executed"
             )
     return restored
 
