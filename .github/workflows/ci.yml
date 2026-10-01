@@ -141,4 +141,4 @@ jobs:
             condition = "AND"
             paths = ['''^tests/unit/test_aci_worker_queue(_darwin)?\.py$''']
             regexTarget = "line"
-            regexes = ['''"unit_token": "0123456789abcdef"''']
+            regexes = ['''"unit_token": "[0-9a-f]{16}"''']
