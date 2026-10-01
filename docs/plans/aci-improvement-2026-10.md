@@ -149,11 +149,29 @@ E3 ✗      → bất kể E1/E2: không xây thêm gì hướng người dùng;
   tập cũ giữ vai trò regression/dev.
 - Mọi PR đổi reranker/embedder/composer kèm bảng paired A/B trên held-out + dev.
 
+> **TRẠNG THÁI (2026-10-02, đêm): A/B PAIRED ĐÃ CHẠY — `skip-oversized` BỊ CHẶN, default giữ
+> `stop`.** Instrument committed `scripts/routing_replay.py` (m7, main 04:26) + 90 case
+> (heldout 30 + dev 31 + kernel 29), fastembed, `aci_bench` read-only, deterministic, tiêu
+> chí pre-registered in instrument. (a) heldout hitB 17→21 ✓; (b) 0 hit→miss ✓; (c) 2 case
+> thu được i>a ✗ → **ADOPT = False** — skip lấp đầy mọi bundle (+87% token), phá abstention
+> (2/4→0/4), misroutes 5→11. NaN-fix byte-identity: replay pre-fix `3696a7c` vs HEAD giống
+> nhau từng byte 90/90 case. Chi tiết: `data/aci-improvement/m7-routing-ab-result.md`;
+> JSON `data/routing-replay/*.json`. Bài học cho đề xuất composer tiếp theo: abstain theo
+> judgment (confidence floor), không theo budget accident.
+
 ### 3.2 Feedback completeness (sau B)
 
 - Nối `CapabilityFeedback` sink trên REST; đo tỉ lệ run có chuỗi evidence đầy đủ
   route → bundle → activation → verdict (quan sát, không nhân quả). Nếu run events đủ làm cầu,
   không mở migration mới.
+
+> **TRẠNG THÁI (2026-10-02, đêm): BASELINE ĐÃ ĐO (instrument m8, main `764611d`) — nửa
+> wiring còn treo.** Agent-run chain complete 2/2 plane-touching (window-linked, pre-B);
+> bundle outcome coverage **0.1502** (44/293; opencode 38, rest-client 4, mcp-client 2);
+> **0 §33 outcome trên bundle harness-kernel** — `CapabilityFeedback` seam được gọi nhưng
+> chưa nối trên REST (việc wiring còn lại, không cần migration, verdict kernel = MỘT
+> source theo §33/ADR-010). V5 (§3.4) giữ hoãn: coverage 15% ≠ ~80%. Chi tiết:
+> `data/aci-improvement/m8-evidence-completeness-result.md`.
 
 ### 3.3 V4 service theo nhu cầu thật
 
