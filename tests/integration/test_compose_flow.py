@@ -172,12 +172,13 @@ def test_full_chain_composes_checked_bundle(
         TaskDescriptor(task_text="debug python tracebacks"), retrieval.candidates, _ctx()
     )
     resolution = resolver.resolve(reranked.ranked)
-    bundle = composer.compose(
+    composition = composer.compose(
         resolution,
         RouteCapabilitiesCommand(task_text="debug python and verify regression"),
         route_run_id="route_test",
         now=NOW,
     )
+    bundle = composition.bundle
 
     # CHECKS re-roles the verifier; debug stays primary (higher rank).
     roles = {i.capability_id: i.role for i in bundle.items}
@@ -185,6 +186,12 @@ def test_full_chain_composes_checked_bundle(
     assert roles[cap_verify] == "check"
     assert bundle.execution_order[0] == cap_debug
     assert bundle.budget is not None and bundle.budget.max_items == 5
+
+    # Composer v2 costs each item on its real SKILL.md size (manifest
+    # metadata), and the trace says so per item.
+    assert composition.trace.version == "2"
+    sources = {c.capability_id: c.estimate_source for c in composition.trace.items}
+    assert sources == {cap_debug: "artifact_entry", cap_verify: "artifact_entry"}
 
     # Version + digest pinning against the live registry (§52).
     for item in bundle.items:
@@ -226,9 +233,10 @@ def test_conflict_drops_lower_ranked_in_live_chain(
         TaskDescriptor(task_text="debug python"), retrieval.candidates, _ctx()
     )
     resolution = resolver.resolve(reranked.ranked)
-    bundle = composer.compose(
+    composition = composer.compose(
         resolution, RouteCapabilitiesCommand(task_text="debug python"), route_run_id="r", now=NOW
     )
+    bundle = composition.bundle
 
     # No conflicting items in the bundle (§52 acceptance).
     ids = [i.capability_id for i in bundle.items]
@@ -267,9 +275,10 @@ def test_requires_without_active_release_yields_empty_bundle(
         TaskDescriptor(task_text="debug python"), retrieval.candidates, _ctx()
     )
     resolution = resolver.resolve(reranked.ranked)
-    bundle = composer.compose(
+    composition = composer.compose(
         resolution, RouteCapabilitiesCommand(task_text="debug python"), route_run_id="r", now=NOW
     )
+    bundle = composition.bundle
 
     # Dependencies valid (§52): the dependent is dropped, and an empty bundle
     # is a normal successful result (§19.1, ADR-008).

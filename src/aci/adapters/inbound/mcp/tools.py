@@ -24,6 +24,7 @@ from aci.application.route_capabilities import RouteCapabilitiesService
 from aci.application.search_capabilities import SearchCapabilitiesService
 from aci.domain.capability.errors import DomainError
 from aci.domain.capability.models import (
+    DEFAULT_MAX_CONTEXT_TOKENS,
     CapabilityKind,
     OutcomeEvidence,
     OutcomeVerdict,
@@ -80,7 +81,7 @@ def make_route_tool(service: RouteCapabilitiesService) -> Callable[..., RouteRes
         frameworks: list[str] | None = None,
         phase: str | None = None,
         max_items: _MAX_ITEMS = 5,
-        max_context_tokens: _MAX_TOKENS = 6000,
+        max_context_tokens: _MAX_TOKENS = DEFAULT_MAX_CONTEXT_TOKENS,
     ) -> RouteResult:
         """Route a task to 0-5 production skills.
 

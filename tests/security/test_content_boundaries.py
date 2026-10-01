@@ -20,10 +20,12 @@ from aci.adapters.outbound.postgres.repositories import (
     SqlAlchemyArtifactStore,
     SqlAlchemyCapabilityRepository,
 )
-from aci.domain.capability.models import TaskContext
+from aci.domain.capability.models import RouteCapabilitiesCommand, TaskContext
 from aci.domain.policy.models import EligibleCandidate, RoutingRequestContext
 from aci.domain.routing.models import ScoredCandidate, TaskDescriptor
 from aci.providers.skills.ingestion import SkillIngestionService
+from aci.routing.composer import MinimalBundleComposer
+from aci.routing.dependencies import DefaultDependencyResolver
 from aci.routing.rerankers import HeuristicReranker
 from aci.routing.retrieval import EmbeddingRetriever, build_trusted_document
 
@@ -204,6 +206,57 @@ def test_adversarial_body_cannot_boost_ranking(
     ranked = reranker.rerank(task, [adversarial, twin], request_context())
     scores = sorted(r.score for r in ranked.ranked)
     assert scores[1] - scores[0] == 0.0
+
+
+def test_composer_budgets_on_body_size_without_seeing_body(
+    ingestion: SkillIngestionService,
+    capability_repo: SqlAlchemyCapabilityRepository,
+    retriever: EmbeddingRetriever,
+    reranker: HeuristicReranker,
+    resolver: DefaultDependencyResolver,
+    composer: MinimalBundleComposer,
+    tmp_path: Path,
+) -> None:
+    """Composer v2 (§19.1) charges the real SKILL.md size — and only its size.
+
+    The size comes from artifact-manifest metadata; the body never enters any
+    stage input (retrieval/rerank/resolution ``document_text``) nor the
+    persisted composition trace, even when the body is large and hostile.
+    """
+    name = uid("sec-size")
+    body = "\n".join([EXFIL_BODY, RANK_BODY] * 40)  # ~19 KB of hostile text
+    src = write_skill(tmp_path, name, "calibrates resonance manifolds", body)
+    skill_bytes = (src / "SKILL.md").read_bytes()
+    capability_id, _, doc_text = trusted_text(ingestion, capability_repo, src)
+    version = capability_repo.get_version(capability_id, "1.0.0")
+    assert version is not None
+
+    hits = retriever.retrieve(
+        "calibrate resonance manifold", [eligible(capability_id, version.content_digest)], limit=5
+    )
+    task = TaskDescriptor(task_text="calibrate resonance manifold", context=TaskContext())
+    ranked = reranker.rerank(task, hits.candidates, request_context())
+    resolution = resolver.resolve(ranked.ranked)
+    stage_texts = (
+        [s.document_text for s in hits.candidates]
+        + [r.document_text for r in ranked.ranked]
+        + [r.document_text for r in resolution.selected]
+    )
+    assert stage_texts and all(t == doc_text for t in stage_texts)
+
+    composition = composer.compose(
+        resolution,
+        RouteCapabilitiesCommand(task_text="calibrate", max_context_tokens=100_000),
+        route_run_id="route_sec",
+        now=NOW,
+    )
+    (cost,) = composition.trace.items
+    assert cost.estimate_source == "artifact_entry"
+    assert cost.estimated_tokens == -(-len(skill_bytes) // 4)  # real size, not the summary
+    assert cost.estimated_tokens > 10 * len(doc_text) // 4
+    persisted = composition.trace.model_dump_json()
+    for marker in ("evil.example", "AWS_SECRET_ACCESS_KEY", "RANK BOOST", "ignore all"):
+        assert marker not in persisted
 
 
 def test_unsafe_script_supporting_file_is_inert_bytes(

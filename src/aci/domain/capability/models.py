@@ -227,11 +227,21 @@ class SearchCapabilitiesQuery(BaseModel):
     limit: int = Field(default=20, ge=1, le=100)
 
 
+#: Default bundle context budget in tokens (§19.1; ADR-008) — the ONE place
+#: every surface (REST, MCP, command, bundle record) takes it from. Composer v2
+#: charges real entry-file size, so the budget now binds: 8000 (was 6000, set
+#: when the summary-based estimate made the budget a no-op) clears the p90
+#: single-skill size of the production corpus (~6.7k tokens) — a default below
+#: it makes ~10% of skills unroutable — and recovered 2 of the 3 DEV_CASES
+#: hits 6000 loses, at ~1/3 of the context v1 actually shipped.
+DEFAULT_MAX_CONTEXT_TOKENS = 8000
+
+
 class RouteCapabilitiesCommand(BaseModel):
     task_text: str = Field(min_length=1, max_length=8000)
     context: TaskContext = Field(default_factory=TaskContext)
     max_items: int = Field(default=5, ge=0, le=5)
-    max_context_tokens: int = Field(default=6000, ge=0)
+    max_context_tokens: int = Field(default=DEFAULT_MAX_CONTEXT_TOKENS, ge=0)
     allowed_kinds: list[CapabilityKind] = Field(default_factory=_default_allowed_kinds)
 
 
@@ -278,7 +288,7 @@ class BundleBudget(BaseModel):
     model_config = {"frozen": True}
 
     max_items: int = Field(default=5, ge=0, le=5)
-    max_context_tokens: int = Field(default=6000, ge=0)
+    max_context_tokens: int = Field(default=DEFAULT_MAX_CONTEXT_TOKENS, ge=0)
 
 
 class CapabilityBundle(BaseModel):

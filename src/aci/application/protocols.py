@@ -38,6 +38,7 @@ from aci.domain.policy.models import (
 )
 from aci.domain.provenance.models import LicenseAssessment, SecurityAssessment
 from aci.domain.routing.models import (
+    CompositionResult,
     RankedCandidate,
     RerankResult,
     ResolutionResult,
@@ -230,7 +231,19 @@ class BundleComposer(Protocol):
         *,
         route_run_id: str,
         now: datetime,
-    ) -> CapabilityBundle: ...
+    ) -> CompositionResult: ...
+
+
+class PayloadSizeSource(Protocol):
+    """Byte size of the entry file a client loads per (capability_id, version).
+
+    Sizes come from the immutable artifact manifest (``ArtifactFile.size_bytes``)
+    — metadata only. Implementations must never read blob content: the composer
+    budgets on sizes, and raw SKILL.md bodies stay unreachable by routing
+    (§16.1/§17.1; ADR-008/009). Pairs with no known size are simply absent.
+    """
+
+    def entry_sizes(self, pairs: list[tuple[str, str]]) -> dict[tuple[str, str], int]: ...
 
 
 class RouteRunRepository(Protocol):

@@ -128,6 +128,50 @@ class ResolutionResult(BaseModel):
     trace: ResolutionTrace
 
 
+#: Where a bundle item's context-cost estimate came from (§19.1 budget).
+#: ``artifact_entry`` = byte size of the entry file the client actually loads
+#: (artifact manifest metadata — never the file's content); the other two are
+#: fallbacks when no size is known: the trusted routing summary's length, or
+#: a flat default when even that is empty.
+TokenEstimateSource = Literal["artifact_entry", "routing_summary", "default"]
+#: Which budget ended composition early.
+CompositionStopReason = Literal["max_items", "max_context_tokens"]
+
+
+class ComposedItemCost(BaseModel):
+    """One resolved item as the composer costed it (§14 trace, §19.1)."""
+
+    model_config = {"frozen": True}
+
+    capability_id: str
+    version: str
+    estimated_tokens: int = Field(ge=0)
+    estimate_source: TokenEstimateSource
+    included: bool
+
+
+class CompositionTrace(BaseModel):
+    """Trace data for the composition stage (§14; §52: version in trace)."""
+
+    model_config = {"frozen": True}
+
+    implementation: str
+    version: str
+    max_items: int
+    max_context_tokens: int
+    spent_tokens: int = Field(ge=0)
+    #: Which budget ended composition early; None = every resolved item fit.
+    stop_reason: CompositionStopReason | None = None
+    items: list[ComposedItemCost] = Field(default_factory=list)
+
+
+class CompositionResult(BaseModel):
+    model_config = {"frozen": True}
+
+    bundle: CapabilityBundle
+    trace: CompositionTrace
+
+
 class RouteRun(BaseModel):
     """Persisted telemetry for one routing request (plan §36).
 

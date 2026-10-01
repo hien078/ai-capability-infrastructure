@@ -19,6 +19,7 @@ from sqlalchemy import Engine
 from aci.adapters.inbound.rest.wiring import Container
 from aci.config import Settings
 from aci.control_plane.promotion.service import PromotionService
+from aci.domain.capability.models import DEFAULT_MAX_CONTEXT_TOKENS
 from aci.main import create_app
 from aci.providers.skills.ingestion import SkillIngestionService
 
@@ -93,9 +94,10 @@ def plugin_route_body(task_text: str) -> dict[str, object]:
     return {
         "task": {"text": task_text},
         "context": {"language": "python", "frameworks": ["fastapi"], "phase": "debugging"},
+        # No max_context_tokens: the plugin leaves it unset (JSON drops
+        # undefined) so the server's single default budget applies.
         "constraints": {
             "max_items": 5,
-            "max_context_tokens": 6000,
             "allowed_kinds": ["skill"],
         },
         "principal_id": "opencode",
@@ -122,6 +124,8 @@ def test_plugin_route_contract_round_trip(
     # Fields the plugin reads: run id for metadata, bundle id + item ids to inject.
     assert body["route_run_id"].startswith("route_")
     assert body["bundle"]["bundle_id"].startswith("bun_")
+    # Budget omitted by the plugin → the server's single default applies.
+    assert body["bundle"]["budget"]["max_context_tokens"] == DEFAULT_MAX_CONTEXT_TOKENS
     assert body["bundle"]["items"], "expected the promoted skill to be selected"
     assert body["bundle"]["items"][0]["capability_id"] == cap
     for item in body["bundle"]["items"]:

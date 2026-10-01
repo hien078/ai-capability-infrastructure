@@ -145,10 +145,19 @@ def request_context() -> RequestContext:
     )
 
 
+class FakePayloadSizes:
+    def __init__(self, sizes: dict[str, int]) -> None:
+        self._sizes = sizes
+
+    def entry_sizes(self, pairs: list[tuple[str, str]]) -> dict[tuple[str, str], int]:
+        return {p: self._sizes[p[0]] for p in pairs if p[0] in self._sizes}
+
+
 def make_service(
     loader: FakeLoader,
     *,
     snapshots: FakePolicySnapshots | None = None,
+    composer: MinimalBundleComposer | None = None,
 ) -> tuple[RouteCapabilitiesService, FakeRouteRuns, FakeBundles, FakeRetriever]:
     runs = FakeRouteRuns()
     bundles = FakeBundles()
@@ -159,7 +168,7 @@ def make_service(
         retriever=retriever,
         reranker=HeuristicReranker(),
         resolver=FakeResolver(),
-        composer=MinimalBundleComposer(),
+        composer=composer or MinimalBundleComposer(),
         policy_snapshots=snapshots or FakePolicySnapshots(),
         route_runs=runs,
         bundles=bundles,
@@ -310,3 +319,36 @@ def test_route_empty_registry_is_valid_success() -> None:
     assert result.bundle.items == []
     assert result.bundle.bundle_id in bundles.bundles
     assert runs.runs[result.route_run_id].eligible_count == 0
+
+
+def test_route_run_records_composer_version_and_estimate_sources() -> None:
+    """§14/§52: the composition stage trace + composer v2 land in route_runs,
+    so real-size vs. fallback costing is auditable per item."""
+    loader = FakeLoader([candidate("cap-debug")])
+    composer = MinimalBundleComposer(FakePayloadSizes({"cap-debug": 8_000}))
+    service, runs, _, _ = make_service(loader, composer=composer)
+    result = service.route(
+        RouteCapabilitiesCommand(task_text="debug python tracebacks", max_context_tokens=6000),
+        RoutingRequestContext(
+            client=ClientDescriptor(type="rest-client"),
+            scope=ScopeContext(principal_id="p-1"),
+            request_id="req_1",
+        ),
+        request=request_context(),
+        now=NOW,
+    )
+    run = runs.runs[result.route_run_id]
+    assert run.composer_version == "2"
+    composition = run.stages["composition"]
+    assert composition["version"] == "2"
+    assert composition["max_context_tokens"] == 6000
+    assert composition["spent_tokens"] == 2000
+    assert composition["items"] == [
+        {
+            "capability_id": "cap-debug",
+            "version": "1.0.0",
+            "estimated_tokens": 2000,
+            "estimate_source": "artifact_entry",
+            "included": True,
+        }
+    ]

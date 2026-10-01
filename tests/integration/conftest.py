@@ -43,6 +43,7 @@ from aci.adapters.outbound.postgres.source_records import (  # noqa: E402
     SqlAlchemySourceRecordRepository,
 )
 from aci.application.list_candidates import ProductionCandidateLoader  # noqa: E402
+from aci.application.payload_sizes import ArtifactPayloadSizes  # noqa: E402
 from aci.application.report_outcome import ReportOutcomeService  # noqa: E402
 from aci.application.route_capabilities import RouteCapabilitiesService  # noqa: E402
 from aci.application.search_capabilities import SearchCapabilitiesService  # noqa: E402
@@ -189,8 +190,12 @@ def resolver(
 
 
 @pytest.fixture()
-def composer() -> MinimalBundleComposer:
-    return MinimalBundleComposer()
+def composer(
+    capability_repo: SqlAlchemyCapabilityRepository,
+    artifact_store: SqlAlchemyArtifactStore,
+) -> MinimalBundleComposer:
+    # Mirrors production wiring: budget on real entry-file sizes.
+    return MinimalBundleComposer(ArtifactPayloadSizes(capability_repo, artifact_store))
 
 
 @pytest.fixture()

@@ -9,7 +9,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from aci.domain.capability.models import CapabilityKind, TaskContext, VerdictSource
+from aci.domain.capability.models import (
+    DEFAULT_MAX_CONTEXT_TOKENS,
+    CapabilityKind,
+    TaskContext,
+    VerdictSource,
+)
 
 
 def _default_kinds() -> list[CapabilityKind]:
@@ -41,7 +46,7 @@ class TaskIn(BaseModel):
 
 class RouteConstraintsIn(BaseModel):
     max_items: int = Field(default=5, ge=0, le=5)
-    max_context_tokens: int = Field(default=6000, ge=0)
+    max_context_tokens: int = Field(default=DEFAULT_MAX_CONTEXT_TOKENS, ge=0)
     allowed_kinds: list[CapabilityKind] = Field(default_factory=_default_kinds)
 
 

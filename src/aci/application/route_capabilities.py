@@ -80,9 +80,10 @@ class RouteCapabilitiesService:
 
         # 5. Dependency resolution (§18), then minimal composition (§19).
         resolution = self._resolver.resolve(rerank.ranked)
-        bundle = self._composer.compose(
+        composition = self._composer.compose(
             resolution, command, route_run_id=route_run_id, now=occurred_at
         )
+        bundle = composition.bundle
 
         latency_ms = int((time.perf_counter() - started) * 1000)
         run = RouteRun(
@@ -127,6 +128,9 @@ class RouteCapabilitiesService:
                     "trace": resolution.trace.model_dump(mode="json"),
                     "dropped": [d.model_dump(mode="json") for d in resolution.dropped],
                 },
+                # Per-item context cost + its source (real entry size vs.
+                # summary fallback) and the budget that stopped composition.
+                "composition": composition.trace.model_dump(mode="json"),
             },
             reranker_implementation=rerank.trace.implementation,
             reranker_version=rerank.trace.version,

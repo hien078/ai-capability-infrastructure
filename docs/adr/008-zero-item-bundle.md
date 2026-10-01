@@ -15,6 +15,12 @@ tệ hơn không trả gì.
   conflict risk − latency cost)`; một skill mạnh có thể tốt hơn năm skill vừa phải.
 - Budget bắt buộc: `max_items ≤ 5`, `max_context_tokens` (mặc định 6000),
   version + digest pin từng item, validation trước khi trả.
+  - Amendment 2026-10-01: composer v2 tính cost theo kích thước thật của entry
+    file (artifact manifest `size_bytes`, chỉ metadata) thay vì độ dài routing
+    summary — budget trước đó không bao giờ bind. Mặc định nâng lên **8000**
+    (`DEFAULT_MAX_CONTEXT_TOKENS`, một chỗ duy nhất): DEV_CASES paired replay
+    6000 → hit 28/31, 8000 → 30/31; 8000 vượt p90 kích thước một skill (~6.7k).
+    Budget vẫn strict — không ép item hạng 1 vượt budget (xem Rejected).
 - Quan hệ V1 chỉ `REQUIRES / CONFLICTS_WITH / CHECKS` (§18); không graph DB.
 
 ## Consequences

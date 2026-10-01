@@ -39,7 +39,8 @@ export interface RouterOptions {
   language?: string
   frameworks?: string[]
   phase?: string
-  /** Bundle budgets (§19). */
+  /** Bundle budgets (§19). Unset `maxContextTokens` = the server default
+   * (ACI owns the one default; it budgets on real SKILL.md sizes). */
   maxItems?: number
   maxContextTokens?: number
   /** Routing must never hang prompt admission. */
@@ -60,7 +61,6 @@ const DEFAULTS = {
   baseUrl: "http://127.0.0.1:8000",
   principalId: "opencode",
   maxItems: 5,
-  maxContextTokens: 6000,
   timeoutMs: 2000,
   failClosed: false,
 }

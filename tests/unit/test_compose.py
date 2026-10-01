@@ -6,6 +6,8 @@ import pytest
 from pydantic import ValidationError
 
 from aci.domain.capability.models import (
+    DEFAULT_MAX_CONTEXT_TOKENS,
+    BundleBudget,
     BundleItem,
     CapabilityBundle,
     CapabilityRelation,
@@ -14,12 +16,18 @@ from aci.domain.capability.models import (
 )
 from aci.domain.policy.models import EligibleCandidate
 from aci.domain.routing.models import (
+    CompositionResult,
     RankedCandidate,
     ResolutionResult,
     ResolutionTrace,
     ResolvedItem,
 )
-from aci.routing.composer import MinimalBundleComposer, estimated_tokens
+from aci.routing.composer import (
+    VERSION,
+    MinimalBundleComposer,
+    estimated_tokens,
+    tokens_for_bytes,
+)
 from aci.routing.dependencies import DefaultDependencyResolver
 
 DIGEST = "sha256:" + "ab" * 32
@@ -233,15 +241,36 @@ def resolution(*items: tuple[str, str, str]) -> ResolutionResult:
     )
 
 
-def compose(resolution_result: ResolutionResult, **command: object) -> CapabilityBundle:
+class FakePayloadSizes:
+    """PayloadSizeSource fake: entry-file byte sizes by capability id."""
+
+    def __init__(self, sizes: dict[str, int]) -> None:
+        self._sizes = sizes
+        self.calls: list[list[tuple[str, str]]] = []
+
+    def entry_sizes(self, pairs: list[tuple[str, str]]) -> dict[tuple[str, str], int]:
+        self.calls.append(list(pairs))
+        return {p: self._sizes[p[0]] for p in pairs if p[0] in self._sizes}
+
+
+def compose_traced(
+    resolution_result: ResolutionResult,
+    sizes: dict[str, int] | None = None,
+    **command: object,
+) -> CompositionResult:
     data: dict = {"task_text": "do the thing"}
     data.update(command)
-    return MinimalBundleComposer().compose(
+    composer = MinimalBundleComposer(FakePayloadSizes(sizes) if sizes is not None else None)
+    return composer.compose(
         resolution_result,
         RouteCapabilitiesCommand.model_validate(data),
         route_run_id="route_test",
         now=NOW,
     )
+
+
+def compose(resolution_result: ResolutionResult, **command: object) -> CapabilityBundle:
+    return compose_traced(resolution_result, **command).bundle
 
 
 def test_compose_empty_bundle_is_valid_success() -> None:
@@ -251,7 +280,7 @@ def test_compose_empty_bundle_is_valid_success() -> None:
     assert bundle.bundle_id.startswith("bun_")
     assert bundle.budget is not None
     assert bundle.budget.max_items == 5
-    assert bundle.budget.max_context_tokens == 6000
+    assert bundle.budget.max_context_tokens == DEFAULT_MAX_CONTEXT_TOKENS
 
 
 def test_compose_pins_version_and_digest() -> None:
@@ -303,3 +332,108 @@ def test_estimated_tokens_is_deterministic() -> None:
     assert estimated_tokens("x" * 400) == 100
     assert estimated_tokens("x" * 401) == 101
     assert estimated_tokens("ab") == 1
+
+
+# ---------- composer v2: real payload size (§19.1) ----------
+
+SUMMARY = "name: x\ndescription: short trusted summary\nkind: skill"  # ~13 tokens
+
+
+def test_composer_version_is_bumped_for_real_size_costing() -> None:
+    # v1 charged len(summary)/4; route_runs.composer_version must distinguish.
+    assert VERSION == "2"
+    assert MinimalBundleComposer.version == "2"
+
+
+def test_tokens_for_bytes_is_deterministic() -> None:
+    assert tokens_for_bytes(0) == 1
+    assert tokens_for_bytes(12_000) == 3000
+    assert tokens_for_bytes(12_001) == 3001
+
+
+def test_composer_charges_real_entry_size_not_summary() -> None:
+    result = compose_traced(resolution(("a", "primary", SUMMARY)), sizes={"a": 41_896})
+    (cost,) = result.trace.items
+    assert cost.estimated_tokens == 10_474  # ceil(41896 / 4), not len(SUMMARY) / 4
+    assert cost.estimate_source == "artifact_entry"
+    # 10474 > the default budget: the oversized item does not fit (strict
+    # budget — ADR-008 rejects forcing a rank-1 item).
+    assert result.bundle.items == []
+    assert result.trace.stop_reason == "max_context_tokens"
+    assert not cost.included
+
+
+def test_budget_binds_three_by_3000_under_6000_keeps_two() -> None:
+    items = [("a", "primary", SUMMARY), ("b", "support", SUMMARY), ("c", "support", SUMMARY)]
+    sizes = {"a": 12_000, "b": 12_000, "c": 12_000}  # 3000 tokens each
+    result = compose_traced(resolution(*items), sizes=sizes, max_context_tokens=6000)
+    assert [i.capability_id for i in result.bundle.items] == ["a", "b"]
+    assert result.trace.spent_tokens == 6000
+    assert result.trace.stop_reason == "max_context_tokens"
+    assert [c.included for c in result.trace.items] == [True, True, False]
+
+
+def test_fallback_to_summary_when_size_unknown_is_traced() -> None:
+    result = compose_traced(
+        resolution(("a", "primary", SUMMARY), ("b", "support", ""), ("c", "support", SUMMARY)),
+        sizes={"c": 400},
+    )
+    by_id = {c.capability_id: c for c in result.trace.items}
+    assert by_id["a"].estimate_source == "routing_summary"
+    assert by_id["a"].estimated_tokens == estimated_tokens(SUMMARY)
+    assert by_id["b"].estimate_source == "default"
+    assert by_id["b"].estimated_tokens == 1000
+    assert by_id["c"].estimate_source == "artifact_entry"
+    assert by_id["c"].estimated_tokens == 100
+    assert [i.capability_id for i in result.bundle.items] == ["a", "b", "c"]
+    assert result.trace.stop_reason is None
+
+
+def test_no_size_source_falls_back_for_every_item() -> None:
+    result = compose_traced(resolution(("a", "primary", SUMMARY)))
+    assert [c.estimate_source for c in result.trace.items] == ["routing_summary"]
+
+
+def test_trace_records_version_budgets_and_max_items_stop() -> None:
+    result = compose_traced(
+        resolution(("a", "primary", SUMMARY), ("b", "support", SUMMARY)),
+        sizes={"a": 40, "b": 40},
+        max_items=1,
+        max_context_tokens=500,
+    )
+    trace = result.trace
+    assert (trace.implementation, trace.version) == ("minimal-bundle-composer", "2")
+    assert (trace.max_items, trace.max_context_tokens) == (1, 500)
+    assert trace.spent_tokens == 10
+    assert trace.stop_reason == "max_items"
+    assert [c.included for c in trace.items] == [True, False]
+
+
+def test_size_lookup_is_one_bulk_call_with_pairs_only() -> None:
+    sizes = FakePayloadSizes({"a": 400, "b": 400})
+    MinimalBundleComposer(sizes).compose(
+        resolution(("a", "primary", SUMMARY), ("b", "support", SUMMARY)),
+        RouteCapabilitiesCommand(task_text="t"),
+        route_run_id="r",
+        now=NOW,
+    )
+    assert sizes.calls == [[("a", "1.0.0"), ("b", "1.0.0")]]
+    MinimalBundleComposer(sizes).compose(
+        resolution(), RouteCapabilitiesCommand(task_text="t"), route_run_id="r", now=NOW
+    )
+    assert len(sizes.calls) == 1  # empty resolution → no lookup
+
+
+def test_default_context_budget_is_one_shared_constant() -> None:
+    """The default budget lives in one place; every surface reads it."""
+    import inspect
+
+    from aci.adapters.inbound.mcp.tools import make_route_tool
+    from aci.adapters.inbound.rest.schemas import RouteConstraintsIn
+
+    assert DEFAULT_MAX_CONTEXT_TOKENS == 8000
+    assert RouteCapabilitiesCommand(task_text="t").max_context_tokens == 8000
+    assert BundleBudget().max_context_tokens == 8000
+    assert RouteConstraintsIn().max_context_tokens == 8000
+    tool = make_route_tool(None)  # type: ignore[arg-type]
+    assert inspect.signature(tool).parameters["max_context_tokens"].default == 8000

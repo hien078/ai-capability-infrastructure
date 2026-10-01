@@ -111,7 +111,7 @@ the header.
 | `frameworks`       | `[]`                   | minimal TaskContext hints — never repo dumps or secrets       |
 | `phase`            | –                      | e.g. `debugging`                                              |
 | `maxItems`         | `5`                    | bundle budget (§19)                                           |
-| `maxContextTokens` | `6000`                 | bundle budget (§19)                                           |
+| `maxContextTokens` | server default (8000)  | bundle budget (§19), charged on real SKILL.md sizes; unset = omitted so ACI's default applies |
 | `timeoutMs`        | `2000`                 | routing must never hang prompt admission                      |
 | `failClosed`       | `false`                | fail-open default (ADR-005); `true` only for compliance flows|
 

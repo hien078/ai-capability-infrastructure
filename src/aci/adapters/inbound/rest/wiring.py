@@ -43,6 +43,7 @@ from aci.adapters.outbound.postgres.tasks import SqlAlchemyTaskRepository
 from aci.application.delegate_task import ProfileDrivenAgentRuntime, UnconfiguredExecutor
 from aci.application.evaluate_bundle import EvaluateBundleService
 from aci.application.list_candidates import ProductionCandidateLoader
+from aci.application.payload_sizes import ArtifactPayloadSizes
 from aci.application.protocols import AgentExecutor
 from aci.application.report_outcome import ReportOutcomeService
 from aci.application.resolve_capability import ResolveCapabilityService
@@ -166,7 +167,8 @@ class Container:
         retriever = EmbeddingRetriever(capabilities, _build_embedder(settings), embeddings)
         reranker = HeuristicReranker()
         resolver = DefaultDependencyResolver(relations, releases)
-        composer = MinimalBundleComposer()
+        # Budget on real entry-file sizes (artifact manifest metadata only).
+        composer = MinimalBundleComposer(ArtifactPayloadSizes(capabilities, artifacts))
         objects = FsObjectStore(Path(settings.object_store_root))
 
         self.route_service = RouteCapabilitiesService(
