@@ -1480,7 +1480,10 @@ def main(argv: list[str] | None = None) -> int:
     # existing round's profile; seatbelt on macOS) — an explicit --sandbox
     # value overrides, and an unusable sandbox still fails closed below.
     sandbox_kind = _sandbox_kind(args.sandbox)
-    sandbox = build_process_sandbox(sandbox_kind)
+    # Seatbelt (macOS) has no mount namespace: hide the shared work root so a
+    # run can read ONLY its own workspace — never another run's (measured in
+    # E2B: 3/20 K runs found arm F's standard doc in a sibling workspace).
+    sandbox = build_process_sandbox(sandbox_kind, extra_hidden_paths=[str(work_root())])
     unusable = sandbox.unavailable_reason()
     if unusable is not None:
         print(f"sandbox unusable: {unusable} — fix it or pass --sandbox none", file=sys.stderr)

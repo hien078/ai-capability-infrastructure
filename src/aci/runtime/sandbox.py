@@ -678,12 +678,20 @@ def build_process_sandbox(
     *,
     limits: ResourceLimits | None = None,
     extra_ro_binds: Sequence[str] = (),
+    extra_hidden_paths: Sequence[str] = (),
 ) -> ProcessSandbox:
-    """Settings → sandbox. Unknown kinds raise (no silent fallback)."""
+    """Settings → sandbox. Unknown kinds raise (no silent fallback).
+    `extra_hidden_paths` only matters for Seatbelt (bwrap shows nothing it
+    does not bind): trees whose contents a command may not read, except its
+    own workspace — e.g. a shared root holding OTHER runs' workspaces."""
     if kind == "bwrap":
         return BwrapSandbox(limits=limits or ResourceLimits(), extra_ro_binds=extra_ro_binds)
     if kind == "seatbelt":
-        return SeatbeltSandbox(limits=limits or ResourceLimits(), extra_ro_binds=extra_ro_binds)
+        return SeatbeltSandbox(
+            limits=limits or ResourceLimits(),
+            extra_ro_binds=extra_ro_binds,
+            extra_hidden_paths=extra_hidden_paths,
+        )
     if kind == "none":
         return NoSandbox()
     raise ValueError(f"unknown agent sandbox {kind!r} (expected 'bwrap', 'seatbelt' or 'none')")

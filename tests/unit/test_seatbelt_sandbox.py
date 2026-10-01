@@ -323,3 +323,17 @@ class TestSettings:
 
     def test_opt_out_is_explicit_none(self) -> None:
         assert isinstance(build_process_sandbox(cast(Any, "none")), NoSandbox)
+
+
+def test_build_process_sandbox_passes_hidden_paths_to_seatbelt(tmp_path: Path) -> None:
+    root = tmp_path / "work-root"
+    root.mkdir()
+    sb = build_process_sandbox("seatbelt", extra_hidden_paths=[str(root)])
+    assert isinstance(sb, SeatbeltSandbox)
+    ws = root / "runs" / "run_a"
+    ws.mkdir(parents=True)
+    lines = sb.profile(ws).splitlines()
+    deny = next(ln for ln in lines if ln.startswith("(deny file-read-data"))
+    allow = next(ln for ln in lines if ln.startswith("(allow file-read-data"))
+    assert f'(subpath "{os.path.realpath(root)}")' in deny
+    assert f'(subpath "{os.path.realpath(ws)}")' in allow

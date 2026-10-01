@@ -260,6 +260,36 @@ def test_parent_repository_and_config_are_not_the_workspaces(tmp_path: Path) -> 
     assert str(host_repo) not in result.stdout
 
 
+def test_a_run_cannot_read_a_sibling_runs_workspace(tmp_path: Path) -> None:
+    """A shared work root (H-bench /tmp/aci-hbench) hidden via
+    extra_hidden_paths: each run reads its own workspace only. E2B measured
+    the failure: K runs found arm F's standard doc in a sibling workspace."""
+    from aci.runtime.sandbox import build_process_sandbox
+
+    root = tmp_path / "work-root"
+    sibling = root / "runs" / "run_f"
+    (sibling / "docs").mkdir(parents=True)
+    (sibling / "docs" / "standard.md").write_text("PRIVATE-STANDARD", encoding="utf-8")
+    sandbox = build_process_sandbox("seatbelt", extra_hidden_paths=[str(root)])
+    if sandbox.unavailable_reason() is not None:
+        pytest.skip("seatbelt sandbox unusable on this host")
+    ws = LocalWorkspace(root / "runs" / "run_k", sandbox=sandbox)
+    (ws.root / "own.txt").write_text("mine", encoding="utf-8")
+    result = _py(
+        ws,
+        "import os\n"
+        "print(open('own.txt').read())\n"
+        "try:\n"
+        f"    print(open({str(sibling / 'docs' / 'standard.md')!r}).read())\n"
+        "except PermissionError:\n"
+        "    print('DENIED')\n",
+    )
+    assert result.exit_code == 0, result.stderr
+    assert "mine" in result.stdout
+    assert "DENIED" in result.stdout
+    assert "PRIVATE-STANDARD" not in result.stdout
+
+
 # -- resource limits ----------------------------------------------------------------
 
 
