@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Protocol, cast
 from uuid import uuid4
 
+from pydantic import ValidationError
+
 from aci.application.protocols import AgentRunStore
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.authority import (
@@ -24,6 +26,7 @@ from aci.domain.runtime.authority import (
     ProcessScope,
     prefix_within_prefixes,
 )
+from aci.domain.runtime.persistence import AgentRunRecord
 from aci.domain.runtime.spec import RuntimeSpec
 from aci.domain.runtime.subtask import RunResult, SubtaskContract
 from aci.runtime.cancellation import CancelToken
@@ -63,6 +66,44 @@ class RunOptions:
     command_prefixes: tuple[str, ...] | None = None
     max_turns: int | None = None
 
+    def to_json(self) -> dict[str, object]:
+        """The persisted form (migration 0018) — client REQUESTS, never grants."""
+        return {
+            "workspace": self.workspace,
+            "verification_command": _list_or_none(self.verification_command),
+            "write_scopes": _list_or_none(self.write_scopes),
+            "command_prefixes": _list_or_none(self.command_prefixes),
+            "max_turns": self.max_turns,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, object]) -> "RunOptions":
+        max_turns = data.get("max_turns")
+        workspace = data.get("workspace")
+        if max_turns is not None and not isinstance(max_turns, int):
+            raise ValueError("max_turns must be an int")
+        if workspace is not None and not isinstance(workspace, str):
+            raise ValueError("workspace must be a string")
+        return cls(
+            workspace=workspace,
+            verification_command=_str_tuple(data.get("verification_command")),
+            write_scopes=_str_tuple(data.get("write_scopes")),
+            command_prefixes=_str_tuple(data.get("command_prefixes")),
+            max_turns=max_turns,
+        )
+
+
+def _list_or_none(values: tuple[str, ...] | None) -> list[str] | None:
+    return list(values) if values is not None else None
+
+
+def _str_tuple(value: object) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ValueError("expected a list of strings")
+    return tuple(value)
+
 
 @dataclass(frozen=True)
 class _RunRecord:
@@ -99,6 +140,25 @@ def _workspace_scope(scope: str) -> str:
             f"write_scopes entries must be workspace-relative paths, got {scope!r}",
         )
     return norm
+
+
+def _result_of(record: AgentRunRecord) -> RunResult:
+    """The RunResult a persisted row projects (§29 GET read-through). The row's
+    server-side fields (run_dir, options, contract) are never part of it."""
+    return RunResult.model_validate(
+        {
+            "run_id": record.run_id,
+            "status": record.status,
+            "stop_reason": record.stop_reason,
+            "detail_code": record.detail_code,
+            "summary": record.summary,
+            "artifacts": record.artifacts,
+            "evidence": record.evidence,
+            "usage": record.usage,
+            "trace_ref": record.trace_ref,
+            "spec": record.spec or None,
+        }
+    )
 
 
 class AgentRunService:
@@ -169,27 +229,23 @@ class AgentRunService:
         if self._run_store is None:
             return None
         record = self._run_store.get_run(run_id)
-        if record is None:
-            return None
-        return RunResult.model_validate(
-            {
-                "run_id": record.run_id,
-                "status": record.status,
-                "stop_reason": record.stop_reason,
-                "detail_code": record.detail_code,
-                "summary": record.summary,
-                "artifacts": record.artifacts,
-                "evidence": record.evidence,
-                "usage": record.usage,
-                "trace_ref": record.trace_ref,
-                "spec": record.spec or None,
-            }
-        )
+        return _result_of(record) if record is not None else None
 
     def contract(self, run_id: str) -> SubtaskContract | None:
-        """The contract a known run executed (a revision's parent link lives here)."""
+        """The contract a known run executed (a revision's parent link lives
+        here) — RAM first, then the durable store (migration 0018)."""
         record = self._records.get(run_id)
-        return record.contract if record is not None else None
+        if record is not None:
+            return record.contract
+        if self._run_store is None:
+            return None
+        stored = self._run_store.get_run(run_id)
+        if stored is None or stored.contract is None:
+            return None
+        try:
+            return SubtaskContract.model_validate(stored.contract)
+        except ValidationError:
+            return None
 
     def revise(
         self,
@@ -203,11 +259,14 @@ class AgentRunService:
         """§29A/§57 delta revision: a new attempt built FROM the previous one —
         same criteria, constraints, budget, profile and options; the previous
         working directory is its workspace source, so the agent continues
-        from its own changes. Never a blind restart."""
-        record = self._records.get(run_id)
-        previous = self._results.get(run_id)
-        if record is None or previous is None:
-            raise DomainError(ErrorCode.ROUTE_RUN_NOT_FOUND, f"unknown run: {run_id}")
+        from its own changes. Never a blind restart.
+
+        The previous run may come from THIS process (RAM) or from a previous
+        one (the durable store, migration 0018 — the restart case). Either
+        way every grant is re-derived from the CURRENT server ceiling
+        (INV-02); the stored options are requests, never authority."""
+        record, previous = self._revision_base(run_id)
+        source = self._revision_source(run_id, record)
         note = f"Previous attempt {run_id} failed criteria: " + (
             ", ".join(failed_criteria or []) or "none listed"
         )
@@ -230,14 +289,88 @@ class AgentRunService:
             record.options if max_turns is None else replace(record.options, max_turns=max_turns)
         )
         spec = record.spec.model_copy(update={"created_at": datetime.now(UTC)})
-        return self._start(contract, spec, options, record.run_dir)
+        return self._start(contract, spec, options, source)
 
     def cancel(self, run_id: str) -> bool:
+        """True only when a LIVE run of this process was signalled. A terminal
+        run — finished in this process or recovered from the store after a
+        restart — has nothing left to cancel: False, the same answer for
+        both (and for an unknown id), never an error."""
         token = self._cancel_tokens.get(run_id)
         if token is None:
             return False
         token.cancel()
         return True
+
+    # -- revision of a recovered run -------------------------------------------
+
+    def _revision_base(self, run_id: str) -> tuple[_RunRecord, RunResult]:
+        """The previous attempt's record + terminal result: RAM, else the store."""
+        record = self._records.get(run_id)
+        previous = self._results.get(run_id)
+        if record is not None and previous is not None:
+            return record, previous
+        stored = self._run_store.get_run(run_id) if self._run_store is not None else None
+        if stored is None:
+            raise DomainError(ErrorCode.ROUTE_RUN_NOT_FOUND, f"unknown run: {run_id}")
+        return self._record_from_store(stored), _result_of(stored)
+
+    def _record_from_store(self, stored: AgentRunRecord) -> _RunRecord:
+        """Rebuild contract/spec/options from a persisted row. Authority fields
+        of the spec (initial grants, delegation) come from the CURRENT profile,
+        never from the row (INV-02); workspace grants are recomputed by
+        _bind_workspace from the current ceiling anyway."""
+        from aci.runtime.profiles import runtime_spec_for
+
+        if stored.contract is None or stored.run_options is None:
+            raise DomainError(
+                ErrorCode.TASK_TRANSITION_INVALID,
+                f"run {stored.run_id} was recorded without revision state "
+                "(before migration 0018); start a new run instead",
+            )
+        try:
+            contract = SubtaskContract.model_validate(stored.contract)
+            options = RunOptions.from_json(stored.run_options)
+            row_spec = RuntimeSpec.model_validate(stored.spec)
+            current = runtime_spec_for(row_spec.profile_id, budget=row_spec.budget)
+        except (ValidationError, ValueError, KeyError) as exc:
+            raise DomainError(
+                ErrorCode.TASK_TRANSITION_INVALID,
+                f"run {stored.run_id} has unreadable revision state; start a new run instead",
+            ) from exc
+        spec = row_spec.model_copy(
+            update={
+                "initial_grants": current.initial_grants,
+                "delegation_policy": current.delegation_policy,
+            }
+        )
+        return _RunRecord(
+            contract=contract,
+            spec=spec,
+            options=options,
+            run_dir=Path(stored.run_dir) if stored.run_dir else None,
+        )
+
+    def _revision_source(self, run_id: str, record: _RunRecord) -> Path | None:
+        """The previous run's working copy, which seeds the revision's copy.
+
+        It must still exist AND sit under this server's runs root — a row is
+        never trusted to point the revision at an arbitrary server path. The
+        error never names the path (server-side only)."""
+        if record.options.workspace is None and record.run_dir is None:
+            return None  # a no-workspace run revises without a workspace
+        gone = DomainError(
+            ErrorCode.WORKSPACE_NOT_FOUND,
+            f"the working copy of run {run_id} no longer exists on this server; "
+            "it cannot be revised — start a new run instead",
+        )
+        if record.run_dir is None:
+            raise gone
+        runs_root = self._runs_root.resolve()
+        run_dir = record.run_dir.resolve()
+        if run_dir == runs_root or not run_dir.is_relative_to(runs_root) or not run_dir.is_dir():
+            raise gone
+        return run_dir
 
     # -- per-run wiring -------------------------------------------------------
 
@@ -358,7 +491,14 @@ class AgentRunService:
             raise DomainError(
                 ErrorCode.CLIENT_INCOMPATIBLE, "verification_command requires a workspace"
             )
-        checks = verifier_checks(spec.profile_id)
+        # Command-evidence checks count only acceptance-tied commands (the
+        # client's verification_command); with none they fail closed.
+        checks = verifier_checks(
+            spec.profile_id,
+            acceptance_commands=(
+                [options.verification_command] if options.verification_command else []
+            ),
+        )
         binding = (
             self._bind_workspace(contract.task_id, options, source) if source is not None else None
         )
@@ -382,12 +522,13 @@ class AgentRunService:
         )
         token = CancelToken(run_id=contract.task_id)
         self._cancel_tokens[contract.task_id] = token
-        self._records[contract.task_id] = _RunRecord(
+        record = _RunRecord(
             contract=contract,
             spec=spec,
             options=options,
             run_dir=binding.run_dir if binding is not None else None,
         )
+        self._records[contract.task_id] = record
         try:
             if options.max_turns is None:
                 result = kernel.run(
@@ -405,27 +546,28 @@ class AgentRunService:
                     workspace_id=binding.workspace_id if binding is not None else None,
                 )
             self._results[contract.task_id] = result
-            self._persist(contract, spec, options, result)
+            self._persist(record, result)
             return result
         finally:
             self._cancel_tokens.pop(contract.task_id, None)
+            # The run is over (terminal result, or the kernel raised): its RAM
+            # event history is dead weight on the ONE shared bus — free it
+            # whether or not a store is wired, and whether or not persistence
+            # succeeded. _persist has already read it when a store exists.
+            self._event_bus.discard(contract.task_id)
 
-    def _persist(
-        self,
-        contract: SubtaskContract,
-        spec: RuntimeSpec,
-        options: RunOptions,
-        result: RunResult,
-    ) -> None:
+    def _persist(self, record: _RunRecord, result: RunResult) -> None:
         """§41.1: project the frozen terminal state + the event history into
         the durable store. Honest-null: no store wired = RAM-only (the
         pre-0016 behavior). A persistence failure NEVER fails the run — the
         result is already terminal and caller-visible; the store is
-        telemetry, not a dependency (§50)."""
+        telemetry, not a dependency (§50). The caller (_start) discards the
+        bus history afterwards in every case."""
         if self._run_store is None:
             return
-        from aci.domain.runtime.persistence import AgentRunEventRecord, AgentRunRecord
+        from aci.domain.runtime.persistence import AgentRunEventRecord
 
+        contract, options = record.contract, record.options
         try:
             self._run_store.record_run(
                 AgentRunRecord(
@@ -442,46 +584,36 @@ class AgentRunService:
                     trace_ref=result.trace_ref,
                     evidence=result.evidence.model_dump(mode="json") if result.evidence else None,
                     usage=result.usage.model_dump(mode="json"),
-                    spec=spec.model_dump(mode="json"),
+                    spec=record.spec.model_dump(mode="json"),
                     verification_command=list(options.verification_command)
                     if options.verification_command is not None
                     else None,
+                    # Migration 0018: what a revision after a restart needs.
+                    contract=contract.model_dump(mode="json"),
+                    run_options=options.to_json(),
+                    run_dir=str(record.run_dir.resolve()) if record.run_dir is not None else None,
                     created_at=contract.created_at,
                     finished_at=datetime.now(UTC),
                 )
             )
-            if self._event_bus is not None:
-                history = self._event_bus.history(result.run_id)
-                self._run_store.record_events(
-                    [
-                        AgentRunEventRecord(
-                            event_id=e.event_id,
-                            run_id=e.run_id,
-                            seq=seq,
-                            event_type=e.event_type,
-                            turn_id=e.turn_id,
-                            payload=dict(e.payload),
-                            recorded_at=e.timestamp,
-                        )
-                        for seq, e in enumerate(history)
-                    ]
-                )
-                # The events are durable; the RAM copy is dead weight. One
-                # shared bus per process — without this, _history grows
-                # without bound in a long-running server. Nothing reads it
-                # after persist.
-                self._event_bus.discard(result.run_id)
+            history = self._event_bus.history(result.run_id)
+            self._run_store.record_events(
+                [
+                    AgentRunEventRecord(
+                        event_id=e.event_id,
+                        run_id=e.run_id,
+                        seq=seq,
+                        event_type=e.event_type,
+                        turn_id=e.turn_id,
+                        payload=dict(e.payload),
+                        recorded_at=e.timestamp,
+                    )
+                    for seq, e in enumerate(history)
+                ]
+            )
         except Exception:  # noqa: BLE003 — telemetry must never kill a finished run
             log.warning(
                 "agent run %s persistence FAILED (result stays caller-visible)",
                 result.run_id,
                 exc_info=True,
             )
-            if self._event_bus is not None:
-                # The run is terminal either way; the RAM history is dead
-                # weight even when persistence failed — free it.
-                self._event_bus.discard(result.run_id)
-                log.debug(
-                    "agent run %s RAM event history discarded after failed persistence",
-                    result.run_id,
-                )

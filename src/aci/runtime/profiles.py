@@ -8,8 +8,10 @@ the tool path OBSERVED, never in the model's own report (INV-08, §19.4).
 
 import posixpath
 import re
+import shlex
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
+from functools import partial
 
 from pydantic import BaseModel, Field
 
@@ -31,6 +33,7 @@ from aci.domain.runtime.spec import (
 )
 from aci.domain.runtime.state import BudgetLedger, RuntimeStateSnapshot
 from aci.runtime.verification import VerifierCallable
+from aci.runtime.workspace import command_within_prefixes
 
 Check = Callable[[RuntimeStateSnapshot, CandidateResult], CheckResult]
 
@@ -394,10 +397,58 @@ def artifacts_observed(snapshot: RuntimeStateSnapshot, candidate: CandidateResul
     return CheckResult(name=name, passed=True)
 
 
+def acceptance_prefixes(commands: Sequence[Sequence[str]]) -> list[str]:
+    """Acceptance argv → `command_within_prefixes` prefix strings.
+
+    Prefixes are whitespace-split, so an argv token that is empty or contains
+    whitespace (``python -c "import sys; ..."``) has no faithful prefix form;
+    such a command is DROPPED rather than truncated — truncating would turn
+    ``python -c <script>`` into ``python -c``, which admits ``python -c pass``.
+    Dropping fails closed."""
+    prefixes: list[str] = []
+    for argv in commands:
+        if isinstance(argv, str):  # a bare string is a Sequence[str]: refuse, never char-split
+            raise TypeError("acceptance commands are argv lists, not strings")
+        tokens = list(argv)
+        if tokens and all(t and not any(c.isspace() for c in t) for t in tokens):
+            prefixes.append(" ".join(tokens))
+    return list(dict.fromkeys(prefixes))
+
+
+def _observed_argv(item: EvidenceItem) -> list[str]:
+    """``"exit=0 python -m pytest -q"`` → argv (the summary is ``shlex.join(argv)``)."""
+    _, _, rendered = item.summary.strip().partition(" ")
+    try:
+        return shlex.split(rendered)
+    except ValueError:
+        return []
+
+
 def _command_check(
-    name: str, snapshot: RuntimeStateSnapshot, *, accept: Callable[[str], bool], wanted: str
+    name: str,
+    snapshot: RuntimeStateSnapshot,
+    *,
+    accept: Callable[[str], bool],
+    wanted: str,
+    acceptance: Sequence[str],
 ) -> CheckResult:
-    """Pass iff a COMMAND_OUTPUT after the last observed write has an accepted exit status."""
+    """Pass iff an ACCEPTANCE-TIED COMMAND_OUTPUT after the last observed write has
+    an accepted exit status.
+
+    A command is acceptance-tied iff its argv starts with one of the run's
+    acceptance prefixes (token-aware, `command_within_prefixes`). Any other
+    command — ``true``, ``python -c pass``, ``pytest --version`` under a
+    ``pytest -q`` acceptance — is not evidence. With NO acceptance prefixes the
+    check FAILS CLOSED: nothing distinguishes a test run from a no-op."""
+    if not acceptance:
+        return CheckResult(
+            name=name,
+            passed=False,
+            detail=(
+                "no acceptance command is configured for this run, so no command can stand "
+                "as test evidence; the delegating client must supply verification_command"
+            ),
+        )
     evidence = snapshot.observed_evidence
     writes = [i for i, item in enumerate(evidence) if _is_file_event(item, "written")]
     start = writes[-1] + 1 if writes else 0
@@ -405,36 +456,60 @@ def _command_check(
     scope = (
         f"after the last write to {_file_path(evidence[writes[-1]])}" if writes else "in this run"
     )
-    if not commands:
-        return CheckResult(name=name, passed=False, detail=f"no command ran {scope}")
-    if any(accept(_exit_status(c)) for c in commands):
+    tied = [c for c in commands if command_within_prefixes(_observed_argv(c), acceptance)]
+    run_one = f"run {_bounded([_quote(p) for p in acceptance])}"
+    if not tied:
+        if not commands:
+            return CheckResult(name=name, passed=False, detail=f"no command ran {scope}; {run_one}")
+        last = _quote(commands[-1].summary)
+        return CheckResult(
+            name=name,
+            passed=False,
+            detail=f"no acceptance command ran {scope} (last: {last} is not one); {run_one}",
+        )
+    if any(accept(_exit_status(c)) for c in tied):
         return CheckResult(name=name, passed=True)
-    last = _quote(commands[-1].summary)
-    return CheckResult(name=name, passed=False, detail=f"no command {wanted} {scope}; last: {last}")
+    last = _quote(tied[-1].summary)
+    return CheckResult(
+        name=name,
+        passed=False,
+        detail=f"no acceptance command {wanted} {scope}; last: {last}",
+    )
 
 
 def command_passed_after_last_change(
-    snapshot: RuntimeStateSnapshot, candidate: CandidateResult
+    snapshot: RuntimeStateSnapshot,
+    candidate: CandidateResult,
+    *,
+    acceptance: Sequence[str] = (),
 ) -> CheckResult:
-    """§19.4 regression evidence: some command exited 0 after the final observed write."""
+    """§19.4 regression evidence: an acceptance-tied command exited 0 after the final
+    observed write. `acceptance` holds `command_within_prefixes` prefix strings;
+    empty (the default) fails closed."""
     return _command_check(
         "command_passed_after_last_change",
         snapshot,
         accept=lambda status: status == "0",
         wanted="exited 0",
+        acceptance=acceptance,
     )
 
 
 def command_run_after_last_change(
-    snapshot: RuntimeStateSnapshot, candidate: CandidateResult
+    snapshot: RuntimeStateSnapshot,
+    candidate: CandidateResult,
+    *,
+    acceptance: Sequence[str] = (),
 ) -> CheckResult:
-    """§19.4 execution evidence: some command ran to an exit code (pass or fail, not a
-    timeout) after the final observed write."""
+    """§19.4 execution evidence: an acceptance-tied command ran to an exit code (pass
+    or fail, not a timeout) after the final observed write. Empty `acceptance`
+    (the default) fails closed."""
     return _command_check(
         "command_run_after_last_change",
         snapshot,
         accept=lambda status: _EXIT_CODE.fullmatch(status) is not None,
         wanted="finished with an exit code",
+        acceptance=acceptance,
     )
 
 
@@ -443,6 +518,13 @@ _CHECKS: dict[str, Check] = {
     "claimed_changes_observed": claimed_changes_observed,
     "claims_grounded": claims_grounded,
     "artifacts_observed": artifacts_observed,
+    "command_passed_after_last_change": command_passed_after_last_change,
+    "command_run_after_last_change": command_run_after_last_change,
+}
+
+#: Checks whose evidence must come from an ACCEPTANCE-TIED command; bound per
+#: run by `verifier_checks(..., acceptance_commands=...)`.
+_ACCEPTANCE_CHECKS = {
     "command_passed_after_last_change": command_passed_after_last_change,
     "command_run_after_last_change": command_run_after_last_change,
 }
@@ -464,10 +546,28 @@ _PROFILE_CHECKS: dict[AgentProfileId, tuple[str, ...]] = {
 }
 
 
-def verifier_checks(profile: AgentProfileId | str) -> list[VerifierCallable]:
-    """§37 verification profiles: deterministic checks grounded in observed evidence."""
+def verifier_checks(
+    profile: AgentProfileId | str,
+    *,
+    acceptance_commands: Sequence[Sequence[str]] = (),
+) -> list[VerifierCallable]:
+    """§37 verification profiles: deterministic checks grounded in observed evidence.
+
+    `acceptance_commands` are the run's acceptance-tied argv (the client's
+    `verification_command`): the command-evidence checks count ONLY commands
+    whose argv starts with one of them. Default empty → those checks fail
+    closed (DEBUGGER/TESTER require a verification_command to ever pass)."""
     pid = _as_profile_id(profile)
-    return [VerifierCallable(name, _CHECKS[name]) for name in _PROFILE_CHECKS[pid]]
+    acceptance = acceptance_prefixes(acceptance_commands)
+    checks: list[VerifierCallable] = []
+    for name in _PROFILE_CHECKS[pid]:
+        fn = (
+            partial(_ACCEPTANCE_CHECKS[name], acceptance=acceptance)
+            if name in _ACCEPTANCE_CHECKS
+            else _CHECKS[name]
+        )
+        checks.append(VerifierCallable(name, fn))
+    return checks
 
 
 def risk_level(profile: AgentProfileId | str) -> int:

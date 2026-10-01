@@ -418,6 +418,13 @@ class AgentRunRow(Base):
     #: RunResult.trace_ref — external trace link; NULL when the run set none.
     trace_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     verification_command: Mapped[list[Any] | None] = mapped_column(JSONB, nullable=True)
+    #: Migration 0018 — what a revision of a store-only run (after a restart)
+    #: rebuilds from: the full SubtaskContract, the client RunOptions
+    #: (requests, never grants — INV-02) and the server-side working-copy
+    #: path (NEVER returned to clients). NULL on pre-0018 rows.
+    contract: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    run_options: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    run_dir: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

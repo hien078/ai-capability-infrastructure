@@ -31,6 +31,9 @@ def _record_of(row: AgentRunRow) -> AgentRunRecord:
             "spec": row.spec,
             "trace_ref": row.trace_ref,
             "verification_command": row.verification_command,
+            "contract": row.contract,
+            "run_options": row.run_options,
+            "run_dir": row.run_dir,
             "created_at": row.created_at,
             "finished_at": row.finished_at,
         }
@@ -65,6 +68,11 @@ class SqlAlchemyAgentRunRepository:
                     spec=record.spec,
                     trace_ref=record.trace_ref,
                     verification_command=record.verification_command,
+                    contract=record.contract,
+                    run_options=record.run_options,
+                    # Server-side only (excluded from the record's dumps):
+                    # read off the attribute, never via model_dump().
+                    run_dir=record.run_dir,
                     created_at=record.created_at,
                     finished_at=record.finished_at,
                 )
@@ -79,6 +87,9 @@ class SqlAlchemyAgentRunRepository:
                         "evidence": record.evidence,
                         "usage": record.usage,
                         "trace_ref": record.trace_ref,
+                        "contract": record.contract,
+                        "run_options": record.run_options,
+                        "run_dir": record.run_dir,
                         "finished_at": record.finished_at,
                     },
                 )

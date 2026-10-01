@@ -7,6 +7,7 @@ flattened (INV-15 made real). A persistence failure NEVER fails the run —
 the result is already terminal and caller-visible.
 """
 
+import shutil
 import sys
 import uuid
 from pathlib import Path
@@ -17,6 +18,7 @@ import pytest
 from aci.adapters.outbound.postgres.agent_runs import SqlAlchemyAgentRunRepository
 from aci.application.protocols import AgentRunStore
 from aci.application.run_agent_task import AgentRunService, ModelGatewayFactory
+from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.actions import FinalCandidate, ToolCallBatchAction
 from aci.domain.runtime.subtask import AcceptanceCriterion, SubtaskContract
 from aci.domain.runtime.tools import ToolCall
@@ -205,3 +207,66 @@ class TestAgentRunPersistence:
             ids.append(result.run_id)
         recent = store.list_recent(limit=10)
         assert [r.run_id for r in recent[:3]] == list(reversed(ids))
+
+
+def _read_then_done() -> list[Any]:
+    return [
+        ToolCallBatchAction(
+            calls=[ToolCall(call_id="c1", tool_id="read_file", arguments={"path": "notes.txt"})]
+        ),
+        FinalCandidate(summary="done", claims=["notes.txt: cause X"]),
+    ]
+
+
+class TestRevisionAfterRestart:
+    """Migration 0018: the store carries the contract, the client options and
+    the server-side working-copy path, so a FRESH process can revise a run it
+    never executed — GET and revise agree after a restart."""
+
+    def test_revise_of_a_store_only_run(self, sessions: Any, tmp_path: Path) -> None:
+        store = SqlAlchemyAgentRunRepository(sessions)
+        _workspace(tmp_path)
+        first = _service(_read_then_done(), store, tmp_path).run(
+            _contract(), runtime_spec_for("researcher"), max_turns=6, workspace="proj"
+        )
+        assert first.status.value == "succeeded"
+        row = store.get_run(first.run_id)
+        assert row is not None
+        assert row.contract is not None and row.contract["task_id"] == first.run_id
+        assert row.run_options is not None and row.run_options["workspace"] == "proj"
+        assert row.run_dir == str((tmp_path / "runs" / first.run_id).resolve())
+
+        fresh = _service(_read_then_done(), store, tmp_path)  # the "restart"
+        revised = fresh.revise(first.run_id, failed_criteria=["ac-1"], feedback="again")
+
+        assert revised.status.value == "succeeded"
+        child = store.get_run(revised.run_id)
+        assert child is not None
+        assert child.parent_run_id == first.run_id
+        assert child.contract is not None and child.contract["parent_task_id"] == first.run_id
+        assert child.objective == "fix the failing test"
+        assert (tmp_path / "runs" / revised.run_id / "notes.txt").is_file()
+
+    def test_revise_with_a_vanished_run_dir_is_a_clean_error(
+        self, sessions: Any, tmp_path: Path
+    ) -> None:
+        store = SqlAlchemyAgentRunRepository(sessions)
+        _workspace(tmp_path)
+        first = _service(_read_then_done(), store, tmp_path).run(
+            _contract(), runtime_spec_for("researcher"), max_turns=6, workspace="proj"
+        )
+        shutil.rmtree(tmp_path / "runs" / first.run_id)
+        with pytest.raises(DomainError) as excinfo:
+            _service([], store, tmp_path).revise(first.run_id)
+        assert excinfo.value.code is ErrorCode.WORKSPACE_NOT_FOUND
+        assert str(tmp_path) not in str(excinfo.value)
+
+    def test_cancel_of_a_store_only_run_is_false_not_an_error(
+        self, sessions: Any, tmp_path: Path
+    ) -> None:
+        store = SqlAlchemyAgentRunRepository(sessions)
+        _workspace(tmp_path)
+        first = _service(_read_then_done(), store, tmp_path).run(
+            _contract(), runtime_spec_for("researcher"), max_turns=6, workspace="proj"
+        )
+        assert _service([], store, tmp_path).cancel(first.run_id) is False

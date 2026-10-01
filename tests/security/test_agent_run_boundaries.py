@@ -22,11 +22,15 @@ Load-bearing claims, enforced as tests:
   no observed effect is VERIFICATION_FAILED.
 - A revision continues the SAME lineage: it works on a copy of the previous
   run's directory and can neither switch workspace nor widen grants.
+- After a restart (a run known only to the durable store, migration 0018)
+  the server-side working-copy path stays server-side: no GET/revise/cancel
+  response — success or error — ever carries it.
 
 Deterministic: scripted model, temp directories, no network, no live DB.
 """
 
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -41,6 +45,7 @@ from aci.adapters.inbound.rest.wiring import Container, Settings
 from aci.application.run_agent_task import AgentRunService, ModelGatewayFactory
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.actions import FinalCandidate, ToolCall, ToolCallBatchAction
+from aci.domain.runtime.persistence import AgentRunEventRecord, AgentRunRecord
 from aci.runtime.model_gateway import FakeModelGateway
 
 PY = sys.executable
@@ -129,6 +134,7 @@ def _service(
     *,
     process_prefixes: list[str] | None = None,
     context_factory: object | None = None,
+    run_store: object | None = None,
 ) -> tuple[AgentRunService, FakeModelGateway]:
     """The service as the server wires it: a workspace root, a runs root and
     the process ceiling (``[PY]`` unless a test narrows it)."""
@@ -143,6 +149,7 @@ def _service(
         process_prefixes=[PY] if process_prefixes is None else process_prefixes,
         command_timeout_seconds=30,
         verification_timeout_seconds=30,
+        run_store=cast("Any", run_store),
     )
     return service, gateway
 
@@ -595,3 +602,89 @@ def test_revision_cannot_switch_workspace_or_widen_grants(roots: Roots) -> None:
     results = _tool_results(gateway)
     assert results["r1"].startswith("status: denied")
     assert results["r2"].startswith("status: denied") or results["r2"].startswith("status: error")
+
+
+# -- 12: after a restart the run dir stays server-side (migration 0018) -----
+
+
+class _MemoryStore:
+    """In-memory AgentRunStore: the durable store a restarted process reads."""
+
+    def __init__(self) -> None:
+        self.runs: dict[str, AgentRunRecord] = {}
+
+    def record_run(self, record: AgentRunRecord) -> None:
+        self.runs[record.run_id] = record
+
+    def record_events(self, events: list[AgentRunEventRecord]) -> None:
+        return None
+
+    def get_run(self, run_id: str) -> AgentRunRecord | None:
+        return self.runs.get(run_id)
+
+    def list_recent(self, limit: int = 50) -> list[AgentRunRecord]:
+        return list(self.runs.values())[:limit]
+
+
+def _assert_no_server_paths(roots: Roots, text: str) -> None:
+    assert str(roots.runs_root) not in text
+    assert str(roots.runs_root.resolve()) not in text
+    assert str(roots.tmp) not in text
+    assert str(roots.tmp.resolve()) not in text
+
+
+def test_restarted_server_never_returns_the_stored_run_dir(roots: Roots) -> None:
+    """The store holds the absolute working-copy path (the revision's copy
+    source); GET, revise and cancel of a store-only run never put it on the
+    wire — and the revision really continues from that copy."""
+    store = _MemoryStore()
+    first_service, _ = _service(
+        [_write("c1", "src/greet.py", GREET), _done("src/greet.py")], roots, run_store=store
+    )
+    first = _client(first_service).post("/v1/agent-runs", json=_body()).json()
+    assert first["status"] == "succeeded", first
+    stored = store.runs[first["run_id"]]
+    assert stored.run_dir is not None and str(roots.runs_root.resolve()) in stored.run_dir
+
+    restarted, _ = _service(
+        [
+            _write("c2", "src/greet_test.py", "from greet import greet\n"),
+            _done("src/greet_test.py"),
+        ],
+        roots,
+        run_store=store,
+    )
+    client = _client(restarted)
+    got = client.get(f"/v1/agent-runs/{first['run_id']}")
+    assert got.status_code == 200
+    _assert_no_server_paths(roots, got.text)
+    revised = client.post(
+        f"/v1/agent-runs/{first['run_id']}/revise",
+        json={"failed_criteria": ["src/greet_test.py exists"], "feedback": "add a test"},
+    )
+    assert revised.status_code == 201, revised.text
+    assert revised.json()["status"] == "succeeded", revised.json()
+    _assert_no_server_paths(roots, revised.text)
+    revision_dir = roots.run_dir(revised.json()["run_id"])
+    assert (revision_dir / "src" / "greet.py").read_text(encoding="utf-8") == GREET
+    cancelled = client.post(f"/v1/agent-runs/{first['run_id']}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json() == {"cancelled": False}
+
+
+def test_vanished_run_dir_error_never_names_the_path(roots: Roots) -> None:
+    store = _MemoryStore()
+    first_service, _ = _service(
+        [_write("c1", "src/greet.py", GREET), _done("src/greet.py")], roots, run_store=store
+    )
+    first = _client(first_service).post("/v1/agent-runs", json=_body()).json()
+    shutil.rmtree(roots.run_dir(first["run_id"]))
+
+    restarted, gateway = _service([_done("src/greet.py")], roots, run_store=store)
+    response = _client(restarted).post(
+        f"/v1/agent-runs/{first['run_id']}/revise", json={"feedback": "again"}
+    )
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "WORKSPACE_NOT_FOUND"
+    _assert_no_server_paths(roots, response.text)
+    assert gateway.requests == []  # refused before the model is invoked

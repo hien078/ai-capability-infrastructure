@@ -44,6 +44,19 @@ class AgentRunRecord(BaseModel):
     #: RunResult.trace_ref — external trace link; None when the run set none.
     trace_ref: str | None = None
     verification_command: list[str] | None = None
+    #: SubtaskContract.model_dump(mode="json") — what a §29A revision builds
+    #: FROM after a restart (migration 0018). None on pre-0018 rows: such a
+    #: run is readable but not revisable.
+    contract: dict[str, Any] | None = None
+    #: The client-chosen RunOptions (workspace, verification_command,
+    #: write_scopes, command_prefixes, max_turns) as JSON. Requests, not
+    #: grants: a revision re-derives every grant from the CURRENT server
+    #: ceiling (INV-02) — nothing here is trusted as authority.
+    run_options: dict[str, Any] | None = None
+    #: Absolute path of the run's working copy — SERVER-SIDE ONLY (the copy
+    #: source of a revision). Excluded from every dump/repr so no
+    #: serialization of the record can carry it onto a wire.
+    run_dir: str | None = Field(default=None, exclude=True, repr=False)
     created_at: datetime
     finished_at: datetime | None = None
 

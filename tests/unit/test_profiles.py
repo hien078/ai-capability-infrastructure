@@ -11,6 +11,7 @@ from aci.domain.runtime.state import BudgetLedger, RunState, RuntimeStateSnapsho
 from aci.domain.runtime.stop_reason import RunStatus
 from aci.runtime.profiles import (
     PROFILES,
+    acceptance_prefixes,
     artifacts_observed,
     claimed_changes_observed,
     claims_grounded,
@@ -21,7 +22,7 @@ from aci.runtime.profiles import (
     summary_present,
     verifier_checks,
 )
-from aci.runtime.verification import VerificationManager
+from aci.runtime.verification import VerificationManager, VerifierCallable
 
 
 def _dummy_snapshot() -> RuntimeStateSnapshot:
@@ -66,10 +67,19 @@ def _observed(
     )
 
 
+#: the run's acceptance-tied command (the client's verification_command)
+ACCEPT_ARGV = ["pytest", "-q"]
+ACCEPT = ["pytest -q"]
+
+
+def _checks(profile: AgentProfileId) -> list[VerifierCallable]:
+    return verifier_checks(profile, acceptance_commands=[ACCEPT_ARGV])
+
+
 def _run(
     profile: AgentProfileId, snap: RuntimeStateSnapshot, cand: CandidateResult
 ) -> list[CheckResult]:
-    return [check.fn(snap, cand) for check in verifier_checks(profile)]
+    return [check.fn(snap, cand) for check in _checks(profile)]
 
 
 #: profile -> (self-reported candidate, the evidence that grounds it, confirmed changes)
@@ -235,7 +245,7 @@ class TestProfileVerifiers:
         results = _run(pid, snap, candidate)
         assert all(r.passed for r in results), [r.detail for r in results if not r.passed]
         assert [r.name for r in results] == [c.name for c in verifier_checks(pid)]
-        verdict = VerificationManager(verifier_checks(pid)).verify(
+        verdict = VerificationManager(_checks(pid)).verify(
             candidate, snapshot=snap, contract=PROFILES[pid].default_result_contract
         )
         assert verdict.verdict == "PASS", verdict.repair_hints
@@ -355,49 +365,138 @@ class TestCommandAfterLastChange:
     def test_command_before_the_last_write_fails(self) -> None:
         snap = _observed([_cmd(1, 0), _written("src/app.py")], ["src/app.py"])
         for check in (command_passed_after_last_change, command_run_after_last_change):
-            result = check(snap, CandidateResult())
+            result = check(snap, CandidateResult(), acceptance=ACCEPT)
             assert not result.passed
-            assert result.detail == "no command ran after the last write to src/app.py"
+            assert result.detail == (
+                'no command ran after the last write to src/app.py; run "pytest -q"'
+            )
 
     def test_command_after_the_last_write_passes(self) -> None:
         snap = _observed(
             [_written("a.py"), _cmd(1, 1), _written("b.py"), _cmd(2, 0)], ["a.py", "b.py"]
         )
-        assert command_passed_after_last_change(snap, CandidateResult()).passed
-        assert command_run_after_last_change(snap, CandidateResult()).passed
+        assert command_passed_after_last_change(snap, CandidateResult(), acceptance=ACCEPT).passed
+        assert command_run_after_last_change(snap, CandidateResult(), acceptance=ACCEPT).passed
 
     def test_only_commands_after_the_final_write_count(self) -> None:
         snap = _observed([_written("a.py"), _cmd(1, 0), _written("b.py"), _cmd(2, 2)])
-        result = command_passed_after_last_change(snap, CandidateResult())
+        result = command_passed_after_last_change(snap, CandidateResult(), acceptance=ACCEPT)
         assert not result.passed
         assert result.detail == (
-            'no command exited 0 after the last write to b.py; last: "exit=2 pytest -q"'
+            'no acceptance command exited 0 after the last write to b.py; last: "exit=2 pytest -q"'
         )
 
     def test_failing_run_counts_as_run_not_as_passed(self) -> None:
         snap = _observed([_written("tests/t.py"), _cmd(1, 1)])
-        assert not command_passed_after_last_change(snap, CandidateResult()).passed
-        assert command_run_after_last_change(snap, CandidateResult()).passed
+        assert not command_passed_after_last_change(
+            snap, CandidateResult(), acceptance=ACCEPT
+        ).passed
+        assert command_run_after_last_change(snap, CandidateResult(), acceptance=ACCEPT).passed
 
     def test_timeout_is_neither_passed_nor_run(self) -> None:
         snap = _observed([_written("tests/t.py"), _cmd(1, "timeout")])
-        passed = command_passed_after_last_change(snap, CandidateResult())
-        ran = command_run_after_last_change(snap, CandidateResult())
+        passed = command_passed_after_last_change(snap, CandidateResult(), acceptance=ACCEPT)
+        ran = command_run_after_last_change(snap, CandidateResult(), acceptance=ACCEPT)
         assert not passed.passed
         assert not ran.passed
         assert "exit=timeout" in ran.detail
         with_code = _observed([_written("tests/t.py"), _cmd(1, "timeout"), _cmd(2, 0)])
-        assert command_passed_after_last_change(with_code, CandidateResult()).passed
+        assert command_passed_after_last_change(
+            with_code, CandidateResult(), acceptance=ACCEPT
+        ).passed
 
-    def test_without_writes_any_command_counts(self) -> None:
-        snap = _observed([_read("a.py"), _cmd(1, 0, "make check")])
-        assert command_passed_after_last_change(snap, CandidateResult()).passed
+    def test_without_writes_any_acceptance_command_counts(self) -> None:
+        snap = _observed([_read("a.py"), _cmd(1, 0, "pytest -q tests/test_a.py")])
+        assert command_passed_after_last_change(snap, CandidateResult(), acceptance=ACCEPT).passed
 
     def test_no_command_at_all_fails(self) -> None:
-        result = command_run_after_last_change(_observed([_read("a.py")]), CandidateResult())
+        result = command_run_after_last_change(
+            _observed([_read("a.py")]), CandidateResult(), acceptance=ACCEPT
+        )
         assert not result.passed
-        assert result.detail == "no command ran in this run"
+        assert result.detail == 'no command ran in this run; run "pytest -q"'
 
     def test_read_and_listed_do_not_reset_the_window(self) -> None:
         snap = _observed([_written("a.py"), _cmd(1, 0), _read("a.py"), _listed("src")])
-        assert command_passed_after_last_change(snap, CandidateResult()).passed
+        assert command_passed_after_last_change(snap, CandidateResult(), acceptance=ACCEPT).passed
+
+
+class TestAcceptanceTiedCommands:
+    """The verifier gap: an arbitrary exit-0 command after the last edit is NOT
+    regression evidence — only the run's acceptance command (or argv extending
+    it) counts, and with no acceptance command the checks fail closed."""
+
+    NOOPS = ("true", "python -c pass", "make check", "pytest --version", "pytest-evil -q")
+
+    @pytest.mark.parametrize("noop", NOOPS)
+    def test_unrelated_exit_zero_after_the_last_change_does_not_pass(self, noop: str) -> None:
+        snap = _observed([_written("src/app.py"), _cmd(1, 0, noop)], ["src/app.py"])
+        for check in (command_passed_after_last_change, command_run_after_last_change):
+            result = check(snap, CandidateResult(), acceptance=ACCEPT)
+            assert not result.passed, noop
+            assert "is not one" in result.detail
+            assert '"pytest -q"' in result.detail  # the repair hint names the real command
+
+    @pytest.mark.parametrize("noop", NOOPS)
+    def test_debugger_gate_refuses_a_noop_regression_check(self, noop: str) -> None:
+        candidate, _, changed = GROUNDED[AgentProfileId.DEBUGGER]
+        snap = _observed([_read("src/app.py"), _written("src/app.py"), _cmd(1, 0, noop)], changed)
+        failed = [r.name for r in _run(AgentProfileId.DEBUGGER, snap, candidate) if not r.passed]
+        assert failed == ["command_passed_after_last_change"]
+        contract = PROFILES[AgentProfileId.DEBUGGER].default_result_contract
+        verdict = VerificationManager(_checks(AgentProfileId.DEBUGGER)).verify(
+            candidate, snapshot=snap, contract=contract
+        )
+        assert verdict.verdict == "FAIL"
+
+    def test_tester_gate_refuses_a_noop_run(self) -> None:
+        candidate, _, changed = GROUNDED[AgentProfileId.TESTER]
+        snap = _observed([_written("tests/test_app.py"), _cmd(1, 1, "false")], changed)
+        failed = [r.name for r in _run(AgentProfileId.TESTER, snap, candidate) if not r.passed]
+        assert failed == ["command_run_after_last_change"]
+
+    @pytest.mark.parametrize("argv", ["pytest -q", "pytest -q tests/test_app.py -x"])
+    def test_the_acceptance_command_or_an_extension_of_it_passes(self, argv: str) -> None:
+        snap = _observed(
+            [_written("src/app.py"), _cmd(1, 0, "true"), _cmd(2, 0, argv)], ["src/app.py"]
+        )
+        assert command_passed_after_last_change(snap, CandidateResult(), acceptance=ACCEPT).passed
+        assert command_run_after_last_change(snap, CandidateResult(), acceptance=ACCEPT).passed
+
+    def test_noop_does_not_mask_a_failing_acceptance_run(self) -> None:
+        snap = _observed([_written("src/app.py"), _cmd(1, 1, "pytest -q"), _cmd(2, 0, "true")])
+        result = command_passed_after_last_change(snap, CandidateResult(), acceptance=ACCEPT)
+        assert not result.passed
+        assert result.detail.endswith('last: "exit=1 pytest -q"')
+
+    def test_no_acceptance_command_fails_closed(self) -> None:
+        snap = _observed([_written("src/app.py"), _cmd(1, 0, "pytest -q")], ["src/app.py"])
+        for check in (command_passed_after_last_change, command_run_after_last_change):
+            result = check(snap, CandidateResult())
+            assert not result.passed
+            assert "verification_command" in result.detail
+        candidate, _, changed = GROUNDED[AgentProfileId.DEBUGGER]
+        snap = _observed([_read("src/app.py"), _written("src/app.py"), _cmd(1, 0)], changed)
+        results = [c.fn(snap, candidate) for c in verifier_checks(AgentProfileId.DEBUGGER)]
+        assert [r.name for r in results if not r.passed] == ["command_passed_after_last_change"]
+
+    def test_acceptance_prefixes_from_argv(self) -> None:
+        assert acceptance_prefixes([["python", "-m", "pytest", "-q"]]) == ["python -m pytest -q"]
+        assert acceptance_prefixes([["pytest"], ["pytest"]]) == ["pytest"]
+        # Not faithfully expressible as a whitespace-split prefix: dropped (fail
+        # closed), never truncated to `python -c`, which would admit `python -c pass`.
+        assert acceptance_prefixes([["python", "-c", "import sys; sys.exit(0)"]]) == []
+        assert acceptance_prefixes([["pytest", ""]]) == []
+        assert acceptance_prefixes([[]]) == []
+        with pytest.raises(TypeError):
+            acceptance_prefixes(["pytest -q"])
+
+    def test_verifier_checks_binds_the_run_acceptance_command(self) -> None:
+        checks = verifier_checks(
+            AgentProfileId.DEBUGGER, acceptance_commands=[("python", "-m", "pytest", "-q")]
+        )
+        gate = next(c for c in checks if c.name == "command_passed_after_last_change")
+        ran = _observed([_written("a.py"), _cmd(1, 0, "python -m pytest -q -x")])
+        assert gate.fn(ran, CandidateResult()).passed
+        noop = _observed([_written("a.py"), _cmd(1, 0, "python -c pass")])
+        assert not gate.fn(noop, CandidateResult()).passed
