@@ -10,6 +10,12 @@
 # Env:     ACI_BACKUP_KEEP   retention count of timestamped dirs (default 14)
 #          ACI_BACKUP_ROOT   override backup root (default <repo>/data/backups)
 #
+# Failure behavior: if any dump fails, the partial timestamped dir of that
+# attempt is DELETED (pg_restore on a truncated custom-format dump fails
+# anyway; the run's log output records the attempt) and retention is SKIPPED
+# entirely for that invocation — retention runs only after a fully successful
+# backup, so a failed run never evicts good backups.
+#
 # HONEST LIMIT: these backups live on the SAME disk as the database — a
 # host-level failure (disk death, rm -rf mistake, crypto ransom) loses both.
 # Copy data/backups/ offsite (rsync to another machine / object storage) at
@@ -64,7 +70,26 @@ for db in "${DBS[@]}"; do
     tee -a "$DEST/manifest.txt"
 done
 
+# --- failure path: delete the partial dir, skip retention entirely ---
+# A partial dump is worse than none: pg_restore on a truncated custom-format
+# dump fails anyway, and a failed attempt's dir left on disk would count toward
+# the retention budget — KEEP consecutive failed days would otherwise evict
+# every good backup. The manifest lines above (tee'd to stdout) record the
+# attempt in the log; retention below is unreachable for this invocation.
+if (( FAILED )); then
+  echo
+  echo "=== backup summary ==="
+  echo "destination : $DEST"
+  cat "$DEST/manifest.txt"
+  rm -rf "$DEST"
+  echo "removed     : $DEST (partial dump of a failed attempt)"
+  echo "retention   : skipped — a failed run never prunes good backups"
+  echo "STATUS      : FAILED — one or more dumps errored, see above"
+  exit 1
+fi
+
 # --- prune: keep only the newest $KEEP timestamped dirs ---
+# (reached only after a fully successful backup — see the failure path above)
 mapfile -t dirs < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -name '20??????-??????' | sort)
 pruned=0
 if (( ${#dirs[@]} > KEEP )); then
@@ -82,8 +107,4 @@ echo "destination : $DEST"
 cat "$DEST/manifest.txt"
 echo "kept        : $(( ${#dirs[@]} - pruned )) timestamped backup dir(s) (retention ACI_BACKUP_KEEP=$KEEP)"
 echo "pruned      : $pruned"
-if (( FAILED )); then
-  echo "STATUS      : FAILED — one or more dumps errored, see above"
-  exit 1
-fi
 echo "STATUS      : OK"
