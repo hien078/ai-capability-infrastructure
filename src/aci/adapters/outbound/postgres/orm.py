@@ -407,9 +407,16 @@ class AgentRunRow(Base):
     stop_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     detail_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    #: RunResult.artifacts — server default '[]' backfills pre-0017 rows;
+    #: the ORM declares the same default (compare_server_default=True).
+    artifacts: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
     evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     usage: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    #: RunResult.trace_ref — external trace link; NULL when the run set none.
+    trace_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     verification_command: Mapped[list[Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

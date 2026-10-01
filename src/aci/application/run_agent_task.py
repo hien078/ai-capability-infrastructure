@@ -178,8 +178,10 @@ class AgentRunService:
                 "stop_reason": record.stop_reason,
                 "detail_code": record.detail_code,
                 "summary": record.summary,
+                "artifacts": record.artifacts,
                 "evidence": record.evidence,
                 "usage": record.usage,
+                "trace_ref": record.trace_ref,
                 "spec": record.spec or None,
             }
         )
@@ -436,6 +438,8 @@ class AgentRunService:
                     stop_reason=result.stop_reason.value if result.stop_reason else None,
                     detail_code=result.detail_code,
                     summary=result.summary,
+                    artifacts=list(result.artifacts),
+                    trace_ref=result.trace_ref,
                     evidence=result.evidence.model_dump(mode="json") if result.evidence else None,
                     usage=result.usage.model_dump(mode="json"),
                     spec=spec.model_dump(mode="json"),
@@ -462,9 +466,22 @@ class AgentRunService:
                         for seq, e in enumerate(history)
                     ]
                 )
+                # The events are durable; the RAM copy is dead weight. One
+                # shared bus per process — without this, _history grows
+                # without bound in a long-running server. Nothing reads it
+                # after persist.
+                self._event_bus.discard(result.run_id)
         except Exception:  # noqa: BLE003 — telemetry must never kill a finished run
             log.warning(
                 "agent run %s persistence FAILED (result stays caller-visible)",
                 result.run_id,
                 exc_info=True,
             )
+            if self._event_bus is not None:
+                # The run is terminal either way; the RAM history is dead
+                # weight even when persistence failed — free it.
+                self._event_bus.discard(result.run_id)
+                log.debug(
+                    "agent run %s RAM event history discarded after failed persistence",
+                    result.run_id,
+                )

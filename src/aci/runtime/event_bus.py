@@ -155,6 +155,13 @@ class EventBus:
     def history(self, run_id: str) -> list[EventEnvelope]:
         return list(self._history.get(run_id, []))
 
+    def discard(self, run_id: str) -> list[EventEnvelope]:
+        """Pop a run's history (§41.1): once the events are durable (or the
+        run is terminal and persistence failed) the RAM copy is dead weight —
+        one shared bus per process must not accumulate every finished run's
+        telemetry forever. Returns the popped history; unknown run → []."""
+        return self._history.pop(run_id, [])
+
 
 class NullEventBus(EventBus):
     """Honest default when no sink is wired: events are recorded in-memory

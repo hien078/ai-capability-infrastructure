@@ -90,7 +90,14 @@ class TestAgentRunPersistence:
             ToolCallBatchAction(
                 calls=[ToolCall(call_id="c1", tool_id="read_file", arguments={"path": "notes.txt"})]
             ),
-            FinalCandidate(summary="done", claims=["notes.txt: cause X"]),
+            FinalCandidate(
+                summary="done",
+                claims=["notes.txt: cause X"],
+                # migration 0017: an artifact the run claims to have produced —
+                # the researcher verifier does not check artifacts, so this
+                # exercises the persistence path, not the verification one.
+                artifacts=["out.txt"],
+            ),
         ]
         _workspace(tmp_path)
         service = _service(actions, store, tmp_path)
@@ -101,6 +108,7 @@ class TestAgentRunPersistence:
             workspace="proj",
         )
         assert result.status.value == "succeeded"
+        assert result.artifacts == ["out.txt"]  # the fixture really carries artifacts
         run_id = result.run_id
 
         # A FRESH service (same store, empty RAM) — the "restart".
@@ -110,6 +118,11 @@ class TestAgentRunPersistence:
         assert revived.run_id == run_id
         assert revived.status.value == "succeeded"
         assert revived.summary == "done"
+        # migration 0017: artifacts/trace_ref round-trip through the fresh
+        # service — the row is the projection of the WHOLE frozen terminal
+        # state (INV-01), so no RunResult field is lost on read-back.
+        assert revived.artifacts == ["out.txt"]
+        assert revived.trace_ref is None  # nothing sets trace_ref on this path — None-stable
 
         # The row is the projection of the frozen terminal state.
         record = store.get_run(run_id)
@@ -118,6 +131,8 @@ class TestAgentRunPersistence:
         assert record.profile_id == "researcher"
         assert record.objective == "fix the failing test"
         assert record.workspace == "proj"
+        assert record.artifacts == ["out.txt"]
+        assert record.trace_ref is None
         assert record.usage["turns"] >= 1
         assert record.spec  # §52 reproducibility: the spec is pinned
         assert record.finished_at is not None

@@ -65,6 +65,18 @@ class TestEventBus:
         assert envelope.event_id.startswith("evt_")
         assert bus.history("run-1") == [envelope]
 
+    def test_discard_pops_one_runs_history_only(self) -> None:
+        """§41.1: discard frees a finished run's RAM telemetry — popped (not
+        copied), isolated to that run, and a no-op for unknown runs."""
+        bus = EventBus()
+        kept = bus.emit(RUN_STARTED, run_id="run-1")
+        dropped = bus.emit(TOOL_EXECUTION_COMPLETED, run_id="run-2")
+        assert bus.discard("run-2") == [dropped]
+        assert bus.history("run-2") == []  # gone, not a copy
+        assert bus.history("run-1") == [kept]  # other runs unaffected
+        assert bus.discard("ghost") == []  # unknown run: nothing to free
+        assert bus.discard("run-2") == []  # idempotent on an already-freed run
+
 
 class TestCancelToken:
     def test_raise_only_after_cancel(self) -> None:

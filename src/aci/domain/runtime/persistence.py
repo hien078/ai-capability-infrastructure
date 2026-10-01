@@ -33,12 +33,16 @@ class AgentRunRecord(BaseModel):
     stop_reason: str | None = None
     detail_code: str | None = None
     summary: str = ""
+    #: RunResult.artifacts — the run's output artifact paths (§41.1).
+    artifacts: list[str] = Field(default_factory=list)
     #: EvidencePack.model_dump() — None when the run produced no evidence.
     evidence: dict[str, Any] | None = None
     #: RunUsage.model_dump()
     usage: dict[str, Any] = Field(default_factory=dict)
     #: RuntimeSpec.model_dump() — reproducibility (§52): pinned versions.
     spec: dict[str, Any] = Field(default_factory=dict)
+    #: RunResult.trace_ref — external trace link; None when the run set none.
+    trace_ref: str | None = None
     verification_command: list[str] | None = None
     created_at: datetime
     finished_at: datetime | None = None
