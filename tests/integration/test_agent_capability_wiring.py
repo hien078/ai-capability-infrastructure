@@ -61,6 +61,16 @@ def uid(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
+def unique_token() -> str:
+    """ONE routing token shared with nothing else in the DB. The shared live
+    DB keeps every earlier run's production skill (blobs in THEIR tmp object
+    stores); a ``word-<hex>`` token tokenizes into a word all those leftovers
+    share plus a suffix, and once a leftover outranked this run's skill
+    (route_run 2026-10-01: 0.500 vs 0.466) the 1-item bundle failed
+    activation on its missing blob. No separator, no common words."""
+    return f"qz{uuid.uuid4().hex}"
+
+
 def ingest_and_promote(
     ingestion: SkillIngestionService,
     promotion: PromotionService,
@@ -73,7 +83,7 @@ def ingest_and_promote(
     src = tmp_path / name
     src.mkdir(parents=True)
     (src / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: {token} {token} recalibration procedure\n"
+        f"---\nname: {name}\ndescription: {token} {token}\n"
         f"version: 1.0.0\n---\n\nsteps for {token}\n",
         encoding="utf-8",
     )
@@ -155,11 +165,11 @@ def test_registry_client_routes_resolves_and_activates_production_skill(
     security_repo: SqlAlchemySecurityAssessmentRepository,
     tmp_path: Path,
 ) -> None:
-    token = uid("zorblatt")
+    token = unique_token()
     cap = ingest_and_promote(ingestion, promotion, license_repo, security_repo, tmp_path, token)
 
     client = clients()
-    selections = client.search(CapabilityRequest(objective=f"{token} recalibration"))
+    selections = client.search(CapabilityRequest(objective=token))
     picked = {s.capability_id: s for s in selections}
     assert cap in picked
     sel = picked[cap]
@@ -168,7 +178,7 @@ def test_registry_client_routes_resolves_and_activates_production_skill(
     run = container.route_runs.get_route_run(cast(Any, sel).route_run_id)
     assert run is not None
     assert run.client_type == CLIENT_TYPE
-    assert run.task_text == f"{token} recalibration"
+    assert run.task_text == token
     # The kernel's selection decision reads the rerank score back from the
     # persisted route run (live DB JSON round-trip).
     (decision,) = client.decisions
@@ -185,9 +195,7 @@ def test_registry_client_routes_resolves_and_activates_production_skill(
     assert digest == sel.digest
 
     runtime = CapabilityRuntime(clients())
-    activations = runtime.handle_request(
-        CapabilityRequest(objective=f"{token} recalibration"), _snapshot()
-    )
+    activations = runtime.handle_request(CapabilityRequest(objective=token), _snapshot())
     assert cap in {a.capability_id for a in activations}
     # The digest-verified SKILL.md text rides in the activation (run state).
     loaded = next(a for a in activations if a.capability_id == cap)
@@ -208,7 +216,7 @@ def test_kernel_run_emits_capability_loaded_from_registry(
     — as the text-JSON action, or (what real function-calling models do,
     2026-10-01) by calling the request_capability tool; the REST wiring's
     capability factory serves it from the registry."""
-    token = uid("quibbleflux")
+    token = unique_token()
     cap = ingest_and_promote(ingestion, promotion, license_repo, security_repo, tmp_path, token)
 
     class _Factory:
@@ -222,16 +230,14 @@ def test_kernel_run_emits_capability_loaded_from_registry(
         def handle_request(self, request: object, snapshot: object) -> list[object]:
             return []
 
-    ask: CapabilityRequest | ToolCallBatchAction = CapabilityRequest(
-        objective=f"{token} recalibration"
-    )
+    ask: CapabilityRequest | ToolCallBatchAction = CapabilityRequest(objective=token)
     if via == "function_call":
         ask = ToolCallBatchAction(
             calls=[
                 ToolCall(
                     call_id="call_cap",
                     tool_id=CAPABILITY_TOOL_ID,
-                    arguments={"objective": f"{token} recalibration"},
+                    arguments={"objective": token},
                 )
             ]
         )
