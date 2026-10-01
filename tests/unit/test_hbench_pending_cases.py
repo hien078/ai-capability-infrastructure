@@ -120,13 +120,13 @@ class TestH005ContextFlood:
             hpc.read_call("r2", "biglog-b.txt"),
             hpc.read_call("r3", "biglog-c.txt"),
             hpc.write_call("w1", "answer.txt", case.answer),
-            hpc.final(f"counted {case.answer} ERROR lines", changes=["answer.txt"]),
+            hpc.final(f"read the logs; the FINAL marker is {case.answer}", changes=["answer.txt"]),
         ]
         run = hpc.ScriptedCaseRun(case, script, tmp_path)
         result = run.run()
 
         # the run completes VERIFIED: the answer is right and the fixture's
-        # own test — which recomputes the count from the logs — passed.
+        # own test — which recomputes the marker from biglog-c.txt — passed.
         assert result.status is RunStatus.SUCCEEDED, result
         assert result.stop_reason is StopReason.SUCCESS
         answer = (run.run_dir(result.run_id) / "answer.txt").read_text()

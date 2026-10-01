@@ -26,10 +26,13 @@ The same shape the H-bench runner materializes for the §80 pack
 ``context_budget_tokens`` (H005)
     The run's ContextEngine budget. The workspace ships ~126KB of generated
     logs; every ``read_file`` returns ~48KB numbered, which INV-10 caps at the
-    12'000-char inline budget (head + truncation marker + tail). Three reads
-    put ~9'000 tokens of observations in the transcript; a 4'000-token budget
-    forces the kernel to DROP whole earlier turn groups (INV-09) while the
-    run still completes green.
+    12'000-char inline budget (head + truncation marker + tail). The task
+    needs only the NEWEST read (each file's FINAL marker lives in its tail,
+    visible through the truncation), so it stays answerable when the older
+    read groups are dropped: a 4'000-token budget forces the kernel to DROP
+    whole earlier turn groups (INV-09) while the run still completes green —
+    and a model that floods all three files passes too, because the drop
+    keeps the peak within budget either way.
 ``approval_required_tools`` (H006/H011)
     The §13.6 overlay: the fix needs ``edit_file``, whose calls pause the run
     BEFORE the gated effect executes.
@@ -200,33 +203,43 @@ class PendingCase:
 # ---------------------------------------------------------------------------
 
 
+#: Each log's last line carries a FINAL marker — the value lives in the
+#: read's VISIBLE tail (INV-10 keeps head+tail), so the task is answerable
+#: by a real model that reads the file, not only by a scripted one.
+_H005_MARKERS = {"a": "alpha-4f9", "b": "bravo-2c7", "c": "charlie-9d2"}
+
+
 def _log_block(tag: str, lines: int = 800) -> str:
-    """Deterministic service-log text (~42KB): every 7th line is an ERROR line.
+    """Deterministic service-log text (~42KB): every 7th line is an ERROR line
+    and the LAST line carries the file's FINAL marker.
 
     ``read_file`` numbers every line (~48KB), which INV-10 caps at the
     12'000-char inline budget (head + truncation marker + tail) — the
-    oversized-output flood H005 measures. The ERROR count is derivable from
-    the text (``content.count(" ERROR ")``) and the fixture's own test
-    recomputes it, so the expected answer can never drift from the files.
+    oversized-output flood H005 measures. The marker is in the tail, so it
+    stays visible through the truncation; the fixture's own test recomputes
+    it from the file, so the expected answer can never drift.
     """
     rows = [
         f"2026-10-02T10:00:{i % 60:02d}Z svc-{tag} "
         f"{'ERROR' if i % 7 == 0 else 'INFO'} event-{i:04d} payload-ok"
         for i in range(lines)
     ]
+    rows.append(f"2026-10-02T11:00:00Z svc-{tag} FINAL marker {_H005_MARKERS[tag]}")
     return "\n".join(rows) + "\n"
 
 
 _H005_TEST = '''from pathlib import Path
 
 
-def test_answer_counts_the_error_lines() -> None:
-    """answer.txt must hold the number of ERROR lines across biglog-*.txt."""
-    expected = sum(
-        path.read_text(encoding="utf-8").count(" ERROR ")
-        for path in sorted(Path(".").glob("biglog-*.txt"))
+def test_answer_carries_the_final_marker() -> None:
+    """answer.txt must hold biglog-c.txt's FINAL marker value."""
+    final_line = next(
+        line
+        for line in reversed(Path("biglog-c.txt").read_text(encoding="utf-8").splitlines())
+        if "FINAL marker " in line
     )
-    assert Path("answer.txt").read_text(encoding="utf-8").strip() == str(expected)
+    marker = final_line.split("FINAL marker ", 1)[1].strip()
+    assert Path("answer.txt").read_text(encoding="utf-8").strip() == marker
 '''
 
 _H005_FILES = {
@@ -289,18 +302,14 @@ def test_five_purchases_qualify() -> None:
 # The four cases
 # ---------------------------------------------------------------------------
 
-_H005_ERROR_LINES = sum(
-    _H005_FILES[name].count(" ERROR ") for name in _H005_FILES if name.startswith("biglog-")
-)
-
 H005 = PendingCase(
     case_id="H005",
     name="h005-context-flood",
     files=_H005_FILES,
     prompt=(
-        "The three biglog-*.txt files hold service logs. Count the lines whose "
-        "level is ERROR across all three files and write just that number to "
-        "answer.txt."
+        "The biglog-*.txt files hold service logs and each ends with a FINAL "
+        "marker line. Read biglog-c.txt and write its FINAL marker value to "
+        "answer.txt (just the value)."
     ),
     pass_criteria=(
         "run SUCCEEDED (verifier-gated)",
@@ -309,7 +318,11 @@ H005 = PendingCase(
         "each read observation INV-10-bounded (truncation marker, ~12KB inline)",
     ),
     context_budget_tokens=4_000,
-    answer=str(_H005_ERROR_LINES),
+    # The task needs only the NEWEST read (biglog-c's marker is in its tail),
+    # so it stays answerable when the older read groups are dropped — a real
+    # model that reads only c passes; one that floods all three files passes
+    # too, because the drop keeps the peak within budget either way.
+    answer=_H005_MARKERS["c"],
 )
 
 H006 = PendingCase(
