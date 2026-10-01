@@ -25,14 +25,17 @@ NOISE_DIRS: frozenset[str] = frozenset(
 def command_within_prefixes(command: Sequence[str], prefixes: Sequence[str]) -> bool:
     """Token-aware, fail-closed process scope (§13.4): argv must start with the
     whitespace-split tokens of an allowed prefix. `pytest` never admits
-    `pytest-evil`, an empty prefix admits nothing, and no prefixes deny all."""
+    `pytest-evil`, an empty prefix admits nothing, and no prefixes deny all.
+    A multi-token prefix never admits a program whose NAME is the joined
+    prefix string (m5 review, ADV-5: `["python -m pytest", …]` is not
+    `python -m pytest` — matching is token-wise only)."""
     if not command:
         return False
     for prefix in prefixes:
         tokens = prefix.split()
         if not tokens:
             continue
-        if list(command[: len(tokens)]) == tokens or command[0] == prefix.strip():
+        if list(command[: len(tokens)]) == tokens:
             return True
     return False
 

@@ -770,13 +770,23 @@ class AgentRunService:
     # -- per-run wiring -------------------------------------------------------
 
     def _source_for(self, name: str) -> Path:
+        """The workspace source directory a run copies from. A name may be
+        a symlink (a deployment convenience link), but it must resolve
+        INSIDE the workspace root (m5 review, ADV-4): a name pointing
+        elsewhere would copy the target tree into the run's working copy,
+        where the model can read it. The refusal never names the path."""
         if self._workspace_root is None:
             raise DomainError(
                 ErrorCode.CLIENT_INCOMPATIBLE,
                 "this server exposes no workspaces (ACI_AGENT_WORKSPACE_ROOT is unset)",
             )
         _validate_workspace_name(name)
-        return self._workspace_root / name
+        source = self._workspace_root / name
+        root = self._workspace_root.resolve()
+        resolved = source.resolve()
+        if resolved == root or not resolved.is_relative_to(root):
+            raise DomainError(ErrorCode.WORKSPACE_NOT_FOUND, f"unknown workspace: {name!r}")
+        return source
 
     def _effective_prefixes(self, requested: Sequence[str] | None) -> list[str]:
         """INV-02: the run's process scope is the server ceiling, or a client

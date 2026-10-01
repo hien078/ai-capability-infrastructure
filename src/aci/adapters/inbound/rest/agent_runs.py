@@ -36,11 +36,26 @@ router = APIRouter(
 )
 
 
+#: m5 review, ADV-6: request-field bounds. The objective was already capped
+#: (8000); these close the remaining amplification channels — a multi-megabyte
+#: field otherwise flows into every model request and the durable store.
+#: Generous by design (they bound, they do not model the context budget):
+#: 100k chars ≈ 25k tokens per string field, 100–200 items per list.
+_MAX_CONTEXT_CHARS = 100_000
+_MAX_ITEM_CHARS = 2_000
+_MAX_COMMAND_ITEM_CHARS = 4_000
+_MAX_LIST_ITEMS = 100
+
+
 class AgentRunRequest(BaseModel):
     objective: str = Field(min_length=1, max_length=8000)
-    global_context: str = ""
-    constraints: list[str] = Field(default_factory=list)
-    acceptance_criteria: list[str] = Field(default_factory=list)
+    global_context: str = Field(default="", max_length=_MAX_CONTEXT_CHARS)
+    constraints: list[Annotated[str, Field(max_length=_MAX_ITEM_CHARS)]] = Field(
+        default_factory=list, max_length=_MAX_LIST_ITEMS
+    )
+    acceptance_criteria: list[Annotated[str, Field(max_length=_MAX_ITEM_CHARS)]] = Field(
+        default_factory=list, max_length=_MAX_LIST_ITEMS
+    )
     requested_profile: str = "coder"
     max_turns: int | None = Field(default=None, ge=1, le=200)
     budget: BudgetLedger | None = None
@@ -49,16 +64,24 @@ class AgentRunRequest(BaseModel):
     workspace: str | None = None
     #: argv the verifier runs after the model's final candidate; must be a
     #: workspace run and within the run's process prefixes (§19, INV-08).
-    verification_command: list[str] | None = Field(default=None, min_length=1)
+    verification_command: list[Annotated[str, Field(max_length=_MAX_COMMAND_ITEM_CHARS)]] | None = (
+        Field(default=None, min_length=1, max_length=_MAX_LIST_ITEMS)
+    )
     #: Workspace-relative write scopes (default: whole workspace, "."); an
     #: explicit empty list is a read-only workspace.
-    write_scopes: list[str] | None = None
+    write_scopes: list[Annotated[str, Field(max_length=_MAX_ITEM_CHARS)]] | None = Field(
+        default=None, max_length=_MAX_LIST_ITEMS
+    )
     #: Command prefixes the model may run; must narrow the server ceiling
     #: (INV-02). None = the full ceiling.
-    command_prefixes: list[str] | None = None
+    command_prefixes: list[Annotated[str, Field(max_length=_MAX_ITEM_CHARS)]] | None = Field(
+        default=None, max_length=_MAX_LIST_ITEMS
+    )
     #: Tool ids whose calls pause the run for this client's approval
     #: (§13.6) — ADDED to the server's own list, never replacing it.
-    approval_required_tools: list[str] | None = Field(default=None, max_length=50)
+    approval_required_tools: list[Annotated[str, Field(max_length=200)]] | None = Field(
+        default=None, max_length=50
+    )
     #: Load the routed registry skills before the first model turn (on/off
     #: for this run; None = the server default ACI_AGENT_CAPABILITY_PRELOAD).
     #: Grants nothing — it only adds skill TEXT to the model's context.
@@ -148,8 +171,10 @@ class ReviseRequest(BaseModel):
     profile, workspace options) comes from the previous attempt."""
 
     objective: str | None = Field(default=None, min_length=1, max_length=8000)
-    failed_criteria: list[str] = Field(default_factory=list)
-    feedback: str = ""
+    failed_criteria: list[Annotated[str, Field(max_length=_MAX_ITEM_CHARS)]] = Field(
+        default_factory=list, max_length=_MAX_LIST_ITEMS
+    )
+    feedback: str = Field(default="", max_length=_MAX_CONTEXT_CHARS)
     max_turns: int | None = Field(default=None, ge=1, le=200)
 
 
