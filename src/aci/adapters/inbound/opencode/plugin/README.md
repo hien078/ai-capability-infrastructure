@@ -115,6 +115,16 @@ the header.
 | `timeoutMs`        | `2000`                 | routing must never hang prompt admission                      |
 | `failClosed`       | `false`                | fail-open default (ADR-005); `true` only for compliance flows|
 
+Environment (read by the installed copy, so a plain file install can be
+configured without editing it — the config tuple form needs an npm package):
+
+| Variable                | Meaning                                                                 |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `ACI_ROUTER_BASE_URL`   | overrides the `baseUrl` default                                         |
+| `ACI_ROUTER_PRINCIPAL`  | overrides the `principalId` default (e.g. `opencode-mac` for separable daily use) |
+| `ACI_ROUTER_DISABLED=1` | skip routing entirely (prompt admitted untouched)                       |
+| `ACI_ROUTER_SKIP_PATHS` | `:`-separated substrings; a session whose `$PWD` contains one is not routed (e.g. automated worker worktrees) |
+
 ## Behavior
 
 - On every admitted prompt the plugin POSTs `/v1/routes` with the prompt text

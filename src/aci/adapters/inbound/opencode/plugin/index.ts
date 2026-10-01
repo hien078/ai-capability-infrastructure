@@ -58,8 +58,8 @@ interface RouteResponse {
 }
 
 const DEFAULTS = {
-  baseUrl: "http://127.0.0.1:8000",
-  principalId: "opencode",
+  baseUrl: process.env.ACI_ROUTER_BASE_URL || "http://127.0.0.1:8000",
+  principalId: process.env.ACI_ROUTER_PRINCIPAL || "opencode",
   maxItems: 5,
   timeoutMs: 2000,
   failClosed: false,
@@ -69,6 +69,20 @@ const DEFAULTS = {
 function authHeaders(): Record<string, string> {
   const token = process.env.ACI_API_TOKEN
   return token ? { authorization: `Bearer ${token}` } : {}
+}
+
+/**
+ * Host-level opt-out, read per prompt: ACI_ROUTER_DISABLED=1, or the
+ * session's working directory ($PWD — what the OpenCode CLI resolves its
+ * project from) contains one of the ':'-separated ACI_ROUTER_SKIP_PATHS
+ * substrings (e.g. automated worker worktrees that must not be routed or
+ * counted as daily use). Skipped prompts are admitted untouched.
+ */
+function routingSkipped(): boolean {
+  if (process.env.ACI_ROUTER_DISABLED === "1") return true
+  const pwd = process.env.PWD ?? process.cwd()
+  const skip = (process.env.ACI_ROUTER_SKIP_PATHS ?? "").split(":").filter((p) => p)
+  return skip.some((p) => pwd.includes(p))
 }
 
 /** Options after defaults are applied. */
@@ -124,6 +138,7 @@ export default Plugin.define({
     const options = { ...DEFAULTS, ...(ctx.options as RouterOptions) }
 
     await ctx.session.hook("prompt", async (event) => {
+      if (routingSkipped()) return
       let route: RouteResponse
       try {
         route = await routeCapabilities(options, event.prompt.text)
