@@ -81,6 +81,10 @@ class RunOptions:
     #: §13.6 client-added approval requirements (tool ids). Narrowing only:
     #: unioned with the server's own list, never able to remove from it.
     approval_required_tools: tuple[str, ...] | None = None
+    #: Per-run override of the service's skill-preload default (None = the
+    #: server setting ``ACI_AGENT_CAPABILITY_PRELOAD``). Grants nothing: it
+    #: only decides whether routed skill TEXT is loaded before turn 1.
+    preload_capabilities: bool | None = None
 
     def to_json(self) -> dict[str, object]:
         """The persisted form (migration 0018) — client REQUESTS, never grants."""
@@ -91,14 +95,18 @@ class RunOptions:
             "command_prefixes": _list_or_none(self.command_prefixes),
             "max_turns": self.max_turns,
             "approval_required_tools": _list_or_none(self.approval_required_tools),
+            "preload_capabilities": self.preload_capabilities,
         }
 
     @classmethod
     def from_json(cls, data: dict[str, object]) -> "RunOptions":
         max_turns = data.get("max_turns")
         workspace = data.get("workspace")
+        preload = data.get("preload_capabilities")  # absent on pre-preload rows
         if max_turns is not None and not isinstance(max_turns, int):
             raise ValueError("max_turns must be an int")
+        if preload is not None and not isinstance(preload, bool):
+            raise ValueError("preload_capabilities must be a bool")
         if workspace is not None and not isinstance(workspace, str):
             raise ValueError("workspace must be a string")
         return cls(
@@ -108,6 +116,7 @@ class RunOptions:
             command_prefixes=_str_tuple(data.get("command_prefixes")),
             max_turns=max_turns,
             approval_required_tools=_str_tuple(data.get("approval_required_tools")),
+            preload_capabilities=preload,
         )
 
 
@@ -198,6 +207,7 @@ class AgentRunService:
         run_store: AgentRunStore | None = None,
         process_sandbox: ProcessSandbox | None = None,
         approval_required_tools: Iterable[str] = (),
+        preload_capabilities: bool = False,
     ) -> None:
         self._model_factory = model_gateway_factory
         self._tools_factory = tool_executor_factory
@@ -232,6 +242,10 @@ class AgentRunService:
         self._consumed: set[str] = set()
         self._durable_checkpoints: set[str] = set()
         self._claim_lock = threading.Lock()
+        #: Default for the kernel's run-start skill preload (a request's
+        #: ``preload_capabilities`` overrides it per run). Only a FRESH run
+        #: (first run or revision) preloads; a resume never does.
+        self._preload_capabilities = preload_capabilities
 
     def require_approval_for(self, tool_ids: Iterable[str]) -> None:
         """Add server-side approval requirements (``ACI_AGENT_APPROVAL_
@@ -249,6 +263,7 @@ class AgentRunService:
         write_scopes: list[str] | None = None,
         command_prefixes: list[str] | None = None,
         approval_required_tools: list[str] | None = None,
+        preload_capabilities: bool | None = None,
     ) -> RunResult:
         options = RunOptions(
             workspace=workspace,
@@ -261,6 +276,7 @@ class AgentRunService:
             approval_required_tools=(
                 tuple(approval_required_tools) if approval_required_tools is not None else None
             ),
+            preload_capabilities=preload_capabilities,
         )
         source = self._source_for(workspace) if workspace is not None else None
         return self._start(contract, spec, options, source)
@@ -908,16 +924,28 @@ class AgentRunService:
         )
         self._records[contract.task_id] = record
         workspace_id = binding.workspace_id if binding is not None else None
+        preload = (
+            options.preload_capabilities
+            if options.preload_capabilities is not None
+            else self._preload_capabilities
+        )
 
         def _go(token: CancelToken) -> RunResult:
             if options.max_turns is None:
-                return kernel.run(contract, run_spec, cancel_token=token, workspace_id=workspace_id)
+                return kernel.run(
+                    contract,
+                    run_spec,
+                    cancel_token=token,
+                    workspace_id=workspace_id,
+                    preload_capabilities=preload,
+                )
             return kernel.run(
                 contract,
                 run_spec,
                 cancel_token=token,
                 max_turns=options.max_turns,
                 workspace_id=workspace_id,
+                preload_capabilities=preload,
             )
 
         return self._drive(contract.task_id, kernel, record, _go, resumed=False)

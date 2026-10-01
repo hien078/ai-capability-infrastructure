@@ -380,3 +380,71 @@ class TestSkillsArm:
         assert s.messages[0].content == k.messages[0].content + "\n" + _CAPABILITY_PROTOCOL
         for ms, mk in zip(s.messages[1:], k.messages[1:], strict=True):
             assert ms.content == mk.content
+
+
+class _OneSkillACIClient:
+    """A fake registry client that routes every need to one skill."""
+
+    BODY = b"# fx-skill\nRun pytest -x first.\n"
+
+    class _Selection:
+        capability_id = "cap.fx"
+        version = "1"
+        payload_ref = "skill://cap.fx@1/SKILL.md"
+        estimated_context_tokens = 20
+
+        def __init__(self, digest: str) -> None:
+            self.digest = digest
+
+    def __init__(self) -> None:
+        import hashlib
+
+        self._digest = hashlib.sha256(self.BODY).hexdigest()
+        self.searches = 0
+
+    def search(self, request: object) -> list[object]:  # noqa: ARG002
+        self.searches += 1
+        return [self._Selection(self._digest)]
+
+    def resolve(self, capability_id: str, version: str) -> tuple[bytes, str]:  # noqa: ARG002
+        return self.BODY, self._digest
+
+
+class TestPreloadPlumbing:
+    """No preload arm is added here (that is the measurement's job) — only
+    the plumbing it needs: the runner's own service builder can turn the
+    kernel's run-start preload on, and it stays OFF by default so K/N/S are
+    unchanged."""
+
+    def test_kernel_service_defaults_preload_off(self, tmp_path: Path) -> None:
+        service = run_hbench._kernel_service(
+            FakeModelGateway([]), tmp_path, tmp_path, EventBus(), sandbox=available_sandbox()
+        )
+        assert service._preload_capabilities is False  # noqa: SLF001
+
+    def test_kernel_service_can_preload_through_the_counting_runtime(self, tmp_path: Path) -> None:
+        client = _OneSkillACIClient()
+        runtime = run_hbench._skills_capability_runtime(lambda: client)
+        gateway = FakeModelGateway([ContinueAction()])
+        sources = tmp_path / "src"
+        (sources / "fx").mkdir(parents=True)
+        (sources / "fx" / "a.py").write_text("x = 1\n", encoding="utf-8")
+        service = run_hbench._kernel_service(
+            gateway,
+            sources,
+            tmp_path / "runs",
+            EventBus(),
+            sandbox=available_sandbox(),
+            capability_factory=run_hbench._Factory(runtime),
+            preload_capabilities=True,
+        )
+        contract, spec = run_hbench._contract_spec({"name": "fx", "prompt": "fix the bug"})
+        service.run(contract, spec, max_turns=1, workspace="fx")
+        assert "Run pytest -x first." in "\n".join(
+            m.content
+            for m in gateway.requests[0].messages  # type: ignore[attr-defined]
+        )
+        assert client.searches == 1
+        # Preloaded skills are loaded skills, but NOT model requests.
+        assert runtime.requests == 0
+        assert runtime.preloaded == ["cap.fx@1"] and runtime.loaded == ["cap.fx@1"]

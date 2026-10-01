@@ -59,6 +59,10 @@ class AgentRunRequest(BaseModel):
     #: Tool ids whose calls pause the run for this client's approval
     #: (§13.6) — ADDED to the server's own list, never replacing it.
     approval_required_tools: list[str] | None = Field(default=None, max_length=50)
+    #: Load the routed registry skills before the first model turn (on/off
+    #: for this run; None = the server default ACI_AGENT_CAPABILITY_PRELOAD).
+    #: Grants nothing — it only adds skill TEXT to the model's context.
+    preload_capabilities: bool | None = None
 
 
 class AgentRunResponse(BaseModel):
@@ -115,6 +119,7 @@ def start_agent_run(
         write_scopes=body.write_scopes,
         command_prefixes=body.command_prefixes,
         approval_required_tools=body.approval_required_tools,
+        preload_capabilities=body.preload_capabilities,
     )
     return _to_response(result)
 

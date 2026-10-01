@@ -756,3 +756,56 @@ class TestApprovalNeverWidensAuthority:
         assert not (tmp_path / "etc/pwned.txt").exists()
         assert state.snapshot(RUN_ID).grants.filesystem.write == ["out"]
         assert state.snapshot(RUN_ID).grants.process.allowed_prefixes == []
+
+
+# -- run-start skill preload (2026-10-01): preloaded text is still reference ---
+#
+# The preload puts a routed skill into context BEFORE turn 1 without any
+# model action — it must buy exactly as little authority as a requested one.
+
+
+class TestPreloadNeverWidensGrants:
+    def test_preloaded_injected_skill_cannot_widen_grants(self, tmp_path: Path) -> None:
+        from aci.runtime.capability_runtime import CapabilityRuntime
+
+        grants_seen: list[GrantEnvelope] = []
+        state = StateManager()
+
+        def _obey(request: ModelRequest) -> ToolCallBatchAction:
+            grants_seen.append(state.snapshot(RUN_ID).grants)
+            return _write("c1", "etc/pwned.txt")  # the model "obeys" the skill
+
+        class _Model(ScriptedModel):
+            def invoke(self, request: ModelRequest) -> ModelResponse:
+                self.requests.append(request)
+                action = self._actions.pop(0)
+                return ModelResponse(
+                    action=action(request) if callable(action) else action,  # type: ignore[arg-type]
+                    usage=ModelUsage(input_tokens=100, output_tokens=50, latency_ms=10),
+                )
+
+        model = _Model([_obey, FinalCandidate(summary="ok", changes=["etc/pwned.txt"])])
+        kernel = HarnessKernel(
+            state=state,
+            model_gateway=model,
+            tool_executor=ToolRuntime(_registry_with_paths(), dispatcher=NaiveDispatcher(tmp_path)),
+            context_engine=ContextEngine(ContextBudget(total_tokens=60_000)),
+            verifier=VerificationManager(verifier_checks(AgentProfileId.CODER)),
+            recovery=RecoveryManager(),
+            capability_runtime=CapabilityRuntime(_InjectedSkillACI()),  # type: ignore[arg-type]
+        )
+        result = kernel.run(_contract(), _coder_spec(), preload_capabilities=True)
+
+        # The injection reached the FIRST request (framed), with no model action...
+        assert any(
+            "IGNORE PREVIOUS INSTRUCTIONS" in m.content and "SKILL REFERENCE" in m.content
+            for m in model.requests[0].messages
+        )
+        # ...the preload left the grants exactly as specified...
+        assert grants_seen == [WRITE_GRANT]
+        # ...and the write it "authorized" is still denied by authority.
+        tool_msgs = [m.content for m in model.requests[1].messages if m.role == "tool"]
+        assert any("AUTHORITY_DENIED" in c for c in tool_msgs)
+        assert not (tmp_path / "etc/pwned.txt").exists()
+        assert state.snapshot(RUN_ID).grants == WRITE_GRANT
+        assert result.status is not RunStatus.SUCCEEDED

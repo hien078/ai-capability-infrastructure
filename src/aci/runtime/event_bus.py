@@ -40,6 +40,10 @@ CAPABILITY_SEARCH_COMPLETED = "capability.search.completed"
 CAPABILITY_LOADED = "capability.loaded"
 CAPABILITY_UNLOADED = "capability.unloaded"
 CAPABILITY_FEEDBACK = "capability.feedback"
+#: Run-start skill preload outcome (kernel ``preload_capabilities``): payload
+#: ``loaded`` (capability ids) + ``count``, or ``error`` (exception TYPE name
+#: only) when the best-effort preload failed and the run went on without it.
+CAPABILITY_PRELOAD = "capability.preload"
 
 TOOL_REQUESTED = "tool.requested"
 TOOL_AUTHORITY_EVALUATED = "tool.authority.evaluated"
@@ -90,6 +94,7 @@ ALL_EVENT_TYPES = frozenset(
         CAPABILITY_LOADED,
         CAPABILITY_UNLOADED,
         CAPABILITY_FEEDBACK,
+        CAPABILITY_PRELOAD,
         TOOL_REQUESTED,
         TOOL_AUTHORITY_EVALUATED,
         TOOL_APPROVAL_REQUESTED,

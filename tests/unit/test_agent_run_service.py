@@ -241,6 +241,8 @@ class TestRevisionAfterRestart:
             "max_turns": 6,
             # migration 0019 era: client-added approval requirements (none here)
             "approval_required_tools": None,
+            # 2026-10-01: per-run skill-preload override (none here)
+            "preload_capabilities": None,
         }
         assert row.run_dir == str((tmp_path / "runs" / first.run_id).resolve())
         # Server-side only: no serialization of the record carries it.

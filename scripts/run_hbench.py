@@ -239,6 +239,18 @@ class _CountingCapabilityRuntime(CapabilityRuntime):
         super().__init__(aci)
         self.requests = 0
         self.loaded: list[str] = []
+        self.preloaded: list[str] = []
+
+    def preload(
+        self, request: CapabilityRequest, snapshot: RuntimeStateSnapshot
+    ) -> list[CapabilityActivation]:
+        """The kernel's run-start preload — NOT a model request (not
+        counted in ``requests``); its skills are loaded skills all the same."""
+        activations = super().preload(request, snapshot)
+        ids = [f"{a.capability_id}@{a.version}" for a in activations]
+        self.preloaded.extend(ids)
+        self.loaded.extend(ids)
+        return activations
 
     def handle_request(
         self, request: CapabilityRequest, snapshot: RuntimeStateSnapshot
@@ -342,10 +354,13 @@ def _kernel_service(
     ablations: list[str] | None = None,
     sandbox: ProcessSandbox | None = None,
     capability_factory: object | None = None,
+    preload_capabilities: bool = False,
 ) -> AgentRunService:
     """One kernel service per run. ``capability_factory`` is arm S's real
     registry plane; the default (None) keeps arm K on the null handler —
-    byte-identical to the pre-S runner."""
+    byte-identical to the pre-S runner. ``preload_capabilities`` turns on
+    the kernel's run-start skill preload (default OFF = K/N/S unchanged;
+    with the null handler it is a no-op — nothing is advertised)."""
     ablations = ablations or []
     context_engine = (
         _NoItemsContextEngine(ContextBudget(total_tokens=60_000))
@@ -367,6 +382,7 @@ def _kernel_service(
         verification_timeout_seconds=300.0,
         event_bus=bus,
         process_sandbox=sandbox if sandbox is not None else BwrapSandbox(),
+        preload_capabilities=preload_capabilities,
     )
 
 
@@ -384,6 +400,7 @@ def run_kernel_arm(
     sandbox: ProcessSandbox | None = None,
     arm: str = "K",
     capability_factory: object | None = None,
+    preload_capabilities: bool = False,
 ) -> dict[str, Any]:
     sandbox = sandbox if sandbox is not None else BwrapSandbox()
     bus = EventBus()
@@ -400,6 +417,7 @@ def run_kernel_arm(
         ablations=ablations,
         sandbox=sandbox,
         capability_factory=capability_factory,
+        preload_capabilities=preload_capabilities,
     )
     started = time.monotonic()
     result = service.run(
@@ -476,6 +494,7 @@ def run_skills_arm(
     container: Any,
     sandbox: ProcessSandbox | None = None,
     trace_dir: Path | None = None,
+    preload_capabilities: bool = False,
 ) -> dict[str, Any]:
     """Arm S = arm K + the REAL registry capability plane, and NOTHING else
     different: the same run_kernel_arm path (fixtures, tools, sandbox,
@@ -483,7 +502,10 @@ def run_skills_arm(
     the capability handler is the real CapabilityRuntime over a fresh
     run-scoped RegistryCapabilityClient from the REST Container
     composition, so the model is OFFERED request_capability (tool + protocol
-    text). The counters record what the plane actually did."""
+    text). The counters record what the plane actually did.
+    ``preload_capabilities`` (default OFF — arm S unchanged) adds the
+    kernel's run-start preload: preloaded skills count in ``skills_loaded``
+    but NOT in ``capability_requests`` (those stay model-initiated)."""
     runtime = _skills_capability_runtime(container.agent_capability_clients)
     record = run_kernel_arm(
         fixture,
@@ -497,6 +519,7 @@ def run_skills_arm(
         sandbox=sandbox,
         arm="S",
         capability_factory=_Factory(runtime),
+        preload_capabilities=preload_capabilities,
     )
     record["capability_requests"] = runtime.requests
     record["skills_loaded"] = list(runtime.loaded)

@@ -110,6 +110,7 @@ class CapabilityRuntime:
         self._max_refreshes = max_refreshes
         self._cache: dict[tuple[str, str], tuple[bytes, str]] = {}
         self._refreshes: dict[str, int] = {}
+        self._preloaded: set[str] = set()
 
     def search(self, request: CapabilityRequest) -> list[ACISelection]:
         """§11.3 — send normalized need, never full conversation history."""
@@ -169,6 +170,33 @@ class CapabilityRuntime:
             raise CapabilitySearchError(
                 f"capability refresh budget exhausted for {run_id} (max {self._max_refreshes})"
             )
+        return self._load(request, snapshot)
+
+    def preload(
+        self,
+        request: CapabilityRequest,
+        snapshot: RuntimeStateSnapshot,
+    ) -> list[CapabilityActivation]:
+        """§25.1 initial load at run start (the kernel's
+        ``preload_capabilities``): the SAME search + digest-verified
+        activation as ``handle_request``, bounded by ``max_loaded`` — but it
+        is the run's INITIAL load, not a mid-run refresh, so it does NOT
+        consume ``max_refreshes``: the model's own later requests keep their
+        full budget. At most ONE preload per run (a second one raises), so
+        the seam can never become an unbounded way around the refresh
+        budget."""
+        run_id = snapshot.run.run_id
+        if run_id in self._preloaded:
+            raise CapabilitySearchError(f"capabilities already preloaded for {run_id}")
+        self._preloaded.add(run_id)
+        return self._load(request, snapshot)
+
+    def _load(
+        self,
+        request: CapabilityRequest,
+        snapshot: RuntimeStateSnapshot,
+    ) -> list[CapabilityActivation]:
+        run_id = snapshot.run.run_id
         if len(snapshot.active_capabilities) >= self._max_loaded:
             raise CapabilitySearchError(
                 f"max loaded capabilities {self._max_loaded} reached for {run_id}"

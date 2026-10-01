@@ -56,6 +56,7 @@ from aci.runtime.checkpoints import (
 from aci.runtime.context_engine import AssembledContext, estimate_tokens, select_transcript
 from aci.runtime.event_bus import (
     CAPABILITY_LOADED,
+    CAPABILITY_PRELOAD,
     CHECKPOINT_RESTORED,
     CHECKPOINT_SAVED,
     CONTEXT_ASSEMBLED,
@@ -316,10 +317,19 @@ class HarnessKernel:
         cancel_token: CancelToken | None = None,
         max_turns: int = 40,
         workspace_id: str | None = None,
+        preload_capabilities: bool = False,
     ) -> RunResult:
         """§59 — the deterministic control shape: budget preflight → context →
         model → normalize action → dispatch → commit → loop; FinalCandidate
-        goes through verification (INV-08)."""
+        goes through verification (INV-08).
+
+        ``preload_capabilities`` (per run, default OFF): before the first
+        model turn, route on the contract and load the selected skills into
+        state, so the FIRST request already carries their instructions — see
+        ``_preload_capabilities``. Only a FRESH run preloads: ``resume``
+        continues from a snapshot that already carries its activations (it
+        has no such option); a revision is a new run and preloads again when
+        its options ask for it."""
         r = _Run(
             run_id=contract.task_id,
             contract=contract,
@@ -341,6 +351,8 @@ class HarnessKernel:
         self._state.transition(r.run_id, RunStatus.RUNNING)
         self._emit(RUN_STARTED, r.run_id)
         try:
+            if preload_capabilities:
+                self._preload_capabilities(r)
             result = self._loop(r)
         except RunCancelledError:
             result = self._cancelled(r)
@@ -1142,13 +1154,74 @@ class HarnessKernel:
     def _acquire_capabilities(
         self, r: _Run, request: CapabilityRequest, snapshot: RuntimeStateSnapshot
     ) -> list[CapabilityActivation] | RunResult:
-        """CapabilityRuntime.handle_request (refresh budget + max_loaded
-        apply there); a failure ends the run CAPABILITY_UNAVAILABLE with the
-        exception TYPE only as detail. Writes no state."""
+        """A model-initiated request: CapabilityRuntime.handle_request
+        (refresh budget + max_loaded apply there); a failure ends the run
+        CAPABILITY_UNAVAILABLE with the exception TYPE only as detail.
+        Writes no state."""
         try:
-            return list(self._capabilities.handle_request(request, snapshot))
+            return self._load_capabilities(request, snapshot)
         except Exception as exc:  # noqa: BLE001 — capability gaps are failures, not crashes
             return self._fail(r, StopReason.CAPABILITY_UNAVAILABLE, detail=type(exc).__name__)
+
+    def _load_capabilities(
+        self, request: CapabilityRequest, snapshot: RuntimeStateSnapshot, *, preload: bool = False
+    ) -> list[CapabilityActivation]:
+        """The handler call, raising on failure (callers decide what a
+        failure means). A preload goes through the handler's ``preload``
+        seam when it has one (CapabilityRuntime: the initial load, NOT
+        charged to the refresh budget); a handler without the seam is asked
+        through ``handle_request`` and its own budget rules apply."""
+        seam = getattr(self._capabilities, "preload", None) if preload else None
+        load = seam if callable(seam) else self._capabilities.handle_request
+        return list(load(request, snapshot))
+
+    def _preload_capabilities(self, r: _Run) -> None:
+        """Run-start skill preload (2026-10-01 user decision: offered the
+        ``request_capability`` tool, glm-5.3 made ZERO requests in 24
+        H-bench runs — the model never acquires skills unprompted).
+
+        Only when the capability plane is advertised. The request is the
+        NORMALIZED NEED from the contract — objective + constraints, never
+        conversation history (§11.3; there is none yet anyway) — handled
+        exactly like a model-initiated request: same handler, same
+        digest-verified activations, ONE CAS commit (``_commit_capabilities``,
+        no transcript entry), so ContextEngine renders the skill text from
+        the FIRST model request on. CAPABILITY_LOADED carries
+        ``preload: true``; one ``capability.preload`` event records the
+        outcome (capability ids + count only).
+
+        BEST EFFORT: a failure (search error, CAPABILITY_UNAVAILABLE-class
+        handler errors, an unusable request) NEVER fails or stops the run —
+        it is recorded as ``capability.preload`` with ``error`` = the
+        exception TYPE name only (raw exception text never reaches telemetry,
+        §61) and the run starts without skills. An empty bundle is recorded
+        as ``count: 0``. Activations only add reference text to context:
+        they never touch grants (INV-02/§11.6)."""
+        if not self._capabilities_advertised:
+            return
+        pre = self._state.snapshot(r.run_id)
+        try:
+            request = CapabilityRequest(
+                objective=r.contract.objective, constraints=list(r.contract.constraints)
+            )
+            activations = self._load_capabilities(request, pre, preload=True)
+        except Exception as exc:  # noqa: BLE001 — best effort: a preload gap is not a failure
+            self._emit(
+                CAPABILITY_PRELOAD,
+                r.run_id,
+                payload={"loaded": [], "count": 0, "error": type(exc).__name__},
+            )
+            return
+        if activations:
+            self._commit_capabilities(r, pre, activations, [], preload=True)
+        self._emit(
+            CAPABILITY_PRELOAD,
+            r.run_id,
+            payload={
+                "loaded": [a.capability_id for a in activations],
+                "count": len(activations),
+            },
+        )
 
     def _commit_capabilities(
         self,
@@ -1156,9 +1229,12 @@ class HarnessKernel:
         pre: RuntimeStateSnapshot,
         activations: list[CapabilityActivation],
         entries: list[TranscriptEntry],
+        *,
+        preload: bool = False,
     ) -> None:
         """One CAS commit (§8.5): the activations (StateManager-owned,
-        INV-01) + the transcript of this turn; CAPABILITY_LOADED after it."""
+        INV-01) + the transcript of this turn (none for a preload);
+        CAPABILITY_LOADED after it (``preload: true`` on a preload)."""
         self._state.commit(
             r.run_id,
             expected_version=pre.run.version,
@@ -1170,15 +1246,17 @@ class HarnessKernel:
                     )
                     for a in activations
                 ),
-                transcript_event(entries),
+                *([transcript_event(entries)] if entries else []),
             ],
         )
         for activation in activations:
-            self._emit(
-                CAPABILITY_LOADED,
-                r.run_id,
-                payload={"capability_id": activation.capability_id, "version": activation.version},
-            )
+            payload: dict[str, object] = {
+                "capability_id": activation.capability_id,
+                "version": activation.version,
+            }
+            if preload:
+                payload["preload"] = True
+            self._emit(CAPABILITY_LOADED, r.run_id, payload=payload)
 
     def _record_plan(self, r: _Run, action: PlanUpdateRequest, raw: str, turn: int) -> None:
         """§10.3 — the planner proposes, StateManager commits; the plan then

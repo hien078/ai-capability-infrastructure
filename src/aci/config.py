@@ -129,6 +129,15 @@ class Settings(BaseSettings):
     #: composer v2 charges real sizes, so the router already stops there; one
     #: knob, not two competing caps). Above the DEV p90 of kept skills (~6.3k).
     agent_capability_max_total_tokens: int = Field(default=DEFAULT_MAX_CONTEXT_TOKENS, ge=1)
+    #: Kernel skill PRELOAD (user decision 2026-10-01): at the start of a
+    #: fresh agent run, route on the contract (objective + constraints) and
+    #: load the selected skills BEFORE the first model turn — offered the
+    #: request_capability tool, glm-5.3 made ZERO requests in 24 H-bench
+    #: runs. Best effort (a preload failure never fails the run), not charged
+    #: to the model's refresh budget, never on resume, grants nothing.
+    #: Default OFF until H-bench measures it; a POST /v1/agent-runs request
+    #: may override it per run (`preload_capabilities`).
+    agent_capability_preload: bool = False
 
 
 settings = Settings()

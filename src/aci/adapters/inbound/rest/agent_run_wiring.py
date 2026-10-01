@@ -157,4 +157,5 @@ def build_agent_run_service(
         verification_timeout_seconds=settings.agent_verification_timeout_seconds,
         run_store=run_store,  # type: ignore[arg-type]
         process_sandbox=build_sandbox(settings),
+        preload_capabilities=settings.agent_capability_preload,
     )
