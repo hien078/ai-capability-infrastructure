@@ -189,6 +189,9 @@ class TestLoadedEventJoin:
             "context_tokens": state.snapshot(RUN_ID).active_capabilities[0].context_tokens,
             "route_run_id": "rr-9",
             "bundle_id": "bun-9",
+            # The model asked for this one (the request_capability tool);
+            # a run-start preload would say "preload" (and preload: true).
+            "origin": "model_request",
         }
 
     def test_provenance_less_selection_omits_the_ids(self) -> None:

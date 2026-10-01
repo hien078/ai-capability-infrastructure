@@ -37,6 +37,7 @@ from aci.domain.runtime.failures import FailureClass, FailureEnvelope
 from aci.domain.runtime.spec import RuntimeSpec
 from aci.domain.runtime.state import (
     CapabilityActivation,
+    CapabilityOrigin,
     PlanItem,
     RuntimeStateSnapshot,
     TaskState,
@@ -1171,10 +1172,19 @@ class HarnessKernel:
         failure means). A preload goes through the handler's ``preload``
         seam when it has one (CapabilityRuntime: the initial load, NOT
         charged to the refresh budget); a handler without the seam is asked
-        through ``handle_request`` and its own budget rules apply."""
+        through ``handle_request`` and its own budget rules apply.
+
+        Every activation is tagged with HOW it was acquired — ``preload``
+        (run start) or ``model_request`` (the model asked: text-JSON action
+        or ``request_capability`` tool) — so a later re-activation of the
+        same capability can accumulate origins instead of overwriting the
+        acquisition history (2026-10-01 exposure-origin fix)."""
         seam = getattr(self._capabilities, "preload", None) if preload else None
         load = seam if callable(seam) else self._capabilities.handle_request
-        return list(load(request, snapshot))
+        origin: CapabilityOrigin = "preload" if preload else "model_request"
+        return [
+            a.model_copy(update={"origins": [*a.origins, origin]}) for a in load(request, snapshot)
+        ]
 
     def _preload_capabilities(self, r: _Run) -> None:
         """Run-start skill preload (2026-10-01 user decision: offered the
@@ -1235,7 +1245,8 @@ class HarnessKernel:
     ) -> None:
         """One CAS commit (§8.5): the activations (StateManager-owned,
         INV-01) + the transcript of this turn (none for a preload);
-        CAPABILITY_LOADED after it (``preload: true`` on a preload)."""
+        CAPABILITY_LOADED after it (``preload: true`` + ``origin:
+        "preload"`` on a preload, ``origin: "model_request"`` otherwise)."""
         self._state.commit(
             r.run_id,
             expected_version=pre.run.version,
@@ -1250,6 +1261,7 @@ class HarnessKernel:
                 *([transcript_event(entries)] if entries else []),
             ],
         )
+        origin: CapabilityOrigin = "preload" if preload else "model_request"
         for activation in activations:
             payload: dict[str, object] = {
                 "capability_id": activation.capability_id,
@@ -1262,6 +1274,11 @@ class HarnessKernel:
                 "digest": activation.digest,
                 "activation_id": activation.activation_id,
                 "context_tokens": activation.context_tokens,
+                # How THIS load came about (a label, not text): the run-start
+                # preload or the model's own request. The ACCUMULATED origins
+                # (both, when a preloaded skill was requested again) ride the
+                # activation in state and the terminal exposure join.
+                "origin": origin,
             }
             if activation.route_run_id is not None:
                 payload["route_run_id"] = activation.route_run_id
@@ -1673,9 +1690,11 @@ def capability_exposure_payload(
     activations: Sequence[CapabilityActivation],
 ) -> dict[str, object]:
     """The CAPABILITY_EXPOSURE payload: the run's own stop/verdict joined
-    with the actually activated set — ids + immutable provenance only.
-    Never skill text, task text, paths, secrets or model-generated values;
-    never a claim that a skill caused the outcome."""
+    with the actually activated set — ids + immutable provenance only,
+    plus each activation's ACCUMULATED acquisition origins (``preload`` /
+    ``model_request`` labels — how the skill came into context, never
+    asserted as causation). Never skill text, task text, paths, secrets or
+    model-generated values; never a claim that a skill caused the outcome."""
     return {
         "stop_reason": stop_reason,
         "verifier_verdict": verifier_verdict,
@@ -1688,6 +1707,7 @@ def capability_exposure_payload(
                 "activation_id": a.activation_id,
                 "route_run_id": a.route_run_id,
                 "bundle_id": a.bundle_id,
+                "origins": list(a.origins),
             }
             for a in activations
         ],

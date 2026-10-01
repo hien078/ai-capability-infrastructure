@@ -84,6 +84,15 @@ class PlanItem(BaseModel):
     evidence_refs: list[str] = Field(default_factory=list)
 
 
+#: How a capability came to be activated in a run (2026-10-01
+#: exposure-origin fix): "preload" = the kernel's run-start preload
+#: (``preload_capabilities``); "model_request" = the model asked for it
+#: (the text-JSON ``capability_request`` action or the ``request_capability``
+#: tool). One activation can carry BOTH — a preloaded skill the model then
+#: asked for again keeps ONE entry whose ``origins`` accumulate.
+CapabilityOrigin = Literal["preload", "model_request"]
+
+
 class CapabilityActivation(BaseModel):
     """§49.3 CapabilityHandle — pinned immutable version per run (§11.7)."""
 
@@ -113,6 +122,14 @@ class CapabilityActivation(BaseModel):
     #: it never grants authority (AuthorityManager never reads it). Empty for
     #: activations recorded before payloads were carried (backward compat).
     instructions: str = ""
+    #: Acquisition origins of this activation, in order. Set by the kernel
+    #: (preload path vs model-request path); when the SAME capability is
+    #: activated again the state manager keeps ONE entry whose origins
+    #: accumulate — the origin history is never dropped. Empty for
+    #: activations recorded before origins existed: legacy state and
+    #: checkpoints parse and resume unchanged (never a guess, never
+    #: fabricated).
+    origins: list[CapabilityOrigin] = Field(default_factory=list)
 
 
 class TranscriptEntry(BaseModel):

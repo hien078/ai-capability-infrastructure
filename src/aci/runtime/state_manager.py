@@ -288,6 +288,20 @@ class StateManager:
             record["plan"] = [PlanItem.model_validate(i) for i in p["items"]]
         elif et == "capability.activated":
             activation = CapabilityActivation.model_validate(p["activation"])
+            prior = next(
+                (a for a in record["capabilities"] if a.capability_id == activation.capability_id),
+                None,
+            )
+            if prior is not None:
+                # ONE entry per capability: a re-activation (e.g. preloaded at
+                # run start, then model-requested mid-run) keeps the LATEST
+                # provenance (version/digest/route+bundle ids, instructions)
+                # but ACCUMULATES origins — deduped, order-preserving, so the
+                # acquisition history is neither dropped nor duplicated
+                # (2026-10-01 exposure-origin fix).
+                activation = activation.model_copy(
+                    update={"origins": list(dict.fromkeys([*prior.origins, *activation.origins]))}
+                )
             record["capabilities"] = [
                 a for a in record["capabilities"] if a.capability_id != activation.capability_id
             ] + [activation]
