@@ -30,10 +30,27 @@ bundle exactly like ``/v1/routes`` (client_type ``harness-kernel``, protocol
 ``harness``). One telemetry stream for every selection ACI makes (§36) keeps
 kernel selections measurable/evaluable with the existing tooling, and the
 stored ``task_text`` is only the normalized need.
+
+Kernel selection policy (kernel path ONLY — /v1/routes is untouched): the
+routed bundle is what ACI judged relevant, but every selection the kernel
+activates is resent to the model on every turn (capability items are a
+protected context kind). So ``search`` narrows the routed bundle with a
+``SelectionPolicy`` before returning selections — top-k, a relative rerank
+score margin, and a total token cap over the REAL entry-file sizes
+(``estimated_context_tokens``, not the router's summary-based estimate).
+The rerank score is read back from the route run's persisted ``reranked``
+stage trace (the same numbers /v1/routes telemetry stores) — no routing
+contract changes. The route run still records the FULL routed bundle; the
+kernel's kept/dropped decision (capability ids + reason codes, never text)
+is logged on ``aci.agent_capabilities`` and kept on the client
+(``decisions``). The event bus lives in the run controller, out of reach of
+the ACIClient port, so a log line is the least invasive honest channel.
 """
 
 import hashlib
-from dataclasses import dataclass
+import logging
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from math import ceil
 from uuid import uuid4
 
@@ -42,6 +59,7 @@ from aci.application.protocols import (
     CapabilityRepository,
     ObjectStore,
     ReleaseRepository,
+    RouteRunRepository,
 )
 from aci.application.route_capabilities import RouteCapabilitiesService
 from aci.domain.capability.errors import DomainError, ErrorCode
@@ -57,7 +75,9 @@ from aci.domain.policy.models import ClientDescriptor, ProtocolDescriptor, Reque
 from aci.domain.runtime.actions import CapabilityRequest
 from aci.providers.skills.package import package_digest
 from aci.routing.composer import CHARS_PER_TOKEN
-from aci.runtime.capability_runtime import ACISelection
+from aci.runtime.capability_runtime import MAX_INSTRUCTION_TOKENS, ACISelection
+
+logger = logging.getLogger("aci.agent_capabilities")
 
 CLIENT_TYPE = "harness-kernel"
 PROTOCOL_TYPE = "harness"
@@ -78,6 +98,129 @@ class RegistrySelection:
     estimated_context_tokens: int
     route_run_id: str
     bundle_id: str
+
+
+@dataclass(frozen=True)
+class SelectionPolicy:
+    """How many of a routed bundle's skills one kernel capability request
+    activates. ``None`` disables a rule (the bare client default: no
+    narrowing — the composition root supplies the configured policy).
+
+    - ``max_items``: top-k, in rank order.
+    - ``min_score_margin``: keep items whose rerank score is >= top score -
+      margin (relative to the bundle's top item). Skipped when scores are
+      unavailable (route run unreadable) — top-k + token cap still apply.
+    - ``max_total_tokens``: running total of real entry sizes; an item that
+      would push the total over the cap is dropped (greedy in rank order).
+    - ``max_skill_tokens``: the per-skill cap (CapabilityRuntime's instruction
+      ceiling). The top item is kept even when it ALONE exceeds
+      ``max_total_tokens``, as long as it fits this per-skill cap — a request
+      that routed something relevant never comes back empty just because the
+      total cap is tight.
+    """
+
+    max_items: int | None = None
+    min_score_margin: float | None = None
+    max_total_tokens: int | None = None
+    max_skill_tokens: int = MAX_INSTRUCTION_TOKENS
+
+    def __post_init__(self) -> None:
+        if self.max_items is not None and self.max_items < 1:
+            raise ValueError("max_items must be >= 1")
+        if self.min_score_margin is not None and self.min_score_margin < 0:
+            raise ValueError("min_score_margin must be >= 0")
+        if self.max_total_tokens is not None and self.max_total_tokens < 1:
+            raise ValueError("max_total_tokens must be >= 1")
+        if self.max_skill_tokens < 1:
+            raise ValueError("max_skill_tokens must be >= 1")
+
+
+#: Reason codes for the kernel's selection decision (telemetry vocabulary).
+KEPT = "kept"
+KEPT_TOP_OVER_TOTAL_CAP = "kept_top_over_token_cap"
+DROPPED_MAX_ITEMS = "max_items"
+DROPPED_SCORE_MARGIN = "score_margin"
+DROPPED_TOTAL_CAP = "token_cap"
+#: Float tolerance so the margin boundary is inclusive (0.50 - 0.05 vs 0.45).
+_SCORE_EPSILON = 1e-9
+
+
+@dataclass(frozen=True)
+class SelectionEntry:
+    capability_id: str
+    version: str
+    score: float | None
+    tokens: int
+    reason: str
+
+
+@dataclass(frozen=True)
+class SelectionDecision:
+    """The kernel's narrowing of one routed bundle: ids + reason codes only."""
+
+    route_run_id: str
+    bundle_id: str
+    scores_available: bool
+    kept: tuple[SelectionEntry, ...] = field(default_factory=tuple)
+    dropped: tuple[SelectionEntry, ...] = field(default_factory=tuple)
+
+
+def apply_selection_policy(
+    ranked: Sequence[tuple[RegistrySelection, float | None]],
+    policy: SelectionPolicy,
+) -> tuple[list[RegistrySelection], list[SelectionEntry], list[SelectionEntry]]:
+    """Pure + deterministic: ``ranked`` is the bundle in rank order with each
+    item's rerank score (``None`` = unknown). Returns (kept selections in rank
+    order, kept entries, dropped entries)."""
+    top_score = ranked[0][1] if ranked else None
+    kept: list[RegistrySelection] = []
+    kept_entries: list[SelectionEntry] = []
+    dropped: list[SelectionEntry] = []
+    spent = 0
+    for position, (selection, score) in enumerate(ranked):
+        tokens = selection.estimated_context_tokens
+        reason = KEPT
+        if policy.max_items is not None and len(kept) >= policy.max_items:
+            reason = DROPPED_MAX_ITEMS
+        elif (
+            policy.min_score_margin is not None
+            and top_score is not None
+            and score is not None
+            and score < top_score - policy.min_score_margin - _SCORE_EPSILON
+        ):
+            reason = DROPPED_SCORE_MARGIN
+        elif policy.max_total_tokens is not None and spent + tokens > policy.max_total_tokens:
+            alone_top = position == 0 and not kept and tokens <= policy.max_skill_tokens
+            reason = KEPT_TOP_OVER_TOTAL_CAP if alone_top else DROPPED_TOTAL_CAP
+        entry = SelectionEntry(
+            capability_id=selection.capability_id,
+            version=selection.version,
+            score=score,
+            tokens=tokens,
+            reason=reason,
+        )
+        if reason in (KEPT, KEPT_TOP_OVER_TOTAL_CAP):
+            kept.append(selection)
+            kept_entries.append(entry)
+            spent += tokens
+        else:
+            dropped.append(entry)
+    return kept, kept_entries, dropped
+
+
+def _rerank_scores(run: object) -> dict[tuple[str, str], float]:
+    """(capability_id, version) → rerank score from a route run's persisted
+    ``reranked`` stage trace (RouteCapabilitiesService writes it)."""
+    stages = getattr(run, "stages", None)
+    rows = stages.get("reranked") if isinstance(stages, dict) else None
+    scores: dict[tuple[str, str], float] = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        cid, version, score = row.get("capability_id"), row.get("version"), row.get("score")
+        if isinstance(cid, str) and isinstance(version, str) and isinstance(score, int | float):
+            scores[(cid, version)] = float(score)
+    return scores
 
 
 def normalized_need(request: CapabilityRequest) -> str:
@@ -109,8 +252,16 @@ class RegistryCapabilityClient:
         principal_id: str = DEFAULT_PRINCIPAL,
         max_items: int = 5,
         max_context_tokens: int = 6000,
+        route_runs: RouteRunRepository | None = None,
+        selection_policy: SelectionPolicy | None = None,
     ) -> None:
         self._routes = routes
+        #: Read-back of the persisted route run for rerank scores; without it
+        #: the margin rule is skipped (scores unavailable).
+        self._route_runs = route_runs
+        self._policy = selection_policy or SelectionPolicy()
+        #: The kernel's narrowing decision per search (ids + reasons only).
+        self.decisions: list[SelectionDecision] = []
         self._releases = releases
         self._capabilities = capabilities
         self._artifacts = artifacts
@@ -144,15 +295,53 @@ class RegistryCapabilityClient:
         result = self._routes.route(
             command, envelope.to_routing_context(command.context), request=envelope
         )
-        selections: list[ACISelection] = []
+        routed: list[RegistrySelection] = []
         for item in result.bundle.items:
             selection = self._select(
                 item, route_run_id=result.route_run_id, bundle_id=result.bundle.bundle_id
             )
             if selection is not None:
-                self._issued.add((selection.capability_id, selection.version))
-                selections.append(selection)
-        return selections
+                routed.append(selection)
+        scores = self._scores(result.route_run_id) if routed else None
+        kept, kept_entries, dropped = apply_selection_policy(
+            [
+                (s, None if scores is None else scores.get((s.capability_id, s.version)))
+                for s in routed
+            ],
+            self._policy,
+        )
+        decision = SelectionDecision(
+            route_run_id=result.route_run_id,
+            bundle_id=result.bundle.bundle_id,
+            scores_available=scores is not None,
+            kept=tuple(kept_entries),
+            dropped=tuple(dropped),
+        )
+        self.decisions.append(decision)
+        self._log(decision)
+        # Only KEPT pairs are ever resolvable for this run (defense in depth).
+        for selection in kept:
+            self._issued.add((selection.capability_id, selection.version))
+        return list(kept)
+
+    def _scores(self, route_run_id: str) -> dict[tuple[str, str], float] | None:
+        if self._route_runs is None:
+            return None
+        run = self._route_runs.get_route_run(route_run_id)
+        return _rerank_scores(run) if run is not None else None
+
+    @staticmethod
+    def _log(decision: SelectionDecision) -> None:
+        if not decision.kept and not decision.dropped:
+            return
+        logger.info(
+            "capability.selection route_run=%s bundle=%s scores=%s kept=%s dropped=%s",
+            decision.route_run_id,
+            decision.bundle_id,
+            "rerank" if decision.scores_available else "unavailable",
+            [f"{e.capability_id}@{e.version}:{e.reason}" for e in decision.kept],
+            [f"{e.capability_id}@{e.version}:{e.reason}" for e in decision.dropped],
+        )
 
     def _select(
         self, item: BundleItem, *, route_run_id: str, bundle_id: str
@@ -242,13 +431,18 @@ class RegistryCapabilityClientFactory:
         principal_id: str = DEFAULT_PRINCIPAL,
         max_items: int = 5,
         max_context_tokens: int = 6000,
+        route_runs: RouteRunRepository | None = None,
+        selection_policy: SelectionPolicy | None = None,
     ) -> None:
-        # Bundle budgets default to the /v1/routes request defaults — no
-        # kernel-specific tuning without paired DEV_CASES evidence (§34).
+        # Bundle budgets default to the /v1/routes request defaults, so the
+        # route run records the same full bundle /v1/routes would; the
+        # kernel-side narrowing is the separate ``selection_policy``.
         self._deps = (routes, releases, capabilities, artifacts, objects)
         self._principal_id = principal_id
         self._max_items = max_items
         self._max_context_tokens = max_context_tokens
+        self._route_runs = route_runs
+        self.selection_policy = selection_policy or SelectionPolicy()
 
     def __call__(self) -> RegistryCapabilityClient:
         return RegistryCapabilityClient(
@@ -256,4 +450,6 @@ class RegistryCapabilityClientFactory:
             principal_id=self._principal_id,
             max_items=self._max_items,
             max_context_tokens=self._max_context_tokens,
+            route_runs=self._route_runs,
+            selection_policy=self.selection_policy,
         )

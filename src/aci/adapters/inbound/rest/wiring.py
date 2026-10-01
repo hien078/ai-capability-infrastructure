@@ -11,7 +11,10 @@ from pathlib import Path
 from fastapi import Request
 
 from aci.adapters.inbound.opencode.catalog import CatalogProjection
-from aci.adapters.outbound.agent_capabilities import RegistryCapabilityClientFactory
+from aci.adapters.outbound.agent_capabilities import (
+    RegistryCapabilityClientFactory,
+    SelectionPolicy,
+)
 from aci.adapters.outbound.model_provider.executor import OpenAICompatExecutor
 from aci.adapters.outbound.model_provider.hashing import HashingEmbedder
 from aci.adapters.outbound.model_provider.semantic import FastEmbedEmbedder
@@ -125,6 +128,15 @@ def _build_agent_run_service(
     return service
 
 
+def agent_capability_policy(settings: Settings) -> SelectionPolicy:
+    """Kernel-side narrowing of a routed bundle (ACI_AGENT_CAPABILITY_*)."""
+    return SelectionPolicy(
+        max_items=settings.agent_capability_max_items,
+        min_score_margin=settings.agent_capability_score_margin,
+        max_total_tokens=settings.agent_capability_max_total_tokens,
+    )
+
+
 class Container:
     """Infrastructure + service composition root for the REST adapter."""
 
@@ -211,7 +223,13 @@ class Container:
         # Capabilities come from the SAME registry + §14 router /v1/routes uses
         # (harness.md §11): one run-scoped registry client per kernel run.
         self.agent_capability_clients = RegistryCapabilityClientFactory(
-            self.route_service, releases, capabilities, artifacts, objects
+            self.route_service,
+            releases,
+            capabilities,
+            artifacts,
+            objects,
+            route_runs=route_runs,
+            selection_policy=agent_capability_policy(settings),
         )
         self.agent_run_service = _build_agent_run_service(
             settings, agent_run_store, self.agent_capability_clients

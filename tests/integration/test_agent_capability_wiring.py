@@ -15,7 +15,7 @@ from typing import Any, cast
 import pytest
 
 from aci.adapters.inbound.rest.agent_run_wiring import build_agent_run_service
-from aci.adapters.inbound.rest.wiring import Container
+from aci.adapters.inbound.rest.wiring import Container, agent_capability_policy
 from aci.adapters.outbound.agent_capabilities import (
     CLIENT_TYPE,
     RegistryCapabilityClientFactory,
@@ -122,6 +122,7 @@ def clients(container: Container) -> RegistryCapabilityClientFactory:
         container.artifacts,
         container.objects,
         max_items=1,
+        route_runs=container.route_runs,
     )
 
 
@@ -139,6 +140,10 @@ def test_container_wires_a_registry_capability_runtime(container: Container) -> 
     runtime = container.agent_run_service._capability_factory.build()
     assert isinstance(runtime, CapabilityRuntime)
     assert isinstance(container.agent_capability_clients, RegistryCapabilityClientFactory)
+    # The kernel-side selection policy comes from settings (ACI_AGENT_CAPABILITY_*).
+    assert container.agent_capability_clients.selection_policy == agent_capability_policy(
+        container.settings
+    )
 
 
 def test_registry_client_routes_resolves_and_activates_production_skill(
@@ -164,6 +169,14 @@ def test_registry_client_routes_resolves_and_activates_production_skill(
     assert run is not None
     assert run.client_type == CLIENT_TYPE
     assert run.task_text == f"{token} recalibration"
+    # The kernel's selection decision reads the rerank score back from the
+    # persisted route run (live DB JSON round-trip).
+    (decision,) = client.decisions
+    assert decision.scores_available
+    kept = next(e for e in decision.kept if e.capability_id == cap)
+    assert kept.score == next(
+        r["score"] for r in run.stages["reranked"] if r["capability_id"] == cap
+    )
 
     # resolve → bytes from the content-addressed store; the digest matches
     # the pinned manifest entry, so activation succeeds.

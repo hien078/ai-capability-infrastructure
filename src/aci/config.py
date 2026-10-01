@@ -105,6 +105,26 @@ class Settings(BaseSettings):
     #: no approval pauses. JSON env:
     #: ACI_AGENT_APPROVAL_REQUIRED_TOOLS='["run_command", "write_file"]'.
     agent_approval_required_tools: list[str] = Field(default_factory=list)
+    #: Kernel capability selection policy (harness.md §11; kernel path ONLY —
+    #: POST /v1/routes is unaffected and the route run still records the full
+    #: routed bundle). Every activated skill is resent to the model on every
+    #: turn, so one capability request activates only a narrowed slice of the
+    #: routed bundle. Defaults from the 2026-10-01 DEV_CASES replay (n=31,
+    #: aci_bench, fastembed, read-only): margin 0.15 capped at 3 is the only
+    #: rule tried that keeps a relevant skill in 31/31 cases (top-5: 31/31)
+    #: while loading 1.61 skills instead of 5 (~3.5k vs ~11.8k skill tokens).
+    #: PROVISIONAL: 0.15 just covers the largest observed gap (0.142, one
+    #: debugging case); 0.10 keeps 30/31 and is not separable at n=31 —
+    #: re-check when DEV_CASES grows.
+    #: Top-k skills activated per capability request (rank order).
+    agent_capability_max_items: int = Field(default=3, ge=1)
+    #: Relative rerank-score margin: keep items scoring >= top score - margin.
+    agent_capability_score_margin: float = Field(default=0.15, ge=0.0)
+    #: Cap on the summed real SKILL.md sizes (estimated tokens) activated per
+    #: request; the top item is kept even alone if it fits the per-skill cap.
+    #: A safety net above the DEV p90 (~6.3k) — 3 skills x the 4k per-skill cap
+    #: can otherwise reach 12k.
+    agent_capability_max_total_tokens: int = Field(default=10000, ge=1)
 
 
 settings = Settings()
