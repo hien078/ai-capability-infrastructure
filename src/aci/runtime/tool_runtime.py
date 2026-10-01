@@ -19,6 +19,7 @@ from aci.domain.runtime.state import RuntimeStateSnapshot
 from aci.domain.runtime.tools import (
     MUTATING_CLASSES,
     OutputPolicy,
+    SideEffectReport,
     ToolCall,
     ToolObservation,
     ToolSpec,
@@ -216,10 +217,8 @@ class ToolRuntime:
             )
         try:
             dispatch = self._dispatch(tool, args, envelope)
-        except TimeoutError:
-            return self._timeout_observation(call, tool)
         except Exception as exc:  # noqa: BLE003 — normalize, never leak (§12.1)
-            return self._error_observation(call, "TOOL_EXECUTION_FAILED", str(exc))
+            return self._dispatch_failure_observation(call, tool, exc)
         inline, artifact_ref = self._limit_output(tool, call, dispatch)
         observation = ToolObservation(
             tool_call_id=call.call_id,
@@ -301,6 +300,31 @@ class ToolRuntime:
             return str(verdict.transformed_value["redacted_output"]), None
         return None, None
 
+    def _dispatch_failure_observation(
+        self, call: ToolCall, tool: ToolSpec, exc: Exception
+    ) -> ToolObservation:
+        """§12.1 ErrorNormalizer / §18.1: classify a dispatch failure into a
+        stable code (the RecoveryManager keys off ``error_class``, never off
+        exception text, §28). Only a DomainError's message is shown — it is
+        authored by the tool adapter for the model; any other exception is
+        reported by TYPE only, so raw text (absolute paths, internals) never
+        reaches the model or the client. A mutating tool that failed after
+        dispatch started may have had an effect: side-effect state
+        ``possible`` (the RecoveryManager never blind-retries it)."""
+        error_class, detail, effect_possible = classify_dispatch_error(tool, exc)
+        side_effects = SideEffectReport(
+            state="possible"
+            if effect_possible and tool.side_effect_class in MUTATING_CLASSES
+            else "none"
+        )
+        if error_class == "TOOL_TIMEOUT":
+            return self._timeout_observation(call, tool).model_copy(
+                update={"side_effects": side_effects}
+            )
+        return self._error_observation(call, error_class, detail).model_copy(
+            update={"side_effects": side_effects}
+        )
+
     def _error_observation(self, call: ToolCall, error_class: str, detail: str) -> ToolObservation:
         return ToolObservation(
             tool_call_id=call.call_id,
@@ -339,6 +363,42 @@ class ToolRuntime:
             summary=verdict.reason or f"blocked by {verdict.guardrail or 'guardrail'}",
             error_class="GUARDRAIL_BLOCKED",
         )
+
+
+#: Exceptions an execution adapter raises for an infrastructure hiccup that a
+#: re-run may not hit again (§18.1 TRANSIENT_TOOL) — connection resets,
+#: interrupted / would-block syscalls. Everything else is deterministic.
+TRANSIENT_DISPATCH_ERRORS: tuple[type[BaseException], ...] = (
+    ConnectionError,
+    InterruptedError,
+    BlockingIOError,
+)
+
+#: DomainError codes a tool adapter raises → observation error_class.
+_DOMAIN_ERROR_CLASSES: dict[ErrorCode, str] = {
+    ErrorCode.TOOL_ARGUMENT_INVALID: "TOOL_INVALID_ARGUMENT",
+    ErrorCode.TOOL_NOT_FOUND: "TOOL_NOT_FOUND",
+}
+
+
+def classify_dispatch_error(tool: ToolSpec, exc: Exception) -> tuple[str, str, bool]:
+    """§18.1 classification of an exception raised by dispatch →
+    ``(error_class, model-safe detail, effect_possible)``.
+
+    ``effect_possible`` is False only when the adapter rejected the call
+    before acting (invalid argument, unknown tool)."""
+    if isinstance(exc, TimeoutError):
+        return "TOOL_TIMEOUT", f"{tool.tool_id} exceeded timeout {tool.timeout_ms}ms", True
+    if isinstance(exc, TRANSIENT_DISPATCH_ERRORS):
+        return (
+            "TRANSIENT_TOOL",
+            f"{tool.tool_id}: transient execution failure ({type(exc).__name__})",
+            True,
+        )
+    if isinstance(exc, DomainError):
+        error_class = _DOMAIN_ERROR_CLASSES.get(exc.code, "TOOL_EXECUTION_FAILED")
+        return error_class, str(exc), error_class == "TOOL_EXECUTION_FAILED"
+    return "TOOL_EXECUTION_FAILED", f"{tool.tool_id} failed ({type(exc).__name__})", True
 
 
 def envelope_expired(envelope: ExecutionEnvelope) -> bool:

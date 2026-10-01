@@ -288,12 +288,16 @@ def test_output_under_budget_no_spill() -> None:
 
 
 def test_dispatcher_exception_normalized_to_error_observation() -> None:
-    dispatcher = FakeDispatcher(exc=RuntimeError("boom"))
+    """Raw exception text (absolute paths, internals) never reaches the model:
+    a non-DomainError is reported by its TYPE only (§28, §61)."""
+    dispatcher = FakeDispatcher(exc=RuntimeError("boom at /srv/secret/path"))
     rt = runtime(dispatcher)
     obs = rt.execute(call(), snapshot=snapshot(), envelope=envelope())
     assert obs.status == "error"
     assert obs.error_class == "TOOL_EXECUTION_FAILED"
-    assert "boom" in obs.summary
+    assert "RuntimeError" in obs.summary
+    assert "boom" not in obs.summary
+    assert "/srv/secret" not in obs.summary
 
 
 def test_timeout_normalized_to_timeout_observation() -> None:

@@ -64,7 +64,13 @@ from aci.runtime.event_bus import (
     EventBus,
 )
 from aci.runtime.model_gateway import ModelMessage, ModelRequest, ModelResponse
-from aci.runtime.recovery import RecoveryAction, RecoveryManager
+from aci.runtime.recovery import (
+    RETRY_ACTIONS,
+    RecoveryAction,
+    RecoveryManager,
+    classify_tool_failure,
+    tool_retry_safe,
+)
 from aci.runtime.state_manager import StateEvent, StateManager, transcript_event
 from aci.runtime.tool_runtime import envelope_expired
 from aci.runtime.verification import VerificationManager
@@ -73,6 +79,24 @@ from aci.runtime.verification import VerificationManager
 _MAX_TOKENS_PER_REQUEST = 8_192
 _DEFAULT_CONTEXT_TOKENS = 60_000
 _MAX_BACKOFF_SECONDS = 8.0
+
+#: Turn-budget signal: a pinned system note once the run is within this many
+#: turns of its limit (the current turn included). It tells the model the
+#: budget, nothing more — completion stays verifier-gated (INV-08). Public so
+#: the H-bench naive arm injects the IDENTICAL note at the identical threshold.
+TURN_BUDGET_NOTE_THRESHOLD = 2
+TURN_BUDGET_NOTE = (
+    "Turn budget: {turns_left} turn(s) left including this one. If your verification "
+    "command already passed after your last change, propose completion now."
+)
+
+
+def turn_budget_note(turns_left: int) -> str:
+    """The note for ``turns_left`` turns remaining (this one included), or ""
+    while the run is not yet near its limit. Deterministic."""
+    if turns_left > TURN_BUDGET_NOTE_THRESHOLD:
+        return ""
+    return TURN_BUDGET_NOTE.format(turns_left=max(1, turns_left))
 
 
 class ModelGateway(Protocol):
@@ -138,6 +162,16 @@ class _Run:
     max_turns: int
     started: float
     usage: _Usage = field(default_factory=_Usage)
+
+
+@dataclass
+class _ToolBatch:
+    """One tool batch's outcome, committed atomically by ``_run_tools``."""
+
+    observations: list[ToolObservation] = field(default_factory=list)
+    executions: int = 0  # every dispatch attempt, retries included (§7.6)
+    recoveries: int = 0  # recovery decisions charged to the budget (§18.4)
+    terminal: FailureClass | None = None
 
 
 class HarnessKernel:
@@ -340,17 +374,40 @@ class HarnessKernel:
         """§18.4: recovery consumes budget; None means terminal."""
         action = self._recovery.decide(failure)
         snapshot = self._state.count_recovery(r.run_id)
+        return self._gate(
+            r,
+            failure,
+            action,
+            consumed=snapshot.budget.consumed_recoveries,
+            maximum=snapshot.budget.max_recoveries,
+        )
+
+    def _gate(
+        self,
+        r: _Run,
+        failure: FailureEnvelope,
+        action: RecoveryAction,
+        *,
+        consumed: int,
+        maximum: int,
+        extra: dict[str, object] | None = None,
+    ) -> RecoveryAction | None:
+        """Apply the §18.4 recovery budget to a decision and emit it. A
+        decision past the budget is recorded as the FAIL it becomes, so a
+        RECOVERY_ACTION event never claims a recovery that was not taken."""
+        if consumed > maximum and not action.is_terminal:
+            action = RecoveryAction("FAIL", "recovery budget exhausted")
         self._emit(
             RECOVERY_ACTION,
             r.run_id,
-            payload={"failure_class": failure.failure_class.value, "action": action.action},
+            payload={
+                "failure_class": failure.failure_class.value,
+                "action": action.action,
+                "component": failure.component,
+                **(extra or {}),
+            },
         )
-        if (
-            action.is_terminal
-            or snapshot.budget.consumed_recoveries > snapshot.budget.max_recoveries
-        ):
-            return None
-        return action
+        return None if action.is_terminal else action
 
     # -- tools (§12, §59 STATE_COMMIT) -----------------------------------------
 
@@ -372,9 +429,8 @@ class HarnessKernel:
         if envelope_expired(envelope):
             # Grants never renew mid-run: every further call would be denied.
             return self._fail(r, StopReason.AUTHORITY_DENIED, detail="AUTHORITY_EXPIRED")
-        observations = self._tools.execute_batch(
-            list(action.calls), snapshot=pre, envelope=envelope
-        )
+        batch = self._execute_with_recovery(r, list(action.calls), pre, envelope, turn)
+        observations = batch.observations
         entries = [
             TranscriptEntry(
                 role="assistant", content=raw, tool_calls=list(action.calls), turn=turn
@@ -395,7 +451,9 @@ class HarnessKernel:
             r.run_id,
             expected_version=pre.run.version,
             events=[
-                StateEvent(event_type="budget.consumed", payload={"tool_calls": len(observations)}),
+                StateEvent(event_type="budget.consumed", payload={"tool_calls": batch.executions}),
+                # §18.4: tool recoveries are charged in the same atomic commit.
+                *(StateEvent(event_type="recovery.counted") for _ in range(batch.recoveries)),
                 StateEvent(
                     event_type="task.progress",
                     payload={"append": [f"turn {turn}: {len(observations)} tool observation(s)"]},
@@ -418,18 +476,102 @@ class HarnessKernel:
                 transcript_event(entries),
             ],
         )
-        r.usage.tool_calls += len(observations)
-        for obs in observations:
-            self._emit(
-                TOOL_EXECUTION_COMPLETED if obs.status == "success" else TOOL_EXECUTION_FAILED,
-                r.run_id,
-                payload={"tool_id": obs.tool_id, "status": obs.status},
-                turn_id=f"turn-{turn}",
-            )
+        r.usage.tool_calls += batch.executions
         # §23.1: cancellation between tools — a cancelled run never starts the
         # next batch, but the observations it already produced are committed.
         r.cancel.raise_if_cancelled()
+        if batch.terminal is not None:
+            # §18.4: recovery exhausted (or terminal by policy) — the run ends
+            # through the stop-reason path, the observations stay committed.
+            return self._fail(r, StopReason.TOOL_FAILURE, detail=batch.terminal.value)
         return None
+
+    def _execute_with_recovery(
+        self,
+        r: _Run,
+        calls: list[ToolCall],
+        pre: RuntimeStateSnapshot,
+        envelope: ExecutionEnvelope,
+        turn: int,
+    ) -> _ToolBatch:
+        """§12 + §18: execute calls in order; an infrastructure failure
+        (``classify_tool_failure``) goes through the RecoveryManager.
+        A retry-safe tool (read-only + idempotent) is re-run with backoff;
+        any other tool's failure is surfaced to the model, never re-run
+        (§12.6 retry-block). Deterministic failures, denials and unknown
+        tools are plain observations. NO state is written here — the
+        caller commits observations, tool calls and recovery charges in one
+        CAS commit (INV-01, §8.5)."""
+        specs = {t.tool_id: t for t in self._advertised_tools()}
+        batch = _ToolBatch()
+        for index, call in enumerate(calls):
+            remaining_after = len(calls) - index - 1
+            attempt = 0
+            while True:
+                obs = self._execute_one(r, call, pre, envelope, turn, batch)
+                failure_class = classify_tool_failure(obs)
+                if failure_class is None:
+                    break
+                tool = specs.get(call.tool_id)
+                batch.recoveries += 1
+                failure = FailureEnvelope(
+                    failure_id=f"fail-{uuid.uuid4().hex[:12]}",
+                    failure_class=failure_class,
+                    component="tool_runtime",
+                    message=obs.error_class or failure_class.value,
+                    retryable=tool_retry_safe(tool),
+                    side_effect_state=obs.side_effects.state,
+                )
+                decision = self._gate(
+                    r,
+                    failure,
+                    self._recovery.decide_tool(failure, tool=tool),
+                    consumed=pre.budget.consumed_recoveries + batch.recoveries,
+                    maximum=pre.budget.max_recoveries,
+                    extra={"tool_id": call.tool_id, "attempt": attempt + 1},
+                )
+                if decision is None:
+                    batch.observations.append(obs)
+                    batch.terminal = failure_class
+                    return batch  # no further effects in a terminating run
+                fits = (
+                    pre.budget.consumed_tool_calls + batch.executions + 1 + remaining_after
+                    <= pre.budget.max_tool_calls
+                )
+                if decision.action not in RETRY_ACTIONS or not fits or r.cancel.cancelled:
+                    if decision.action not in RETRY_ACTIONS:
+                        obs = obs.model_copy(
+                            update={"summary": f"{obs.summary} — {_NOT_RETRIED_NOTE}"}
+                        )
+                    break
+                self._sleep(min(_MAX_BACKOFF_SECONDS, float(2**attempt)))
+                attempt += 1
+                if r.cancel.cancelled:
+                    break
+            batch.observations.append(obs)
+        return batch
+
+    def _execute_one(
+        self,
+        r: _Run,
+        call: ToolCall,
+        pre: RuntimeStateSnapshot,
+        envelope: ExecutionEnvelope,
+        turn: int,
+        batch: _ToolBatch,
+    ) -> ToolObservation:
+        """One execution through ToolRuntime (INV-06) + its telemetry
+        (INV-15 — every execution, a retried attempt included)."""
+        observations = self._tools.execute_batch([call], snapshot=pre, envelope=envelope)
+        batch.executions += 1
+        obs = observations[0]
+        self._emit(
+            TOOL_EXECUTION_COMPLETED if obs.status == "success" else TOOL_EXECUTION_FAILED,
+            r.run_id,
+            payload={"tool_id": obs.tool_id, "status": obs.status},
+            turn_id=f"turn-{turn}",
+        )
+        return obs
 
     # -- completion (§19.6, INV-08) --------------------------------------------
 
@@ -560,6 +702,17 @@ class HarnessKernel:
         progress = _progress_summary(snapshot)
         if progress:
             system.append(progress)
+        # Turns left INCLUDING this one, against whichever ceiling binds
+        # first: the run's max_turns or the budget ledger (both already count
+        # this turn — advance_turn ran before the request is built).
+        budget = snapshot.budget
+        turns_left = (
+            min(r.max_turns - snapshot.run.current_turn, budget.max_turns - budget.consumed_turns)
+            + 1
+        )
+        note = turn_budget_note(turns_left)
+        if note:
+            system.append(note)
         seed = [ModelMessage(role="system", content=c) for c in system]
         seed.append(ModelMessage(role="user", content=r.contract.objective))
         seed_tokens = sum(estimate_tokens(m.content) for m in seed)
@@ -911,6 +1064,11 @@ _CONTINUE_PROMPT = (
 _REPAIR_PROMPT = (
     "Your previous reply could not be used: {error}. Reply again with either a tool "
     "call or exactly one JSON action object as specified."
+)
+
+_NOT_RETRIED_NOTE = (
+    "not retried automatically (this tool is not safe to re-run blindly); check the "
+    "current state before repeating the call"
 )
 
 _VERIFICATION_FEEDBACK = (

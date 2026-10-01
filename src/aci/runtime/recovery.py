@@ -8,7 +8,12 @@ from dataclasses import dataclass
 
 from aci.domain.runtime.failures import FailureClass, FailureEnvelope
 from aci.domain.runtime.stop_reason import StopReason
-from aci.domain.runtime.tools import IdempotencyClass
+from aci.domain.runtime.tools import (
+    MUTATING_CLASSES,
+    IdempotencyClass,
+    ToolObservation,
+    ToolSpec,
+)
 
 RECOVERY_ACTIONS = frozenset(
     {
@@ -27,6 +32,9 @@ RECOVERY_ACTIONS = frozenset(
         "FAIL",
     }
 )
+
+#: Recovery actions that re-run the failed operation.
+RETRY_ACTIONS = frozenset({"RETRY_SAME", "RETRY_BACKOFF"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +161,18 @@ class RecoveryManager:
                 return RecoveryAction("REPLAN", f"{idempotency} tool — no blind retry")
         return action
 
+    def decide_tool(self, failure: FailureEnvelope, *, tool: ToolSpec | None) -> RecoveryAction:
+        """§18.3 for a failed tool call: the class decides, the TOOL decides
+        whether a retry may happen at all. Only a retry-safe tool (read-only
+        AND declared idempotent, ``tool_retry_safe``) is ever re-executed; a
+        mutating / process / unknown tool's retry is converted to REPLAN —
+        the failure goes back to the model, never a blind re-run (§12.6)."""
+        idempotency: IdempotencyClass = tool.idempotency_class if tool else "UNKNOWN"
+        action = self.decide(failure, idempotency=idempotency)
+        if action.action in RETRY_ACTIONS and not tool_retry_safe(tool):
+            return RecoveryAction("REPLAN", "non-idempotent tool — no automatic retry")
+        return action
+
     @property
     def attempts(self) -> int:
         return self._attempts
@@ -166,3 +186,42 @@ def stop_reason_for_failure(failure: FailureEnvelope) -> StopReason:
 def idempotency_allows_retry(cls: IdempotencyClass) -> bool:
     """§12.6 — RecoveryManager must never blindly retry NON_IDEMPOTENT calls."""
     return cls in ("IDEMPOTENT", "IDEMPOTENT_WITH_KEY")
+
+
+#: §18.1 tool-failure classification, keyed by ``ToolObservation.error_class``
+#: (a code ToolRuntime set — never parsed from exception text, §28).
+#: Only infrastructure failures enter recovery; everything else is a plain
+#: observation the model must see and act on:
+#:   TOOL_TIMEOUT / TRANSIENT_TOOL       → recovery (retry only if retry-safe)
+#:   TOOL_INVALID_ARGUMENT / TOOL_EXECUTION_FAILED → deterministic: feedback
+#:       to the model (§18.3 "return schema error to model"); re-running the
+#:       same call cannot change the outcome, so it is never retried and
+#:       never charged to the recovery budget
+#:   TOOL_NOT_FOUND / AUTHORITY_DENIED / AUTHORITY_EXPIRED /
+#:   APPROVAL_REQUIRED / GUARDRAIL_BLOCKED → plain observation, never
+#:       retried (no circumvention, §18.3)
+TOOL_RECOVERABLE_ERRORS: dict[str, FailureClass] = {
+    "TOOL_TIMEOUT": FailureClass.TOOL_TIMEOUT,
+    "TRANSIENT_TOOL": FailureClass.TRANSIENT_TOOL,
+}
+
+
+def classify_tool_failure(observation: ToolObservation) -> FailureClass | None:
+    """The failure class of a tool observation that must go through
+    recovery, or None when it is a success or a plain (deterministic /
+    denied / blocked) observation."""
+    if observation.status == "success" or observation.error_class is None:
+        return None
+    return TOOL_RECOVERABLE_ERRORS.get(observation.error_class)
+
+
+def tool_retry_safe(tool: ToolSpec | None) -> bool:
+    """A tool may be re-executed automatically only when it cannot have
+    changed anything (not a MUTATING class) AND declares idempotency —
+    an unregistered tool, a mutating one, or one of UNKNOWN idempotency
+    is never auto-retried."""
+    return (
+        tool is not None
+        and tool.side_effect_class not in MUTATING_CLASSES
+        and idempotency_allows_retry(tool.idempotency_class)
+    )

@@ -71,6 +71,7 @@ from aci.domain.runtime.authority import (  # noqa: E402
     GrantEnvelope,
     ProcessScope,
 )
+from aci.domain.runtime.events import EventEnvelope  # noqa: E402
 from aci.domain.runtime.state import BudgetLedger  # noqa: E402
 from aci.domain.runtime.subtask import (  # noqa: E402
     AcceptanceCriterion,
@@ -89,7 +90,11 @@ from aci.runtime.model_gateway import (  # noqa: E402
     OpenAICompatGateway,
 )
 from aci.runtime.profiles import runtime_spec_for  # noqa: E402
-from aci.runtime.run_controller import _system_prompt, task_state_from  # noqa: E402
+from aci.runtime.run_controller import (  # noqa: E402
+    _system_prompt,
+    task_state_from,
+    turn_budget_note,
+)
 from aci.runtime.state_manager import StateManager  # noqa: E402
 from aci.runtime.workspace import WorkspaceManager  # noqa: E402
 from aci.runtime.workspace_tools import (  # noqa: E402
@@ -284,6 +289,11 @@ def run_kernel_arm(
     trace_dir: Path | None = None,
 ) -> dict[str, Any]:
     bus = EventBus()
+    # The service discards a run's bus history once the run is terminal, so
+    # collect events through a sink — reading bus.history() afterwards would
+    # silently yield [] (empty trace, all mechanism counts 0).
+    events: list[EventEnvelope] = []
+    bus.subscribe(events.append)
     service = _kernel_service(gateway, sources, runs, bus, ablations=ablations)
     started = time.monotonic()
     result = service.run(
@@ -294,7 +304,9 @@ def run_kernel_arm(
         verification_command=VERIFICATION,
     )
     wall = time.monotonic() - started
-    history = bus.history(result.run_id)
+    history = [e for e in events if e.run_id == result.run_id]
+    if not history:
+        raise RuntimeError(f"no events captured for {result.run_id} — trace would be empty")
     if trace_dir is not None:
         trace_dir.mkdir(parents=True, exist_ok=True)
         (trace_dir / f"trace-{fixture['name']}-{result.run_id}.json").write_text(
@@ -345,6 +357,7 @@ _NO_MECHANISM = {
     "verification_fails": 0,
     "repairs": 0,
     "model_recoveries": 0,
+    "tool_recoveries": 0,
 }
 
 
@@ -353,11 +366,13 @@ def mechanism_counts(history: list[Any]) -> dict[str, int]:
 
     ``repairs`` = verification failures the kernel turned into a repair
     turn; ``model_recoveries`` = model-call failures it retried or repaired
-    (transient/rate-limit/malformed). Both come from RECOVERY_ACTION — the
-    event the kernel actually emits — and count only non-terminal actions:
-    an ESCALATE/FAIL ends the run, it is not a repair that was taken.
+    (transient/rate-limit/malformed); ``tool_recoveries`` = tool
+    infrastructure failures it retried or surfaced (``component ==
+    "tool_runtime"``). All come from RECOVERY_ACTION — the event the kernel
+    actually emits — and count only non-terminal actions: an ESCALATE/FAIL
+    ends the run, it is not a repair that was taken.
     """
-    rounds = fails = repairs = model = 0
+    rounds = fails = repairs = model = tool = 0
     for event in history:
         if event.event_type == VERIFICATION_STARTED:
             rounds += 1
@@ -366,7 +381,9 @@ def mechanism_counts(history: list[Any]) -> dict[str, int]:
         elif event.event_type == RECOVERY_ACTION:
             if event.payload.get("action") in _TERMINAL_ACTIONS:
                 continue
-            if event.payload.get("failure_class") == "VERIFICATION_FAILED":
+            if event.payload.get("component") == "tool_runtime":
+                tool += 1
+            elif event.payload.get("failure_class") == "VERIFICATION_FAILED":
                 repairs += 1
             else:
                 model += 1
@@ -375,6 +392,7 @@ def mechanism_counts(history: list[Any]) -> dict[str, int]:
         "verification_fails": fails,
         "repairs": repairs,
         "model_recoveries": model,
+        "tool_recoveries": tool,
     }
 
 
@@ -439,9 +457,21 @@ def run_naive_arm(
     started = time.monotonic()
     while turns < max_turns:
         turns += 1
+        # §42 fairness: the kernel's turn-budget note — the SAME text at the
+        # SAME threshold (turn_budget_note is the kernel's own helper), as a
+        # system message after the system prompt, for this request only
+        # (the kernel re-assembles its seed per turn; it is never persisted).
+        request_messages = messages
+        note = turn_budget_note(max_turns - turns + 1)
+        if note:
+            request_messages = [
+                messages[0],
+                ModelMessage(role="system", content=note),
+                *messages[1:],
+            ]
         try:
             response = gateway.invoke(
-                ModelRequest(messages=messages, tools=tools, token_limit=8192)
+                ModelRequest(messages=request_messages, tools=tools, token_limit=8192)
             )
         except Exception as exc:  # noqa: BLE003 — the naive arm has no recovery
             error = f"model error: {type(exc).__name__}"
@@ -660,7 +690,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"wall={record['wall_seconds']}s "
                 f"verify={record['verification_rounds']}rounds/"
                 f"{record['verification_fails']}fails/{record['repairs']}repairs/"
-                f"{record['model_recoveries']}model-recoveries",
+                f"{record['model_recoveries']}model-recoveries/"
+                f"{record['tool_recoveries']}tool-recoveries",
                 flush=True,
             )
 
@@ -686,6 +717,7 @@ def main(argv: list[str] | None = None) -> int:
             "verification_fails_total": sum(r["verification_fails"] for r in rows),
             "repairs_total": sum(r["repairs"] for r in rows),
             "model_recoveries_total": sum(r["model_recoveries"] for r in rows),
+            "tool_recoveries_total": sum(r["tool_recoveries"] for r in rows),
         }
 
     report = {
@@ -723,7 +755,8 @@ def main(argv: list[str] | None = None) -> int:
             f"wall {agg['wall_mean']:.0f}±{agg['wall_stdev']:.0f}s "
             f"verify_rounds {agg['verification_rounds_mean']:.1f} "
             f"(fails {agg['verification_fails_total']}, repairs {agg['repairs_total']}, "
-            f"model recoveries {agg['model_recoveries_total']})"
+            f"model recoveries {agg['model_recoveries_total']}, "
+            f"tool recoveries {agg['tool_recoveries_total']})"
         )
     return 0
 
