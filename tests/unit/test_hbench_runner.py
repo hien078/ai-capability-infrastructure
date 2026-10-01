@@ -13,7 +13,10 @@ sys.path.insert(0, str(SCRIPTS))
 
 import run_hbench  # noqa: E402
 
+from aci.domain.runtime.actions import ContinueAction  # noqa: E402
 from aci.evaluation.harness_cases import HARNESS_CASE_IDS  # noqa: E402
+from aci.runtime.event_bus import EventBus  # noqa: E402
+from aci.runtime.model_gateway import FakeModelGateway, ModelRequest  # noqa: E402
 from aci.runtime.workspace import command_within_prefixes  # noqa: E402
 from tests.sandbox_support import available_sandbox  # noqa: E402
 
@@ -289,3 +292,91 @@ class TestTurnBudgetFairness:
         assert last[1].role == "system" and last[1].content == turn_budget_note(1)
         # Per-request only: the note never accumulates in the history.
         assert sum("Turn budget:" in m.content for m in last) == 1
+
+
+class _FakeACIClient:
+    """ACIClient stand-in for the arm-S wiring tests: no network, no DB."""
+
+    def search(self, request: object) -> list[object]:  # noqa: ARG002
+        return []
+
+    def resolve(self, capability_id: str, version: str) -> tuple[bytes, str]:  # noqa: ARG002
+        return b"", f"sha256:{'0' * 64}"
+
+
+class TestSkillsArm:
+    """Arm S = arm K + the REAL registry capability plane, and NOTHING else
+    different. §42 fairness pins: S's handler is advertised (the model IS
+    offered request_capability), K stays on the null handler (offered
+    nothing), and the first ModelRequest of the two arms differs by EXACTLY
+    the capability tool + the capability protocol text — anything else would
+    confound the S−K A/B."""
+
+    def _first_request(self, tmp_path: Path, capability_factory: object | None) -> ModelRequest:
+        """One kernel turn through the runner's OWN service builder (the same
+        _kernel_service every K/S run goes through) — fake gateway, fake
+        capability client, no network, no DB."""
+        gateway = FakeModelGateway([ContinueAction()])
+        sources = tmp_path / "src"
+        fixture_dir = sources / "fx"
+        fixture_dir.mkdir(parents=True, exist_ok=True)
+        (fixture_dir / "a.py").write_text("x = 1\n", encoding="utf-8")
+        service = run_hbench._kernel_service(
+            gateway,
+            sources,
+            tmp_path / "runs",
+            EventBus(),
+            sandbox=available_sandbox(),
+            capability_factory=capability_factory,
+        )
+        contract, spec = run_hbench._contract_spec({"name": "fx", "prompt": "fix the bug"})
+        service.run(contract, spec, max_turns=1, workspace="fx")
+        assert len(gateway.requests) == 1
+        return gateway.requests[0]
+
+    def test_arm_s_wires_an_advertised_capability_handler(self, tmp_path: Path) -> None:
+        """The handler arm S wires is the runner's counting runtime over a
+        run-scoped client — advertised by the kernel's own rule, so the model
+        IS offered the capability tool + protocol text."""
+        handler = run_hbench._skills_capability_runtime(_FakeACIClient)
+        assert callable(handler.handle_request)
+        # The kernel's advertised test (run_controller): no advertised=False.
+        assert bool(getattr(handler, "advertised", True))
+        request = self._first_request(tmp_path, run_hbench._Factory(handler))
+        assert "request_capability" in [t.tool_id for t in request.tools]
+        assert '"type": "capability_request"' in request.messages[0].content
+
+    def test_arm_k_keeps_the_null_handler(self, tmp_path: Path) -> None:
+        """K's default wiring is unchanged: the null handler, not advertised —
+        the model is offered no dead action."""
+        service = run_hbench._kernel_service(
+            FakeModelGateway([]), tmp_path, tmp_path, EventBus(), sandbox=available_sandbox()
+        )
+        handler = service._capability_factory.build()
+        assert isinstance(handler, run_hbench._NullHandler)
+        assert handler.advertised is False
+
+    def test_s_k_protocol_difference_is_exactly_the_capability_plane(self, tmp_path: Path) -> None:
+        """The arms' first ModelRequest differs by EXACTLY the synthetic
+        request_capability tool (appended last) + the capability protocol
+        text (appended to the system prompt) — same message count, same
+        roles, every other message byte-identical."""
+        from aci.runtime.run_controller import _CAPABILITY_PROTOCOL, CAPABILITY_TOOL
+
+        k = self._first_request(tmp_path, None)
+        s = self._first_request(
+            tmp_path, run_hbench._Factory(run_hbench._skills_capability_runtime(_FakeACIClient))
+        )
+        assert [t.tool_id for t in s.tools] == [
+            *[t.tool_id for t in k.tools],
+            CAPABILITY_TOOL.tool_id,
+        ]
+        assert len(s.messages) == len(k.messages)
+        for ms, mk in zip(s.messages, k.messages, strict=True):
+            assert ms.role == mk.role
+            assert ms.tool_call_id == mk.tool_call_id
+        # The ONLY content difference: the capability protocol appended to
+        # the system prompt (the first system message).
+        assert s.messages[0].content == k.messages[0].content + "\n" + _CAPABILITY_PROTOCOL
+        for ms, mk in zip(s.messages[1:], k.messages[1:], strict=True):
+            assert ms.content == mk.content

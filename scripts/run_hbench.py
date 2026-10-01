@@ -16,12 +16,21 @@ outcomes?", not "does the model?"):
       contract/spec/grants) through a plain ReAct loop — no verification
       gate (the model's "done" IS the result; acceptance is verified
       POST-HOC), no recovery, append-only context.
+  S — skills arm: arm K + the REAL registry capability plane — the same
+      Container composition the REST server runs (operational DB aci_bench,
+      fastembed semantics, one run-scoped RegistryCapabilityClient per run)
+      wired as the capability handler, so the model is OFFERED
+      request_capability (tool + protocol text). NOTHING else differs from
+      K (same fixtures/model/tools/sandbox/max_turns/verification/turn-budget
+      note); S−K isolates what registry skills add to the kernel.
 
 The delta K−N is what the kernel adds. The headline metric is FALSE
 SUCCESS (§44): N reports "done" the verifier refutes; K can only report
 `succeeded` when the verification command actually passed. K additionally
 reports its verification rounds / fails and repair turns (from the event
-bus), so the mechanism's cost is visible next to its gain.
+bus), so the mechanism's cost is visible next to its gain. S reports its
+capability requests + loaded skill ids + token usage, so the skill plane's
+cost is visible next to its outcome.
 
 Each case runs `--repeat` times (default 3), in parallel; the aggregate
 carries mean ± std. §34 caveat applies to everything here: small n, one
@@ -38,7 +47,7 @@ fixture through the false-success metric.
 Usage:
     ACI_AGENT_MODEL_API_KEY=... .venv/bin/python scripts/run_hbench.py \
         [--base-url http://localhost:20128/v1] [--model OneNexus/glm-5.3] \
-        [--cases multi-config-precedence,...] [--arms K,N] \
+        [--cases multi-config-precedence,...] [--arms K,N,S] \
         [--repeat 3] [--parallel 4] [--max-turns 12]
 
 Writes a JSON report to data/hbench/ (gitignored) and prints the table.
@@ -64,7 +73,11 @@ from aci.application.run_agent_task import (  # noqa: E402
     AgentRunService,
     new_run_id,
 )
-from aci.domain.runtime.actions import FinalCandidate, ToolCallBatchAction  # noqa: E402
+from aci.domain.runtime.actions import (  # noqa: E402
+    CapabilityRequest,
+    FinalCandidate,
+    ToolCallBatchAction,
+)
 from aci.domain.runtime.authority import (  # noqa: E402
     ExecutionEnvelope,
     FilesystemScope,
@@ -72,11 +85,16 @@ from aci.domain.runtime.authority import (  # noqa: E402
     ProcessScope,
 )
 from aci.domain.runtime.events import EventEnvelope  # noqa: E402
-from aci.domain.runtime.state import BudgetLedger  # noqa: E402
+from aci.domain.runtime.state import (  # noqa: E402
+    BudgetLedger,
+    CapabilityActivation,
+    RuntimeStateSnapshot,
+)
 from aci.domain.runtime.subtask import (  # noqa: E402
     AcceptanceCriterion,
     SubtaskContract,
 )
+from aci.runtime.capability_runtime import ACIClient, CapabilityRuntime  # noqa: E402
 from aci.runtime.context_engine import AssembledContext, ContextBudget, ContextEngine  # noqa: E402
 from aci.runtime.event_bus import (  # noqa: E402
     RECOVERY_ACTION,
@@ -115,6 +133,13 @@ VERIFICATION = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
 #: verification command; the literal "python -m pytest" forms are what
 #: models naturally type (the §80 proof loop used the same ceiling).
 PROCESS_PREFIXES = [sys.executable, "python -m pytest", "python3 -m pytest"]
+
+#: Arm S registry plane — the OPERATIONAL DB (the real corpus + telemetry;
+#: NEVER the dev/test `aci` DB, which accumulates pytest fixtures), the
+#: semantic embedder (ACI_EMBEDDER=fastembed semantics) and the repo's
+#: content-addressed object store: the same deployment the REST server runs.
+ACI_BENCH_DATABASE_URL = "postgresql+psycopg://aci:aci@localhost:5432/aci_bench"
+ACI_OBJECT_STORE_ROOT = REPO_ROOT / "data" / "objects"
 
 #: fixture name → (Appendix D case it most directly exercises)
 H_REFS: dict[str, str] = {
@@ -193,6 +218,64 @@ class _NullHandler:
         return []
 
 
+# ---------------------------------------------------------------------------
+# Arm S — arm K + the REAL registry capability plane. The ONLY difference
+# from K is the capability handler: the real CapabilityRuntime over a fresh
+# run-scoped RegistryCapabilityClient — the same composition the REST
+# Container builds (adapters/inbound/rest/wiring.py), against the
+# operational DB, so every capability request runs the SAME §14 router
+# POST /v1/routes runs (route_run telemetry included, client_type
+# harness-kernel) under the same kernel-side selection policy
+# (ACI_AGENT_CAPABILITY_*, via agent_capability_policy(Settings)).
+# ---------------------------------------------------------------------------
+
+
+class _CountingCapabilityRuntime(CapabilityRuntime):
+    """The REAL CapabilityRuntime (advertised: a live plane IS offered to
+    the model), plus per-run counters for the report — how many capability
+    requests the model made and which skills actually loaded."""
+
+    def __init__(self, aci: ACIClient) -> None:
+        super().__init__(aci)
+        self.requests = 0
+        self.loaded: list[str] = []
+
+    def handle_request(
+        self, request: CapabilityRequest, snapshot: RuntimeStateSnapshot
+    ) -> list[CapabilityActivation]:
+        self.requests += 1
+        activations = super().handle_request(request, snapshot)
+        self.loaded.extend(f"{a.capability_id}@{a.version}" for a in activations)
+        return activations
+
+
+def _skills_capability_runtime(client_factory: Any) -> _CountingCapabilityRuntime:
+    """One run-scoped handler: a FRESH registry client per run (the REST
+    rule — the client's issued-selection allowlist and the runtime's refresh
+    budget / digest cache never leak across runs)."""
+    return _CountingCapabilityRuntime(client_factory())
+
+
+def build_capability_container() -> Any:
+    """The SAME registry + §14 router composition the REST server runs
+    (adapters/inbound/rest/wiring.Container) — ONE per process, exactly the
+    deployment shape the REST server serves concurrent requests with —
+    pointed at the OPERATIONAL DB (aci_bench: the real corpus + telemetry)
+    with the semantic embedder and the repo's object store. The kernel-side
+    selection policy comes from the same Settings defaults the REST
+    Container applies (agent_capability_policy)."""
+    from aci.adapters.inbound.rest.wiring import Container
+    from aci.config import Settings
+
+    return Container(
+        Settings(
+            database_url=ACI_BENCH_DATABASE_URL,
+            object_store_root=str(ACI_OBJECT_STORE_ROOT),
+            embedder="fastembed",
+        )
+    )
+
+
 class _NoItemsContextEngine(ContextEngine):
     """Ablation `items`: ContextEngine items OFF — build() contributes
     nothing (the objective/authority still reach the model via
@@ -258,17 +341,24 @@ def _kernel_service(
     *,
     ablations: list[str] | None = None,
     sandbox: ProcessSandbox | None = None,
+    capability_factory: object | None = None,
 ) -> AgentRunService:
+    """One kernel service per run. ``capability_factory`` is arm S's real
+    registry plane; the default (None) keeps arm K on the null handler —
+    byte-identical to the pre-S runner."""
     ablations = ablations or []
     context_engine = (
         _NoItemsContextEngine(ContextBudget(total_tokens=60_000))
         if "items" in ablations
         else ContextEngine(ContextBudget(total_tokens=60_000))
     )
+    capability_runtime_factory = (
+        capability_factory if capability_factory is not None else _Factory(_NullHandler())
+    )
     return AgentRunService(
         model_gateway_factory=_Factory(gateway),  # type: ignore[arg-type]
         tool_executor_factory=_Factory(_NullHandler()),  # type: ignore[arg-type]
-        capability_runtime_factory=_Factory(_NullHandler()),  # type: ignore[arg-type]
+        capability_runtime_factory=capability_runtime_factory,  # type: ignore[arg-type]
         context_engine_factory=_Factory(context_engine),  # type: ignore[arg-type]
         workspace_root=sources,
         runs_root=runs,
@@ -292,6 +382,8 @@ def run_kernel_arm(
     ablations: list[str] | None = None,
     trace_dir: Path | None = None,
     sandbox: ProcessSandbox | None = None,
+    arm: str = "K",
+    capability_factory: object | None = None,
 ) -> dict[str, Any]:
     sandbox = sandbox if sandbox is not None else BwrapSandbox()
     bus = EventBus()
@@ -300,7 +392,15 @@ def run_kernel_arm(
     # silently yield [] (empty trace, all mechanism counts 0).
     events: list[EventEnvelope] = []
     bus.subscribe(events.append)
-    service = _kernel_service(gateway, sources, runs, bus, ablations=ablations, sandbox=sandbox)
+    service = _kernel_service(
+        gateway,
+        sources,
+        runs,
+        bus,
+        ablations=ablations,
+        sandbox=sandbox,
+        capability_factory=capability_factory,
+    )
     started = time.monotonic()
     result = service.run(
         contract,
@@ -330,7 +430,7 @@ def run_kernel_arm(
     post_hoc_exit = _post_hoc(runs / result.run_id, sandbox)
     return {
         "run_id": result.run_id,
-        "arm": "K",
+        "arm": arm,
         "status": result.status.value,
         "stop_reason": result.stop_reason.value if result.stop_reason else None,
         "summary": result.summary[:400],
@@ -341,6 +441,14 @@ def run_kernel_arm(
         "turns": result.usage.turns,
         "tool_calls": result.usage.tool_calls,
         "wall_seconds": round(wall, 1),
+        # §44 cost next to outcome: what the run consumed (tokens) and —
+        # arm S only, overwritten by run_skills_arm — what the capability
+        # plane added (requests + loaded skill ids). K's null plane is the
+        # honest zero.
+        "tokens_in": result.usage.model_input_tokens,
+        "tokens_out": result.usage.model_output_tokens,
+        "capability_requests": 0,
+        "skills_loaded": [],
         # Verifier-gated: `succeeded` IS the acceptance (INV-08) — a false
         # success is structurally impossible; anything else is recorded
         # honestly as not-accepted.
@@ -354,6 +462,45 @@ def run_kernel_arm(
         # recovery/repair turns were taken.
         **counts,
     }
+
+
+def run_skills_arm(
+    fixture: dict[str, Any],
+    contract: SubtaskContract,
+    spec: Any,
+    gateway: OpenAICompatGateway,
+    sources: Path,
+    runs: Path,
+    *,
+    max_turns: int,
+    container: Any,
+    sandbox: ProcessSandbox | None = None,
+    trace_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Arm S = arm K + the REAL registry capability plane, and NOTHING else
+    different: the same run_kernel_arm path (fixtures, tools, sandbox,
+    max_turns, verification, turn-budget note) with the one substitution —
+    the capability handler is the real CapabilityRuntime over a fresh
+    run-scoped RegistryCapabilityClient from the REST Container
+    composition, so the model is OFFERED request_capability (tool + protocol
+    text). The counters record what the plane actually did."""
+    runtime = _skills_capability_runtime(container.agent_capability_clients)
+    record = run_kernel_arm(
+        fixture,
+        contract,
+        spec,
+        gateway,
+        sources,
+        runs,
+        max_turns=max_turns,
+        trace_dir=trace_dir,
+        sandbox=sandbox,
+        arm="S",
+        capability_factory=_Factory(runtime),
+    )
+    record["capability_requests"] = runtime.requests
+    record["skills_loaded"] = list(runtime.loaded)
+    return record
 
 
 #: Recovery actions that end the run — not a repair/retry that was taken.
@@ -461,6 +608,8 @@ def run_naive_arm(
     ]
     turns = 0
     tool_calls = 0
+    tokens_in = 0
+    tokens_out = 0
     claimed_done = False
     claim_text = ""
     error: str | None = None
@@ -486,6 +635,9 @@ def run_naive_arm(
         except Exception as exc:  # noqa: BLE003 — the naive arm has no recovery
             error = f"model error: {type(exc).__name__}"
             break
+        # Telemetry only (§44 cost next to outcome) — no behavior change.
+        tokens_in += response.usage.input_tokens
+        tokens_out += response.usage.output_tokens
         action = response.action
         if isinstance(action, ToolCallBatchAction):
             messages.append(
@@ -535,6 +687,13 @@ def run_naive_arm(
         "turns": turns,
         "tool_calls": tool_calls,
         "wall_seconds": round(wall, 1),
+        # §44 cost next to outcome — the naive loop has no RunResult, so
+        # usage is accumulated from the gateway responses; no capability
+        # plane exists in this arm (honest zeros).
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "capability_requests": 0,
+        "skills_loaded": [],
         "accepted": accepted,
         # §44 headline: the model CLAIMED completion and the verifier refutes it.
         "false_success": bool(claimed_done and not accepted),
@@ -561,6 +720,7 @@ def _run_one(
     ablations: list[str] | None = None,
     trace_dir: Path | None = None,
     sandbox: ProcessSandbox | None = None,
+    container: Any = None,
 ) -> dict[str, Any]:
     contract, spec = _contract_spec(fixture)
     gateway = OpenAICompatGateway(
@@ -579,6 +739,19 @@ def _run_one(
             trace_dir=trace_dir,
             sandbox=sandbox,
         )
+    elif arm == "S":
+        record = run_skills_arm(
+            fixture,
+            contract,
+            spec,
+            gateway,
+            sources,
+            runs,
+            max_turns=max_turns,
+            container=container,
+            sandbox=sandbox,
+            trace_dir=trace_dir,
+        )
     else:
         record = run_naive_arm(
             fixture, contract, spec, gateway, sources, runs, max_turns=max_turns, sandbox=sandbox
@@ -596,7 +769,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--cases", default="", help="comma-separated fixture names (default: all 8)"
     )
-    parser.add_argument("--arms", default="K,N", help="comma subset of K,N")
+    parser.add_argument("--arms", default="K,N", help="comma subset of K,N,S")
     parser.add_argument("--repeat", type=int, default=3, help="runs per case per arm (default 3)")
     parser.add_argument("--parallel", type=int, default=4, help="concurrent runs (default 4)")
     parser.add_argument("--max-turns", type=int, default=12)
@@ -632,6 +805,10 @@ def main(argv: list[str] | None = None) -> int:
         print("no API key — set ACI_AGENT_MODEL_API_KEY or --api-key", file=sys.stderr)
         return 2
     arms = [a.strip().upper() for a in args.arms.split(",") if a.strip()]
+    unknown_arms = [a for a in arms if a not in ("K", "N", "S")]
+    if unknown_arms:
+        print(f"unknown arms {unknown_arms!r} — pick from K,N,S", file=sys.stderr)
+        return 2
     ablations = [a.strip() for a in args.ablate.split(",") if a.strip()]
     unknown = [a for a in ablations if a not in ABLATIONS]
     if unknown:
@@ -640,6 +817,16 @@ def main(argv: list[str] | None = None) -> int:
     if ablations:
         apply_ablations(ablations)
         print(f"ABLATIONS ACTIVE: {ablations} (process-wide)", flush=True)
+    # Arm S's registry plane: ONE Container per process (the REST deployment
+    # shape) — built only when S is requested, so K/N runs stay DB-free.
+    container = None
+    if "S" in arms:
+        container = build_capability_container()
+        print(
+            "arm S: registry capability plane wired (operational DB aci_bench, "
+            "fastembed, one run-scoped client per run)",
+            flush=True,
+        )
     # ONE sandbox instance for the whole pack: both arms (and both post-hoc
     # yardsticks) execute model-written code under the identical profile.
     sandbox = build_process_sandbox(args.sandbox)
@@ -691,6 +878,7 @@ def main(argv: list[str] | None = None) -> int:
                 ablations=ablations,
                 trace_dir=trace_dir,
                 sandbox=sandbox,
+                container=container,
             ): (fixture, arm, repeat)
             for fixture, arm, repeat in jobs
         }
@@ -712,6 +900,10 @@ def main(argv: list[str] | None = None) -> int:
                     "turns": 0,
                     "tool_calls": 0,
                     "wall_seconds": 0.0,
+                    "tokens_in": 0,
+                    "tokens_out": 0,
+                    "capability_requests": 0,
+                    "skills_loaded": [],
                     **_NO_MECHANISM,
                 }
             record["repeat"] = repeat
@@ -721,6 +913,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"accepted={record['accepted']} false_success={record['false_success']} "
                 f"turns={record['turns']} tools={record['tool_calls']} "
                 f"wall={record['wall_seconds']}s "
+                f"tokens={record.get('tokens_in', 0)}/{record.get('tokens_out', 0)} "
+                f"caps={record.get('capability_requests', 0)} "
+                f"skills={','.join(record.get('skills_loaded', [])) or '-'} "
                 f"verify={record['verification_rounds']}rounds/"
                 f"{record['verification_fails']}fails/{record['repairs']}repairs/"
                 f"{record['model_recoveries']}model-recoveries/"
@@ -733,6 +928,9 @@ def main(argv: list[str] | None = None) -> int:
         accepted = [1.0 if r["accepted"] else 0.0 for r in rows]
         false_success = [1.0 if r["false_success"] else 0.0 for r in rows]
         tests_pass = [1.0 if r.get("tests_pass_at_end") else 0.0 for r in rows]
+        tokens_in = [float(r.get("tokens_in", 0)) for r in rows]
+        tokens_out = [float(r.get("tokens_out", 0)) for r in rows]
+        skills_loaded = [len(r.get("skills_loaded", ())) for r in rows]
         return {
             "n": len(rows),
             "acceptance": sum(accepted) / len(accepted) if accepted else 0.0,
@@ -744,6 +942,12 @@ def main(argv: list[str] | None = None) -> int:
             "wall_stdev": statistics.stdev([r["wall_seconds"] for r in rows])
             if len(rows) > 1
             else 0.0,
+            # §44 cost next to outcome, for EVERY arm (S's plane is the
+            # interesting one; K/N carry the honest zeros).
+            "tokens_in_mean": statistics.mean(tokens_in) if rows else 0.0,
+            "tokens_out_mean": statistics.mean(tokens_out) if rows else 0.0,
+            "skills_loaded_mean": statistics.mean(skills_loaded) if rows else 0.0,
+            "capability_requests_total": sum(int(r.get("capability_requests", 0)) for r in rows),
             "verification_rounds_mean": statistics.mean(r["verification_rounds"] for r in rows)
             if rows
             else 0.0,
@@ -770,11 +974,23 @@ def main(argv: list[str] | None = None) -> int:
             "§34: small n, one model, author-built fixtures — directional only. "
             "K acceptance is verifier-GATED (a false success is structurally "
             "impossible); N acceptance is post-hoc, so N.false_success is the "
-            "harness-value headline. Both arms share the system prompt "
+            "harness-value headline. All arms share the system prompt "
             "(_system_prompt over the same contract/spec/grants), tools and "
-            "process ceiling — only the mechanism differs."
+            "process ceiling. S differs from K ONLY by the capability handler "
+            "(the real registry plane: request_capability offered + its "
+            "protocol text), so S-K isolates the registry-skill contribution; "
+            "N shares K's prompt base minus the capability protocol. This "
+            "round carries the turn-budget note and the bwrap sandbox — NOT "
+            "comparable to rounds <= 3."
         ),
     }
+    if container is not None:
+        report["arm_s_registry"] = {
+            "database": "aci_bench (operational)",
+            "embedder": "fastembed",
+            "object_store_root": str(ACI_OBJECT_STORE_ROOT),
+            "selection_policy": "Settings defaults (agent_capability_policy)",
+        }
     out = Path(args.out) if args.out else REPORT_ROOT / f"hbench-{stamp}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -787,6 +1003,10 @@ def main(argv: list[str] | None = None) -> int:
             f"false_success {agg['false_success']:.2f} "
             f"turns {agg['turns_mean']:.1f}±{agg['turns_stdev']:.1f} "
             f"wall {agg['wall_mean']:.0f}±{agg['wall_stdev']:.0f}s "
+            f"tokens_in {agg['tokens_in_mean']:.0f} "
+            f"tokens_out {agg['tokens_out_mean']:.0f} "
+            f"skills_loaded {agg['skills_loaded_mean']:.2f} "
+            f"(capability requests {agg['capability_requests_total']}) "
             f"verify_rounds {agg['verification_rounds_mean']:.1f} "
             f"(fails {agg['verification_fails_total']}, repairs {agg['repairs_total']}, "
             f"model recoveries {agg['model_recoveries_total']}, "
