@@ -55,8 +55,16 @@ fixture through the false-success metric.
 Usage:
     ACI_AGENT_MODEL_API_KEY=... .venv/bin/python scripts/run_hbench.py \
         [--base-url http://localhost:20128/v1] [--model OneNexus/glm-5.3] \
-        [--cases multi-config-precedence,...] [--arms K,N,S,P] \
-        [--repeat 3] [--parallel 4] [--max-turns 12]
+        [--set verified|domain] [--cases multi-config-precedence,...] \
+        [--arms K,N,S,P] [--repeat 3] [--parallel 4] [--max-turns 12]
+
+Fixture sets (--set): 'verified' (default) = the 8 §80 multi/long fixtures;
+'domain' = the domain-knowledge fixtures (scripts/domain_tasks.py, verified
+by scripts/verify_domain_fixtures.py) — small workspaces whose correct fix
+needs knowledge a production skill carries (prompt-injection hardening,
+MCP manifest conventions, brand values, design tells). The domain set is
+the SKILL axis: run K vs P on it and the report records, per run, whether
+the fixture's INTENDED skill (DOMAIN_INTENDED_SKILLS) was preloaded.
 
 Writes a JSON report to data/hbench/ (gitignored) and prints the table.
 """
@@ -75,6 +83,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from domain_tasks import DOMAIN_INTENDED_SKILLS, DOMAIN_TASKS  # noqa: E402
 from proof_loop import LONG_TASKS, MULTI_TASKS  # noqa: E402
 
 from aci.application.run_agent_task import (  # noqa: E402
@@ -165,6 +174,15 @@ PENDING_H_CASES = ["H005", "H006", "H007", "H008*", "H011"]  # *implicit via fal
 
 def _all_fixtures() -> list[dict[str, Any]]:
     return [*MULTI_TASKS, *LONG_TASKS]
+
+
+def _fixture_set(name: str) -> list[dict[str, Any]]:
+    """The fixture pack for a run. 'verified' = the 8 §80 multi/long
+    fixtures (the default — every existing round's pack, unchanged);
+    'domain' = the domain-knowledge fixtures (domain_tasks.py)."""
+    if name == "domain":
+        return list(DOMAIN_TASKS)
+    return _all_fixtures()
 
 
 def _post_hoc(run_dir: Path, sandbox: ProcessSandbox) -> int:
@@ -809,6 +827,9 @@ def _run_one(
         )
     record["fixture"] = fixture["name"]
     record["h_ref"] = H_REFS.get(fixture["name"], "")
+    # The domain set's skill axis: which production skill this fixture's
+    # fix needs ("" on the verified pack — no intended skill there).
+    record["intended_skill"] = DOMAIN_INTENDED_SKILLS.get(fixture["name"], "")
     return record
 
 
@@ -818,7 +839,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default="OneNexus/glm-5.3")
     parser.add_argument("--api-key", default="", help="defaults to ACI_AGENT_MODEL_API_KEY (env)")
     parser.add_argument(
-        "--cases", default="", help="comma-separated fixture names (default: all 8)"
+        "--cases",
+        default="",
+        help="comma-separated fixture names (default: the whole selected set)",
+    )
+    parser.add_argument(
+        "--set",
+        default="verified",
+        choices=["verified", "domain"],
+        help=(
+            "fixture set: 'verified' = the 8 §80 multi/long fixtures (default), "
+            "'domain' = the domain-knowledge fixtures (domain_tasks.py)"
+        ),
     )
     parser.add_argument("--arms", default="K,N", help="comma subset of K,N,S,P")
     parser.add_argument("--repeat", type=int, default=3, help="runs per case per arm (default 3)")
@@ -888,7 +920,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.sandbox == "none":
         print("SANDBOX OFF (--sandbox none): model-written code runs as you", flush=True)
-    fixtures = _all_fixtures()
+    fixtures = _fixture_set(args.set)
     if args.cases:
         wanted = {c.strip() for c in args.cases.split(",")}
         fixtures = [f for f in fixtures if f["name"] in wanted]
@@ -944,6 +976,7 @@ def main(argv: list[str] | None = None) -> int:
                     "arm": arm,
                     "fixture": fixture["name"],
                     "h_ref": H_REFS.get(fixture["name"], ""),
+                    "intended_skill": DOMAIN_INTENDED_SKILLS.get(fixture["name"], ""),
                     "status": "crashed",
                     "stop_reason": type(exc).__name__,
                     "accepted": False,
@@ -1016,6 +1049,7 @@ def main(argv: list[str] | None = None) -> int:
         "model": args.model,
         "base_url": args.base_url,
         "arms": arms,
+        "fixture_set": args.set,
         "repeat": args.repeat,
         "max_turns": args.max_turns,
         "ablations": ablations,
@@ -1047,6 +1081,10 @@ def main(argv: list[str] | None = None) -> int:
             "object_store_root": str(ACI_OBJECT_STORE_ROOT),
             "selection_policy": "Settings defaults (agent_capability_policy)",
         }
+    if args.set == "domain":
+        # The skill axis: which production skill each fixture's fix needs —
+        # the report answers "was the INTENDED skill preloaded?" per run.
+        report["intended_skills"] = dict(DOMAIN_INTENDED_SKILLS)
     out = Path(args.out) if args.out else REPORT_ROOT / f"hbench-{stamp}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2), encoding="utf-8")

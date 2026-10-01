@@ -69,6 +69,47 @@ class TestHbenchRunner:
         assert "task_state_from(contract)" in source
 
 
+class TestDomainFixtureSet:
+    """The --set domain selection (the skill axis): the runner can run the
+    domain-knowledge fixtures WITHOUT changing the default pack — the 8 §80
+    fixtures stay the default so every existing round stays byte-comparable,
+    and the two sets never mix."""
+
+    def test_default_set_is_still_the_verified_eight(self) -> None:
+        assert [f["name"] for f in run_hbench._fixture_set("verified")] == [
+            f["name"] for f in run_hbench._all_fixtures()
+        ]
+
+    def test_domain_set_is_the_domain_fixtures(self) -> None:
+        domain = run_hbench._fixture_set("domain")
+        assert [f["name"] for f in domain] == [f["name"] for f in run_hbench.DOMAIN_TASKS]
+        assert len(domain) >= 3
+
+    def test_domain_and_verified_sets_are_disjoint(self) -> None:
+        domain = {f["name"] for f in run_hbench._fixture_set("domain")}
+        verified = {f["name"] for f in run_hbench._fixture_set("verified")}
+        assert not domain & verified
+
+    def test_domain_fixtures_carry_the_same_shape_as_the_verified_pack(self) -> None:
+        for fixture in run_hbench._fixture_set("domain"):
+            assert fixture["name"] and fixture["prompt"]
+            assert fixture["files"]
+            assert any(name.startswith("test_") for name in fixture["files"])
+
+    def test_every_domain_fixture_names_its_intended_skill(self) -> None:
+        for fixture in run_hbench._fixture_set("domain"):
+            assert fixture["name"] in run_hbench.DOMAIN_INTENDED_SKILLS, fixture["name"]
+
+    def test_domain_prompts_do_not_name_the_intended_skill(self) -> None:
+        """The task prompt must never name the skill it is supposed to route
+        to — otherwise the round measures prompt-echo, not retrieval."""
+        for fixture in run_hbench._fixture_set("domain"):
+            intended = run_hbench.DOMAIN_INTENDED_SKILLS[fixture["name"]]
+            prompt = fixture["prompt"].lower()
+            assert intended not in prompt, fixture["name"]
+            assert intended.replace("-", " ") not in prompt, fixture["name"]
+
+
 class TestMechanismCounts:
     """The §44 cost columns are counted from the events the kernel ACTUALLY
     emits — driven through a real HarnessKernel, so an event-name drift
