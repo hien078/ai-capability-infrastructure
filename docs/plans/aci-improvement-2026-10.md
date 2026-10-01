@@ -30,9 +30,9 @@
 
 | Việc | Owner | Phụ thuộc | Nội dung | Trạng thái (2026-10-01) |
 |---|---|---|---|---|
-| **R0** | resource worker | — | Hàng đợi CLI resumable, resource-bounded (`scripts/aci_worker_queue.py`) + subagent resource-guard (`docs/operations/`) | Đã land (chưa commit); 12 điểm review được báo đã xử lý → chờ review C |
-| **A** | docs worker | — | `docs/architecture-current.md` + bản này + đính chính CLAUDE.md/AGENTS.md/plan_v2 | Đã land; bản sửa theo `docs-review.md` + gộp bản đồ 3 cấp và đánh giá đầu tư (lead, đợt C) |
-| **B** | code worker | R0 | Join bền giữa capability đã nạp trên kernel ↔ route/bundle/version/digest qua run events/checkpoints, kể cả resume; **không quy kết nhân quả** | Đã land (chưa commit): `capability.loaded` mở rộng + `capability.exposure`; feedback seam được gọi nhưng REST chưa nối sink |
+| **R0** | resource worker | — | Hàng đợi CLI resumable, resource-bounded (`scripts/aci_worker_queue.py`) + subagent resource-guard (`docs/operations/`) | **Đã commit main** (`b57db24` + `414f591`); bản hardening theo review nằm ở `macbox/m2-queue-hardening` (chưa merge main) |
+| **A** | docs worker | — | `docs/architecture-current.md` + bản này + đính chính CLAUDE.md/AGENTS.md/plan_v2 | **Đã commit main** (`7d2f7da`); bản sửa theo `docs-review.md` + gộp bản đồ 3 cấp và đánh giá đầu tư |
+| **B** | code worker | R0 | Join bền giữa capability đã nạp trên kernel ↔ route/bundle/version/digest qua run events/checkpoints, kể cả resume; **không quy kết nhân quả** | **Đã commit main** (`5a72206`): `capability.loaded` mở rộng + `capability.exposure`; feedback seam được gọi nhưng REST chưa nối sink |
 | **C** | reviewer | A, B, R0 | Review độc lập B + R0 + docs; regression/architecture/security | Đang chạy |
 | **D** | integrator | A, B, R0, C | Full checks **một lần** khi mọi writer dừng; commit theo nhóm | Chờ C |
 
@@ -56,6 +56,19 @@ giai đoạn này.
 - **Kết quả → quyết định:** significant trên tests_pass hoặc tỉ lệ LIMIT_TURNS → HOW có giá trị
   đo được. Không significant ở cỡ mẫu đủ power → harness ngang vòng lặp ngây thơ ở tier này.
 
+> **TRẠNG THÁI (2026-10-02): XONG — E1 = ✗ KHÔNG CHỨNG MINH ĐƯỢC ở tier glm-5.3.** Vòng đủ
+> power đúng thiết kế (n=136/arm, 8 fixture §80 × 17 lượt = 272 run,
+> `data/hbench/hbench-20261001-224132.json`, 0/272 run INVALID): tests_pass_at_end K
+> 127/136 (0.934) vs N 121/136 (0.890) — Δ+0.044, z=+1.28, p=0.1996, CI 95% [−0.023,
+> +0.111] (**điểm trên LOẠI TRỪ hiệu ứng +0.13 kế hoạch**); tỉ lệ chạm limit 0.375 vs
+> 0.434 (p=0.323); McNemar exact không significant cả hai (13/7 p=0.263; 17/25 p=0.280).
+> Per-fixture vẫn cùng chiều (K > N 3 fixture, hòa 5, thua 0) nhưng aggregate mới là câu
+> trả lời: **cạnh "+0.13" n=24 của round 3 ở tier này là noise**; phát hiện +0.044 quan
+> sát được ở power 0.8 cần ~650 run/arm. Ưu thế đo được của kernel còn lại là cấu trúc
+> (false_success 0.00/272, verifier bác 51 proposal non-sát-điểm, at-limit evidence tách
+> 42 fix-landed-unclaimed khỏi 9 nothing-landed) với chi phí +4.2% token input. Báo cáo:
+> `data/hbench/REPORT-E1.md`; ghi chi tiết: ADR-014 amendment 18.
+
 ### E2 — Skill có giá trị khi mang tri thức **phi công khai**?
 
 - **Vì sao:** trục còn mở duy nhất của amendment 16/17; domain round cho thấy tri thức công khai
@@ -71,6 +84,21 @@ giai đoạn này.
 - **Dừng (đề xuất):** nếu hai use case hợp lệ liên tiếp không tách được tín hiệu → đóng trục
   "skill intelligence cho kernel", ghi vào AGENTS.md.
 
+> **TRẠNG THÁI (2026-10-02): XONG — E2 = ✓ TÁCH BẮT ĐẦU TIÊN, tín hiệu dương ĐẦU TIÊN của
+> skill trong lịch sử dự án — điều kiện dừng KHÔNG kích hoạt.** Fixture `--set private`
+> (`scripts/private_tasks.py`): 2 chuẩn nội bộ HƯ CẤC, tri thức tồn tại duy nhất trong
+> SKILL.md riêng của fixture và được pin bằng sha256 digest; verify fail-khi-ship /
+> pass-sau-fix + reach-in-budget WITH-skill ≥2/3 TRƯỚC khi đo. Đo K (naked) vs R (cùng
+> kernel + skill riêng của case PRELOAD từ handler local in-process — không registry, không
+> DB, không router), n=10/case/arm, glm-5.3, bwrap (`data/hbench/hbench-20261002-003148.json`,
+> 0/40 INVALID): **tests_pass_at_end K 0/20 vs R 17/20 (0.85)** — Fisher pooled 2.57e-08,
+> từng case atlas 0.000714 / meridian 0.000119 (đều significant). Cổng knowledge giữ tuyệt
+> đối: 0/20 run K sửa nguồn (chỉ tìm cách trích xuất chuẩn), 17/17 thành công của R sửa
+> nguồn bằng từ vựng chỉ có trong skill, 0/40 workspace giả test. **Giới hạn phạm vi:** giá
+> trị chỉ cho PRELOAD tri thức riêng — routing/acquisition KHÔNG đo (handler ghim vào case;
+> 0/40 capability request); acceptance nhiễu (atlas p=0.21) — tests_pass_at_end là yardstick
+> kết luận. Báo cáo: `data/hbench/REPORT-E2.md`; ghi chi tiết: ADR-014 amendment 19.
+
 ### E3 — Có dùng thật không?
 
 - **Thiết kế:** thử nghiệm 30 ngày với workflow thật, telemetry bật, **không xây gì mới** (đúng
@@ -79,6 +107,18 @@ giai đoạn này.
 - **Vì sao:** theo bản ghi telemetry `aci_bench` (2026-10-01), 288 route_run phần lớn đến từ
   đo lường (benchmark-harness 112, harness-kernel 93, probe 19); OpenCode 46 đều trong proof loop
   28/9; agent_runs 5. Lượng dùng hữu cơ gần như bằng 0.
+- **Instrument (2026-10-01):** `scripts/usage_report.py` — báo cáo read-only theo tuần ISO trên
+  `aci_bench` (route_run ORGANIC vs MEASUREMENT, harness-kernel tách bằng linkage với agent_run;
+  outcome/bundle; agent_run theo status); baseline ngày 0 + giới hạn đo:
+  `data/aci-improvement/phase2/e3-usage-report-result.md`.
+
+> **TRẠNG THÁI (2026-10-02): BASELINE NGÀY 0 ĐÃ GHI — hữu cơ = 0; đồng hồ 30 ngày đang chạy.**
+> Tuần 2026-W40 trên `aci_bench`: 288 route_run = 65 phân loại "organic" + 223 measurement + 0
+> unknown; agent_runs 5 (succeeded 5); 46 outcome event trên 44/286 bundle. **Cả 65 run
+> "organic" đều có nguồn đo-lường/script/test đã biết** (46 opencode proof-loop §80, 13
+> rest-client test/probe, 3 mcp-client path-check, 1 console probe, 2 harness-kernel
+> validation) — hữu cơ thật = 0 ở ngày 0. Re-run hằng tuần: `scripts/usage_report.py [--json]`.
+> Ghi chi tiết: ADR-014 amendment 20.
 
 ### Rẽ nhánh sau E1/E2/E3
 
@@ -92,6 +132,13 @@ E1 ✗ E2 ✗ → đơn giản hóa tối đa: catalog skill có quản trị (r
             đóng băng phần còn lại; viết tổng kết bài học.
 E3 ✗      → bất kể E1/E2: không xây thêm gì hướng người dùng; chỉ giữ phần nghiên cứu.
 ```
+
+> **NHÁNH ĐÃ ĐI (2026-10-02): `E1 ✗ E2 ✓`** — "giữ Control Plane + kho tri thức nội bộ;
+> đóng băng kernel; ACI về đúng plan_v2 V1–V2". Không thay đổi bất kỳ default/product
+> setting nào (`ACI_AGENT_CAPABILITY_PRELOAD` giữ OFF, `request_capability` giữ offered,
+> không dòng kernel nào đổi). E3 còn đồng hồ 30 ngày (ngày 0: hữu cơ = 0) và là override
+> còn treo: nếu hữu cơ ≈ 0 đến ngày 30 → theo bảng, không xây thêm gì hướng người dùng,
+> chỉ giữ phần nghiên cứu. Ghi chi tiết: ADR-014 amendment 21 + AGENTS.md 2026-10-02.
 
 ## 3. Hạng mục có thể mở (chỉ sau giai đoạn 2, theo nhánh rẽ)
 

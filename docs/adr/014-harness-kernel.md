@@ -205,6 +205,105 @@ chung, không phải lỗi task) là INVALID với mục đích đo lường, b�
       giữa hai vòng cùng cài đặt (noise floor) — bảng per-fixture của một vòng không mang
       tính dự đoán.
 
+## Amendment 2026-10-02 — ba thí nghiệm quyết định (E1/E2/E3, phase 2)
+
+Mọi số dưới đây lấy trực tiếp từ JSON vòng của record (`data/hbench/
+hbench-20261001-224132.json` cho E1, `data/hbench/hbench-20261002-003148.json` cho E2)
+và được reviewer độc lập (job `phase2-conclude`) **tính lại từ hàng run thô** — không
+từ trí nhớ, không từ aggregate của runner (aggregate của runner không loại run
+INVALID; cả hai vòng đều 0 run INVALID nên hai số trùng nhau). Run `MODEL_FAILURE`
+(gateway 5xx) là INVALID với mục đích đo lường: **0/272 (E1), 0/40 (E2)** — không
+run nào bị loại, không cần top-up. Kế hoạch tham chiếu: `docs/plans/
+aci-improvement-2026-10.md` §2 (E1/E2/E3 + bảng rẽ nhánh).
+
+18. **E1 — kernel (HOW) so với vòng lặp ngây thơ (N), ở cỡ mẫu đủ power: ✗ KHÔNG
+    chứng minh được ở tier glm-5.3.** Vòng đủ power đúng thiết kế kế hoạch (phát hiện
+    0.75 → 0.88, hai phía α=0.05, power 0.8 → ~136 run/arm): 8 fixture §80 đã verify ×
+    17 lượt = **n=136/arm, 272 run**, glm-5.3, sandbox bwrap, turn-budget note,
+    max_turns 12, `tests_pass_at_end` làm yardstick chung (gated trong K, post-hoc
+    trong N — cùng một câu hỏi):
+
+    | so sánh (K vs N) | K | N | Δ | z | p (hai phía) | CI 95% (Δ) | kết luận |
+    |---|---|---|---|---|---|---|---|
+    | tests_pass_at_end | 127/136 = 0.934 | 121/136 = 0.890 | +0.044 | +1.283 | 0.1996 | [−0.023, +0.111] | không significant |
+    | tỉ lệ chạm limit (LIMIT_TURNS/MAX_TURNS) | 51/136 = 0.375 | 59/136 = 0.434 | −0.059 | −0.988 | 0.3230 | [−0.175, +0.058] | không significant |
+
+    McNemar exact (ghép theo fixture×lượt): tests_pass 13 vs 7 discordant, p=0.263;
+    turn-limit 17 vs 25, p=0.280 — đều không significant. **Điểm trên của CI
+    (+0.111) LOẠI TRỪ hiệu ứng +0.13 mà kế hoạch đặt ra** — ở tier glm-5.3, dữ liệu
+    không nhất quán với hiệu ứng 0.75 → 0.88 ở mức 95%; cạnh "+0.13" n=24 của round 3
+    ở tier này là noise như §34 nghi ngờ. Phát hiện hiệu ứng +0.044 quan sát được ở
+    power 0.8 cần **~650 run/arm** (~5× vòng này). Per-fixture vẫn cùng chiều (K > N
+    ở 3 fixture, hòa 5, thua 0) nhưng aggregate mới là câu trả lời của E1. Những gì
+    kernel VẪN đo được là cấu trúc, không phải delta kết quả: false_success 0.00/272
+    run (verifier bác 51 proposal non-sát-điểm trong K, 0 false success), at-limit
+    evidence tách 42 run fix-đã-land-nhưng-không-claim khỏi 9 run không land gì —
+    chi phí +4.2% token input, +13% output, +6.6% wall, số turn ngang nhau.
+    Báo cáo: `data/hbench/REPORT-E1.md`.
+
+19. **E2 — skill mang tri thức PHI CÔNG KHÔNG có giá trị đo được: ✓ — tín hiệu dương
+    ĐẦU TIÊN của skill trong lịch sử dự án** (sau 222 run mà skill tri thức công khai
+    không bao giờ nhích tests_pass ở bất kỳ tier nào — mục 16/17). Fixture mới
+    `--set private` (`scripts/private_tasks.py`): 2 chuẩn nội bộ HƯ CẤC (Atlas
+    error-handling, Meridian release gate), tri thức TỒN TẠI DUY NHẤT trong SKILL.md
+    riêng của fixture (không bao giờ là file workspace) và được pin trong test bằng
+    sha256 digest — model naked không thể suy ra từ tên test, từ code ship (chứa
+    chính sách SAI với từ vựng cố ý sai) hay từ prompt. Tính khả thi fixture được
+    kiểm TRƯỚC khi đo (reach-in-budget WITH skill ≥ 2/3: atlas 3/3 sau một vòng đơn
+    giản hóa, meridian 2/3). Đo: **K (naked) vs R (cùng kernel + skill riêng của case
+    preload từ handler local in-process — không registry, không DB, không router)**,
+    n=10/case/arm, glm-5.3, bwrap, verification gated ở cả hai arm:
+
+    | | K (n=20) | R (n=20) | Fisher p (pool) |
+    |---|---|---|---|
+    | tests_pass_at_end | **0/20 (0.00)** | **17/20 (0.85)** | **2.57e-08** |
+    | acceptance (verifier-gated) | 0/20 | 8/20 (0.40) | 0.00328 |
+    | LIMIT_TURNS | 20/20 | 12/20 | — |
+    | false_success | 0 | 0 | — |
+
+    Từng case đều significant: atlas 0/10 vs 8/10 (p=0.000714), meridian 0/10 vs 9/10
+    (p=0.000119) — điều kiện dừng của kế hoạch KHÔNG kích hoạt (nó kích hoạt khi hai
+    use case hợp lệ liên tiếp KHÔNG tách được tín hiệu). **Cổng knowledge giữ tuyệt
+    đối:** 0/20 run K sửa file nguồn (chúng dành turn tìm cách TRÍCH XUẤT chuẩn —
+    `crack.py` brute-force sha256, đi filesystem tìm skill, dump test source — tất
+    cả thất bại); 17/17 thành công của R sửa nguồn bằng từ vựng CHỈ có trong skill
+    (xác minh 0 marker trong source ship); 0/40 workspace giả test file. Chi phí:
+    +23% token input, +140% output. **Giới hạn phạm vi (quan trọng):** giá trị chỉ
+    chứng minh cho PRELOAD tri thức riêng — routing/acquisition KHÔNG được đo
+    (handler của R được ghim vào case; 0/40 capability request — amendment 16/17
+    giữ nguyên trên chính bài test khó nhất của nó: model biết mình thiếu chuẩn,
+    đào tìm, và vẫn không xin); acceptance metric nhiễu (atlas p=0.21) —
+    `tests_pass_at_end` mới là yardstick mang tính kết luận. Báo cáo:
+    `data/hbench/REPORT-E2.md`.
+
+20. **E3 — dùng thật (30 ngày): chỉ ghi baseline ngày 0 — hữu cơ = 0.** Instrument
+    `scripts/usage_report.py` (read-only, `default_transaction_read_only=on`, fail
+    closed; không migration, không DB write). Tuần 2026-W40 trên `aci_bench`: 288
+    route_run = 65 phân loại "organic" + 223 measurement + 0 unknown; agent_runs 5
+    (succeeded 5); 46 outcome event trên 44/286 bundle. **Cả 65 run "organic" đều có
+    nguồn đo-lường/script/test đã biết** (46 opencode proof-loop §80 28/9; 13
+    rest-client test/probe; 3 mcp-client path-check Antigravity/goose; 1 console
+    probe; 2 harness-kernel validation run) — hữu cơ thật = 0 ở ngày 0. Giới hạn đo
+    (in trong mỗi báo cáo): proof loop/probe đi qua plugin THẬT nên telemetry không
+    tách được khỏi organic thật; harness-kernel tách bằng linkage agent_run (một run
+    thật mà dòng agent_runs fail-to-persist bị tính nhầm thành MEASUREMENT). Đồng hồ
+    30 ngày chạy từ đây; re-run: `scripts/usage_report.py [--json]`.
+
+21. **Nhánh đã đi (bảng §2 của kế hoạch): `E1 ✗ E2 ✓` → "giữ Control Plane + kho
+    tri thức nội bộ; đóng băng kernel; ACI về đúng plan_v2 V1–V2".** Không thay đổi
+    bất kỳ default/product setting nào: `ACI_AGENT_CAPABILITY_PRELOAD` giữ OFF,
+    `request_capability` giữ offered, không dòng kernel nào đổi. E3 còn đồng hồ 30
+    ngày và là override còn treo: nếu hữu cơ ≈ 0 đến ngày 30 → theo kế hoạch, không
+    xây thêm gì hướng người dùng, chỉ giữ phần nghiên cứu. **§34 caveat (áp dụng
+    toàn bộ):** một họ model (glm-5.3), fixture do tác giả dựng (E1: 8 fixture §80 đã
+    verify; E2: 2 chuẩn HƯ CẤC — đúng là phi công khai vì mới được hư cấu 2026-10-01,
+    nhưng đơn giản hơn runbook thật), n=17/fixture (E1) / n=10/case/arm (E2), một
+    gateway; E1 trả lời cho tier glm-5.3 trên 8 fixture này (trục flash +0.13/+0.08
+    n=24 chưa đo ở power); E2 trả lời cho preload tri thức riêng trên 2 use case —
+    không chuyển sang model yếu hơn, runbook dài hơn, hay corpus multi-skill riêng
+    mà không có vòng mới. Kết quả âm tính của E1 được ghi lại như bằng chứng (giữ
+    nguyên, không xóa); tín hiệu dương của E2 được ghi với giới hạn phạm vi của nó.
+
 ## Verification
 
 - `tests/security/test_harness_invariants.py` — INV-04/06/07/08 + §7.6 trên đường
