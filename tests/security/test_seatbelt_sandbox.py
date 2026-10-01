@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from aci.runtime.protocols import ProcessResult
-from aci.runtime.sandbox import WORKSPACE_MOUNT, SeatbeltSandbox
+from aci.runtime.sandbox import SeatbeltSandbox
 from aci.runtime.workspace import LocalWorkspace
 
 PY = sys.executable
@@ -67,7 +67,7 @@ def test_network_is_unreachable(ws: LocalWorkspace) -> None:
 
 def test_writes_land_only_in_the_workspace(tmp_path: Path, ws: LocalWorkspace) -> None:
     """Seatbelt has no mount namespace: the process's cwd IS the run dir
-    (HOME is the neutral /workspace, but no such directory exists). Writes
+    (HOME is the real run dir — there is no /workspace mount on macOS). Writes
     land via relative paths; absolute host paths outside the workspace are
     denied."""
     target_outside = tmp_path / "escaped.txt"
@@ -168,7 +168,8 @@ def test_environment_carries_no_server_secret(
     for sentinel in ("sk-seatbelt-sentinel-123", "runs-token-sentinel", "pw-sentinel"):
         assert sentinel not in dumped
     assert not any(k.startswith("ACI_") for k in env)
-    assert env["HOME"] == WORKSPACE_MOUNT
+    assert env["HOME"] == os.path.realpath(ws.root)
+    assert env["TMPDIR"] == os.path.join(os.path.realpath(ws.root), "tmp")
 
 
 # -- the verifier's own command works -----------------------------------------------
@@ -178,7 +179,7 @@ def test_python_m_pytest_runs_inside(ws: LocalWorkspace) -> None:
     (ws.root / "test_tiny.py").write_text(
         "import os\n\n"
         "def test_inside_the_sandbox():\n"
-        "    assert os.environ['HOME'] == '/workspace'\n\n"
+        "    assert os.path.realpath(os.environ['HOME']) == os.path.realpath(os.getcwd())\n\n"
         "def test_arithmetic():\n"
         "    assert 1 + 1 == 2\n",
         encoding="utf-8",
@@ -194,6 +195,21 @@ def test_python_m_pytest_runs_inside(ws: LocalWorkspace) -> None:
         result = ws.execute(argv, timeout_ms=120_000)
         assert result.exit_code == 0, result.stdout + result.stderr
         assert "2 passed" in result.stdout
+
+
+def test_python3_is_the_servers_interpreter(ws: LocalWorkspace) -> None:
+    """`python3` inside the sandbox must resolve to the server's interpreter
+    (the one with pytest), not macOS's /usr/bin/python3 Xcode stub."""
+    result = ws.execute(["python3", "-m", "pytest", "--version"], timeout_ms=60_000)
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+
+def test_commands_can_fork_on_a_busy_host(ws: LocalWorkspace) -> None:
+    """RLIMIT_NPROC is per USER on macOS: a pipeline (forks) must still run
+    when the user already owns many processes (a dev Mac always does)."""
+    result = ws.execute(["/bin/sh", "-c", "echo forked | cat; ls | wc -l"], timeout_ms=30_000)
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "forked" in result.stdout
 
 
 # -- resource limits ----------------------------------------------------------------
@@ -229,7 +245,7 @@ def test_process_count_is_bounded(tmp_path: Path) -> None:
 
 def test_server_paths_never_appear_in_output(tmp_path: Path, ws: LocalWorkspace) -> None:
     """Seatbelt has no mount namespace: the process's cwd IS the host run
-    dir (HOME is still the neutral /workspace). What must never leak are the
+    dir (and HOME is that run dir). What must never leak are the
     SERVER's own paths — the repo, $HOME — into the model's view."""
     (ws.root / "test_fails.py").write_text(
         "import os\n\ndef test_fails():\n    assert os.getcwd() == 'nowhere'\n", encoding="utf-8"

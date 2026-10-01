@@ -141,10 +141,14 @@ class TestArgv:
         i = argv.index(sb._sandbox_exec)
         env_pairs = dict(p.split("=", 1) for p in argv[2:i])
         assert env_pairs == sb.sandbox_env(ws)
-        assert env_pairs["HOME"] == WORKSPACE_MOUNT
+        # No /workspace mount on macOS: HOME is the REAL workspace, TMPDIR its
+        # tmp/ (the only writable places).
+        assert env_pairs["HOME"] == os.path.realpath(ws)
+        assert env_pairs["TMPDIR"] == os.path.join(os.path.realpath(ws), "tmp")
         assert set(env_pairs) <= {
             "PATH",
             "HOME",
+            "TMPDIR",
             "LANG",
             "LC_ALL",
             "PYTHONDONTWRITEBYTECODE",
@@ -191,6 +195,62 @@ class TestArgv:
         assert str(prefix / "bin") in entries
         assert all(os.path.isabs(e) for e in entries)
         assert all(e not in entries for e in [os.path.expanduser("~") + "/.local/bin"])
+
+    def test_interpreter_prefix_precedes_system_dirs(self, tmp_path: Path) -> None:
+        """bwrap order: the server's interpreter first, so `python3` is the
+        one with pytest — never macOS's /usr/bin/python3 Xcode stub (which
+        made every `python3 -m pytest` fail inside the sandbox)."""
+        prefix = tmp_path / "toolchain"
+        (prefix / "bin").mkdir(parents=True)
+        entries = _sandbox(tmp_path, ro_prefixes=[str(prefix)]).sandbox_env()["PATH"]
+        parts = entries.split(os.pathsep)
+        assert parts[0] == str(prefix / "bin")
+        assert parts.index(str(prefix / "bin")) < parts.index("/usr/bin")
+
+    def test_without_a_workspace_home_is_the_neutral_alias(self, tmp_path: Path) -> None:
+        env = _sandbox(tmp_path).sandbox_env()
+        assert env["HOME"] == WORKSPACE_MOUNT
+        assert "TMPDIR" not in env
+
+
+class TestNprocLimit:
+    """macOS RLIMIT_NPROC counts ALL of the user's processes: a bare
+    `ulimit -u max_processes` on a busy host made every fork fail."""
+
+    def test_limit_is_max_processes_above_the_current_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sandbox_mod, "_user_process_count", lambda: 700)
+        monkeypatch.setattr(sandbox_mod.resource, "getrlimit", lambda _r: (4000, 4000))
+        assert sandbox_mod._nproc_limit(ResourceLimits(max_processes=64)) == 764
+
+    def test_limit_is_capped_at_the_hard_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sandbox_mod, "_user_process_count", lambda: 3990)
+        monkeypatch.setattr(sandbox_mod.resource, "getrlimit", lambda _r: (4000, 4000))
+        assert sandbox_mod._nproc_limit(ResourceLimits(max_processes=64)) == 4000
+
+    def test_unknown_count_falls_back_to_max_processes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sandbox_mod, "_user_process_count", lambda: None)
+        monkeypatch.setattr(
+            sandbox_mod.resource,
+            "getrlimit",
+            lambda _r: (sandbox_mod.resource.RLIM_INFINITY, sandbox_mod.resource.RLIM_INFINITY),
+        )
+        assert sandbox_mod._nproc_limit(ResourceLimits(max_processes=64)) == 64
+
+    def test_prepare_passes_the_computed_limit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sandbox_mod, "_PROBE_CACHE", {})
+        monkeypatch.setattr(SeatbeltSandbox, "_probe", lambda self: None)
+        monkeypatch.setattr(sandbox_mod, "_nproc_limit", lambda _l: 4321)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        cmd = _sandbox(tmp_path).prepare(["true"], ws)
+        assert "-u 4321 " in cmd.argv[cmd.argv.index("/bin/sh") + 2]
+        assert (ws / "tmp").is_dir()
 
 
 class TestFailClosed:

@@ -29,6 +29,7 @@ execution. `NoSandbox` is the explicit opt-out (`ACI_AGENT_SANDBOX=none`).
 
 import os
 import re
+import resource
 import shutil
 import subprocess
 import sys
@@ -383,6 +384,36 @@ def _sbpl_quote(path: str) -> str:
     return '"' + path.replace('"', "") + '"'
 
 
+def _user_process_count() -> int | None:
+    """How many processes the current user owns (None when unknown)."""
+    try:
+        out = subprocess.run(
+            ["/bin/ps", "-U", str(os.getuid()), "-o", "pid="],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    return len(out.stdout.split())
+
+
+def _nproc_limit(limits: ResourceLimits) -> int:
+    """RLIMIT_NPROC for one Seatbelt command. macOS counts EVERY process of
+    the user (no PID namespace), so `ulimit -u max_processes` on a host
+    where the user already runs hundreds of processes makes every fork
+    fail. Bound the command to `max_processes` MORE than the user has now,
+    capped at the hard limit (sh refuses to raise past it)."""
+    current = _user_process_count()
+    value = limits.max_processes + (current or 0)
+    hard = resource.getrlimit(resource.RLIMIT_NPROC)[1]
+    if hard != resource.RLIM_INFINITY:
+        value = min(value, hard)
+    return value
+
+
 @dataclass
 class SeatbeltSandbox:
     """macOS Seatbelt (sandbox-exec) profile — the bwrap counterpart for hosts
@@ -528,32 +559,45 @@ class SeatbeltSandbox:
             f"{writes}\n"
         )
 
-    def _ulimit_sh(self, command: Sequence[str]) -> list[str]:
+    def _ulimit_sh(self, command: Sequence[str], nproc: int | None = None) -> list[str]:
         """`sh -c` wrapper applying the rlimits then exec'ing the command.
         RLIMIT_AS (`ulimit -v`) cannot be set on macOS (jetsam owns memory
         policy; sh refuses with EINVAL) — the address-space limit is
-        enforced by the workspace timeout + file-size/nproc/nofile instead."""
+        enforced by the workspace timeout + file-size/nproc/nofile instead.
+        `nproc` is the RLIMIT_NPROC value; see `_nproc_limit` (macOS counts
+        ALL of the user's processes, so a bare max_processes would make every
+        fork fail on a busy host)."""
         lim = self.limits
         script = (
             f"ulimit -t {lim.cpu_seconds} "
             f"-f {lim.file_size_bytes // 1024} "
-            f"-u {lim.max_processes} "
+            f"-u {nproc if nproc is not None else lim.max_processes} "
             f"-n {lim.open_files}; "
         )
         quoted = " ".join("'" + c.replace("'", "'\\''") + "'" for c in command)
         return ["/bin/sh", "-c", script + "exec " + quoted]
 
-    def sandbox_env(self, workspace: Path | None = None) -> dict[str, str]:  # noqa: ARG002
-        """The minimal env (same allowlist as bwrap) with HOME at the
-        workspace and PATH reduced to system dirs + the exec prefixes."""
-        env = minimal_process_env(WORKSPACE_MOUNT)
-        visible = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    def sandbox_env(self, workspace: Path | None = None) -> dict[str, str]:
+        """The minimal env (same allowlist as bwrap). PATH = the interpreter
+        prefixes FIRST, then the system dirs — the bwrap order: `python3`
+        must be the server's interpreter (with pytest), never macOS's
+        /usr/bin/python3 Xcode stub. With a workspace, HOME is the real
+        workspace path and TMPDIR its tmp/ dir (the only writable places —
+        there is no /workspace mount on macOS)."""
+        real = os.path.realpath(workspace) if workspace is not None else None
+        env = minimal_process_env(real or WORKSPACE_MOUNT)
+        visible: list[str] = []
         for p in self._exec_prefixes():
             visible += [str(Path(p) / "bin"), str(Path(p) / "sbin")]
+        visible += ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
         env["PATH"] = os.pathsep.join(dict.fromkeys(e for e in visible if os.path.isdir(e)))
+        if real is not None:
+            env["TMPDIR"] = str(Path(real) / "tmp")
         return env
 
-    def build_argv(self, command: Sequence[str], workspace: Path) -> list[str]:
+    def build_argv(
+        self, command: Sequence[str], workspace: Path, *, nproc: int | None = None
+    ) -> list[str]:
         """The full sandbox-exec argv. Pure (no process is started). The
         profile file lives under the workspace (the one writable place) at
         a fixed dot-name; `prepare` writes it right before Popen."""
@@ -566,7 +610,7 @@ class SeatbeltSandbox:
             self._sandbox_exec,
             "-f",
             str(Path(os.path.realpath(workspace)) / ".aci-sandbox-profile.sb"),
-            *self._ulimit_sh(command),
+            *self._ulimit_sh(command, nproc),
         ]
 
     def _write_profile(self, workspace: Path) -> Path:
@@ -627,11 +671,12 @@ class SeatbeltSandbox:
         if reason is not None:
             raise DomainError(ErrorCode.PERMISSION_DENIED, sandbox_refusal(reason))
         self._write_profile(workspace)
+        (Path(os.path.realpath(workspace)) / "tmp").mkdir(exist_ok=True)
         return SandboxedCommand(
-            argv=self.build_argv(command, workspace),
+            argv=self.build_argv(command, workspace, nproc=_nproc_limit(self.limits)),
             env=self.sandbox_env(workspace),
             cwd=workspace,
-            workspace_alias=WORKSPACE_MOUNT,
+            workspace_alias=os.path.realpath(workspace),
         )
 
 
