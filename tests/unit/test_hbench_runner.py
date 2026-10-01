@@ -604,3 +604,191 @@ class TestPreloadArm:
         assert s_record["capability_requests"] == 0
         assert p_client.searches == 1  # the preload routed once, at run start
         assert s_client.searches == 0  # offered, never used
+
+
+class TestPrivateSetAndArmR:
+    """The E2 instrument (--set private + arm R): the private-knowledge
+    fixtures and the private-skill arm. §42 fairness pins: R = arm K + the
+    case's private skill preloaded from a LOCAL in-process handler (no
+    registry, no DB), and K/N/S/P plus the default set stay byte-identical
+    to the pre-R runner — the existing K/N/S/P A/Bs must not move."""
+
+    def test_private_set_is_the_private_fixtures(self) -> None:
+        private = run_hbench._fixture_set("private")
+        assert [f["name"] for f in private] == [f1["name"] for f1 in run_hbench.PRIVATE_TASKS]
+        assert len(private) == 2
+
+    def test_private_set_is_disjoint_from_the_other_sets(self) -> None:
+        private = {f["name"] for f in run_hbench._fixture_set("private")}
+        assert not private & {f["name"] for f in run_hbench._fixture_set("verified")}
+        assert not private & {f["name"] for f in run_hbench._fixture_set("domain")}
+
+    def test_private_fixtures_carry_the_same_shape_plus_a_skill(self) -> None:
+        for fixture in run_hbench._fixture_set("private"):
+            assert fixture["name"] and fixture["prompt"]
+            assert fixture["files"]
+            assert any(name.startswith("test_") for name in fixture["files"])
+            # The private skill is metadata, NEVER a workspace file — the
+            # model must not see it on disk.
+            assert fixture["skill_id"] and fixture["skill"]
+            assert fixture["skill_id"] not in fixture["files"]
+
+    def test_every_private_fixture_names_its_intended_skill(self) -> None:
+        for fixture in run_hbench._fixture_set("private"):
+            assert fixture["name"] in run_hbench.PRIVATE_INTENDED_SKILLS, fixture["name"]
+            assert run_hbench._intended_skill(fixture["name"]) == fixture["skill_id"]
+
+    def test_intended_skill_lookup_covers_all_sets(self) -> None:
+        assert run_hbench._intended_skill("domain-brand-palette") == "brand-guidelines"
+        assert run_hbench._intended_skill("private-atlas-retry") == "atlas-error-standard"
+        assert run_hbench._intended_skill("multi-config-precedence") == ""
+
+    def test_private_prompts_do_not_name_the_intended_skill(self) -> None:
+        for fixture in run_hbench._fixture_set("private"):
+            intended = run_hbench.PRIVATE_INTENDED_SKILLS[fixture["name"]]
+            prompt = fixture["prompt"].lower()
+            assert intended not in prompt, fixture["name"]
+            assert intended.replace("-", " ") not in prompt, fixture["name"]
+
+    def test_arm_r_requires_the_private_set(self) -> None:
+        """Arm R preloads the case's private skill (fixture['skill']) — only
+        the private set carries one; anything else fails loudly BEFORE any
+        run or report is written."""
+        assert run_hbench.main(["--api-key", "k", "--set", "verified", "--arms", "R"]) == 2
+        assert run_hbench.main(["--api-key", "k", "--set", "domain", "--arms", "R"]) == 2
+
+    def test_private_client_serves_the_skill_with_its_real_digest(self) -> None:
+        """The local handler is an honest ACIClient: the payload is the
+        fixture's skill text verbatim and the digest is its REAL sha256 —
+        the kernel's digest verification (activate) sees the truth."""
+        import hashlib
+
+        fixture = run_hbench.PRIVATE_TASKS[0]
+        client = run_hbench._PrivateSkillACIClient(
+            skill_id=fixture["skill_id"], skill_text=fixture["skill"]
+        )
+        (payload, digest) = client.resolve(fixture["skill_id"], "1.0.0")
+        assert payload == fixture["skill"].encode("utf-8")
+        assert digest == hashlib.sha256(payload).hexdigest()
+        selection = client.search(object())[0]
+        assert selection.capability_id == fixture["skill_id"]
+        assert selection.version == "1.0.0"
+        assert selection.digest == digest
+        assert selection.estimated_context_tokens >= 1
+
+    def test_dispatch_r_preloads_the_private_skill_k_does_not(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """`_run_one` routes arm R to run_kernel_arm with the LOCAL
+        private-skill handler + the preload ON, while K's dispatch passes
+        NEITHER — K stays byte-identical to the pre-R runner."""
+        import hashlib
+
+        from aci.domain.runtime.actions import CapabilityRequest
+
+        calls: list[dict[str, Any]] = []
+
+        def _record_call(*args: object, **kwargs: object) -> dict[str, Any]:
+            calls.append({"args": args, "kwargs": kwargs})
+            return {}
+
+        monkeypatch.setattr(run_hbench, "run_kernel_arm", _record_call)
+        fixture = run_hbench.PRIVATE_TASKS[0]
+        for arm in ("K", "R"):
+            run_hbench._run_one(
+                fixture,
+                arm,
+                "http://gateway.invalid/v1",
+                "some-model",
+                "key",
+                tmp_path / "src",
+                tmp_path / "runs",
+                max_turns=3,
+            )
+        (k_call, r_call) = calls
+        # K: the pre-R defaults hold — no handler, no preload, no arm label.
+        assert "capability_factory" not in k_call["kwargs"]
+        assert "preload_capabilities" not in k_call["kwargs"]
+        assert "arm" not in k_call["kwargs"]
+        # R: the arm label + the local private-skill handler + the preload.
+        assert r_call["kwargs"]["arm"] == "R"
+        assert r_call["kwargs"]["preload_capabilities"] is True
+        handler = r_call["kwargs"]["capability_factory"].build()
+        selection = handler.search(CapabilityRequest(objective="anything", constraints=[]))[0]
+        assert selection.capability_id == fixture["skill_id"]
+        assert selection.digest == hashlib.sha256(fixture["skill"].encode()).hexdigest()
+        # ...and the two dispatches share everything else.
+        assert set(r_call["kwargs"]) == set(k_call["kwargs"]) | {
+            "arm",
+            "capability_factory",
+            "preload_capabilities",
+        }
+        for key, value in k_call["kwargs"].items():
+            assert r_call["kwargs"][key] == value
+
+    def _private_arm_run(
+        self, tmp_path: Path, *, arm: str
+    ) -> tuple[dict[str, Any], FakeModelGateway]:
+        """One FULL run over fakes — no network, no DB: the real kernel path
+        (workspace copy, at-limit verification, post-hoc yardstick) with a
+        fake gateway; arm R goes through run_private_arm (the local
+        private-skill handler + preload), arm K through run_kernel_arm's
+        defaults (the null handler, no preload)."""
+        fixture = run_hbench.PRIVATE_TASKS[0]
+        gateway = FakeModelGateway([ContinueAction()])
+        sources = tmp_path / "src"
+        (sources / fixture["name"]).mkdir(parents=True, exist_ok=True)
+        for rel, content in fixture["files"].items():
+            (sources / fixture["name"] / rel).write_text(content, encoding="utf-8")
+        contract, spec = run_hbench._contract_spec(fixture)
+        if arm == "R":
+            record = run_hbench.run_private_arm(
+                fixture,
+                contract,
+                spec,
+                gateway,  # type: ignore[arg-type]
+                sources,
+                tmp_path / "runs",
+                max_turns=1,
+                sandbox=available_sandbox(),
+            )
+        else:
+            record = run_hbench.run_kernel_arm(
+                fixture,
+                contract,
+                spec,
+                gateway,  # type: ignore[arg-type]
+                sources,
+                tmp_path / "runs",
+                max_turns=1,
+                sandbox=available_sandbox(),
+            )
+        return record, gateway
+
+    def test_first_request_of_r_carries_the_private_skill_k_does_not(self, tmp_path: Path) -> None:
+        """The whole R−K difference, on the wire: R's FIRST ModelRequest
+        already contains the rendered private skill (the run-start preload
+        through the local handler) — K's does not, because K stays on the
+        null handler with the preload off."""
+        fixture = run_hbench.PRIVATE_TASKS[0]
+        r_record, r_gateway = self._private_arm_run(tmp_path, arm="R")
+        k_record, k_gateway = self._private_arm_run(tmp_path, arm="K")
+
+        r_first = r_gateway.requests[0].messages
+        k_first = k_gateway.requests[0].messages
+        at = [i for i, m in enumerate(r_first) if "Atlas Error Handling Standard" in m.content]
+        assert len(at) == 1
+        assert r_first[at[0]].role == "system"
+        assert f"<<<BEGIN SKILL REFERENCE {fixture['skill_id']}@1.0.0" in r_first[at[0]].content
+        assert all("Atlas Error Handling Standard" not in m.content for m in k_first)
+
+        # The counters: a preload is a loaded skill, NOT a model request.
+        assert r_record["arm"] == "R" and k_record["arm"] == "K"
+        assert r_record["skills_preloaded"] == [f"{fixture['skill_id']}@1.0.0"]
+        assert r_record["skills_loaded"] == [f"{fixture['skill_id']}@1.0.0"]
+        assert r_record["capability_requests"] == 0
+        # K's record carries the honest null-plane zeros (no preloaded key —
+        # the null handler never preloads).
+        assert k_record.get("skills_preloaded", []) == []
+        assert k_record["skills_loaded"] == []
+        assert k_record["capability_requests"] == 0

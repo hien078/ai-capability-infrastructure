@@ -31,6 +31,15 @@ outcomes?", not "does the model?"):
       carries skills; NOTHING else differs from S (same registry plane,
       fixtures, model, tools, sandbox, max_turns, verification,
       turn-budget note) — P−S isolates preload-vs-offered.
+  R — private-skill arm (E2, --set private ONLY): arm K + the case's
+      PRIVATE skill preloaded from a LOCAL in-process capability handler
+      — no registry, no DB. The private fixtures' required knowledge did
+      not exist before today (a fictional internal standard invented with
+      the fixture), so no model can carry it: the rules are documented ONLY
+      in the skill and pinned in the tests as sha256 digests. R−K on the
+      private set isolates what a skill carrying NON-PUBLIC knowledge
+      adds — the open axis of ADR-014 amendment 17 (public knowledge was
+      proven ungated by the domain round: brand-palette 3/3 naked).
 
 The delta K−N is what the kernel adds. The headline metric is FALSE
 SUCCESS (§44): N reports "done" the verifier refutes; K can only report
@@ -55,8 +64,8 @@ fixture through the false-success metric.
 Usage:
     ACI_AGENT_MODEL_API_KEY=... .venv/bin/python scripts/run_hbench.py \
         [--base-url http://localhost:20128/v1] [--model OneNexus/glm-5.3] \
-        [--set verified|domain] [--cases multi-config-precedence,...] \
-        [--arms K,N,S,P] [--repeat 3] [--parallel 4] [--max-turns 12]
+        [--set verified|domain|private] [--cases multi-config-precedence,...] \
+        [--arms K,N,S,P,R] [--repeat 3] [--parallel 4] [--max-turns 12]
 
 Fixture sets (--set): 'verified' (default) = the 8 §80 multi/long fixtures;
 'domain' = the domain-knowledge fixtures (scripts/domain_tasks.py, verified
@@ -65,11 +74,18 @@ needs knowledge a production skill carries (prompt-injection hardening,
 MCP manifest conventions, brand values, design tells). The domain set is
 the SKILL axis: run K vs P on it and the report records, per run, whether
 the fixture's INTENDED skill (DOMAIN_INTENDED_SKILLS) was preloaded.
+'private' = the private-knowledge fixtures (scripts/private_tasks.py,
+verified by scripts/verify_private_fixtures.py) — the E2 instrument: each
+fixture's rules are a fictional internal standard that did not exist
+before today, documented only in the fixture's private SKILL.md and pinned
+in the tests as sha256 digests. Arm R (the private-skill arm) requires
+this set; run K vs R on it for the E2 measurement (K−naked vs K+skill).
 
 Writes a JSON report to data/hbench/ (gitignored) and prints the table.
 """
 
 import argparse
+import hashlib
 import json
 import statistics
 import sys
@@ -84,6 +100,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from domain_tasks import DOMAIN_INTENDED_SKILLS, DOMAIN_TASKS  # noqa: E402
+from private_tasks import PRIVATE_INTENDED_SKILLS, PRIVATE_TASKS  # noqa: E402
 from proof_loop import LONG_TASKS, MULTI_TASKS  # noqa: E402
 
 from aci.application.run_agent_task import (  # noqa: E402
@@ -131,8 +148,8 @@ from aci.runtime.run_controller import (  # noqa: E402
     turn_budget_note,
 )
 from aci.runtime.sandbox import (  # noqa: E402
-    BwrapSandbox,
     ProcessSandbox,
+    build_platform_default_sandbox,
     build_process_sandbox,
 )
 from aci.runtime.state_manager import StateManager  # noqa: E402
@@ -179,10 +196,20 @@ def _all_fixtures() -> list[dict[str, Any]]:
 def _fixture_set(name: str) -> list[dict[str, Any]]:
     """The fixture pack for a run. 'verified' = the 8 §80 multi/long
     fixtures (the default — every existing round's pack, unchanged);
-    'domain' = the domain-knowledge fixtures (domain_tasks.py)."""
+    'domain' = the domain-knowledge fixtures (domain_tasks.py);
+    'private' = the private-knowledge fixtures (private_tasks.py, the E2
+    instrument — arm R's private-skill plane)."""
     if name == "domain":
         return list(DOMAIN_TASKS)
+    if name == "private":
+        return list(PRIVATE_TASKS)
     return _all_fixtures()
+
+
+def _intended_skill(fixture_name: str) -> str:
+    """The skill whose knowledge a fixture's fix needs — the domain set's
+    production skill or the private set's local one ("" elsewhere)."""
+    return DOMAIN_INTENDED_SKILLS.get(fixture_name) or PRIVATE_INTENDED_SKILLS.get(fixture_name, "")
 
 
 def _post_hoc(run_dir: Path, sandbox: ProcessSandbox) -> int:
@@ -407,7 +434,7 @@ def _kernel_service(
         command_timeout_seconds=120.0,
         verification_timeout_seconds=300.0,
         event_bus=bus,
-        process_sandbox=sandbox if sandbox is not None else BwrapSandbox(),
+        process_sandbox=sandbox if sandbox is not None else build_platform_default_sandbox(),
         preload_capabilities=preload_capabilities,
     )
 
@@ -428,7 +455,7 @@ def run_kernel_arm(
     capability_factory: object | None = None,
     preload_capabilities: bool = False,
 ) -> dict[str, Any]:
-    sandbox = sandbox if sandbox is not None else BwrapSandbox()
+    sandbox = sandbox if sandbox is not None else build_platform_default_sandbox()
     bus = EventBus()
     # The service discards a run's bus history once the run is terminal, so
     # collect events through a sink — reading bus.history() afterwards would
@@ -556,6 +583,110 @@ def run_skills_arm(
     return record
 
 
+# ---------------------------------------------------------------------------
+# Arm R — private-skill arm (E2, --set private ONLY): arm K + the case's
+# private skill preloaded from a LOCAL in-process capability handler.
+# NO registry, NO DB: the handler is the same counting CapabilityRuntime
+# over a fake ACIClient that serves exactly the fixture's private SKILL.md
+# text with its real sha256 digest — the knowledge exists nowhere else,
+# which is what makes R−K the E2 measurement (a skill carrying non-public
+# knowledge vs the same harness without it).
+# ---------------------------------------------------------------------------
+
+
+class _PrivateSkillSelection:
+    """One selection of the case's private skill (arm R)."""
+
+    def __init__(
+        self, skill_id: str, version: str, digest: str, estimated_context_tokens: int
+    ) -> None:
+        self.capability_id = skill_id
+        self.version = version
+        self.payload_ref = f"skill://{skill_id}@{version}/SKILL.md"
+        self.digest = digest
+        self.estimated_context_tokens = estimated_context_tokens
+
+
+class _PrivateSkillACIClient:
+    """Arm R's capability plane: LOCAL and in-process — no registry, no DB.
+    Serves exactly the case's private skill text with its real sha256
+    digest (the same ACIClient contract the registry client implements;
+    search returns the one skill for any need — there is nothing to
+    route)."""
+
+    VERSION = "1.0.0"
+
+    def __init__(self, *, skill_id: str, skill_text: str) -> None:
+        self._skill_id = skill_id
+        self._payload = skill_text.encode("utf-8")
+        self._digest = hashlib.sha256(self._payload).hexdigest()
+        self.searches = 0
+
+    def search(self, request: object) -> list[object]:  # noqa: ARG002
+        self.searches += 1
+        return [
+            _PrivateSkillSelection(
+                self._skill_id,
+                self.VERSION,
+                self._digest,
+                max(1, len(self._payload) // 4),
+            )
+        ]
+
+    def resolve(self, capability_id: str, version: str) -> tuple[bytes, str]:
+        if capability_id != self._skill_id or version != self.VERSION:
+            raise KeyError(f"unknown capability {capability_id}@{version}")
+        return self._payload, self._digest
+
+
+def run_private_arm(
+    fixture: dict[str, Any],
+    contract: SubtaskContract,
+    spec: Any,
+    gateway: OpenAICompatGateway,
+    sources: Path,
+    runs: Path,
+    *,
+    max_turns: int,
+    ablations: list[str] | None = None,
+    sandbox: ProcessSandbox | None = None,
+    trace_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Arm R = arm K + the case's PRIVATE skill preloaded from a LOCAL
+    in-process handler (no registry, no DB). The handler is the same
+    counting CapabilityRuntime arm S/P wire, over a fake ACIClient serving
+    exactly the fixture's skill text with its real sha256 digest; the
+    kernel's run-start preload (``preload_capabilities=True``) puts it in
+    context from the FIRST model request on. Everything else is arm K's
+    path unchanged (fixtures, tools, sandbox, max_turns, verification,
+    turn-budget note, ablations plumbing) — R−K on --set private isolates
+    the private-skill contribution."""
+    runtime = _skills_capability_runtime(
+        lambda: _PrivateSkillACIClient(
+            skill_id=str(fixture["skill_id"]), skill_text=str(fixture["skill"])
+        )
+    )
+    record = run_kernel_arm(
+        fixture,
+        contract,
+        spec,
+        gateway,
+        sources,
+        runs,
+        max_turns=max_turns,
+        ablations=ablations,
+        trace_dir=trace_dir,
+        sandbox=sandbox,
+        arm="R",
+        capability_factory=_Factory(runtime),
+        preload_capabilities=True,
+    )
+    record["capability_requests"] = runtime.requests
+    record["skills_loaded"] = list(runtime.loaded)
+    record["skills_preloaded"] = list(runtime.preloaded)
+    return record
+
+
 #: Recovery actions that end the run — not a repair/retry that was taken.
 _TERMINAL_ACTIONS = frozenset({"FAIL", "RETURN_PARTIAL", "ESCALATE"})
 _NO_MECHANISM = {
@@ -642,7 +773,9 @@ def run_naive_arm(
     )
     # §42 fairness: the SAME process sandbox as arm K (one instance per pack).
     workspace_id = manager.create_local(
-        run_dir, envelope, sandbox=sandbox if sandbox is not None else BwrapSandbox()
+        run_dir,
+        envelope,
+        sandbox=sandbox if sandbox is not None else build_platform_default_sandbox(),
     )
     dispatcher = WorkspaceToolDispatcher(manager, workspace_id)
     tools = standard_tool_specs(allow_commands=True, command_timeout_ms=120_000)
@@ -821,15 +954,31 @@ def _run_one(
             arm="P",
             preload_capabilities=True,
         )
+    elif arm == "R":
+        # Arm R = arm K + the case's private skill preloaded from a LOCAL
+        # in-process handler (no registry, no DB — container stays None).
+        record = run_private_arm(
+            fixture,
+            contract,
+            spec,
+            gateway,
+            sources,
+            runs,
+            max_turns=max_turns,
+            ablations=ablations,
+            sandbox=sandbox,
+            trace_dir=trace_dir,
+        )
     else:
         record = run_naive_arm(
             fixture, contract, spec, gateway, sources, runs, max_turns=max_turns, sandbox=sandbox
         )
     record["fixture"] = fixture["name"]
     record["h_ref"] = H_REFS.get(fixture["name"], "")
-    # The domain set's skill axis: which production skill this fixture's
-    # fix needs ("" on the verified pack — no intended skill there).
-    record["intended_skill"] = DOMAIN_INTENDED_SKILLS.get(fixture["name"], "")
+    # The skill axis: which skill this fixture's fix needs — the domain
+    # set's production skill, the private set's local one, or "" (the
+    # verified pack has no intended skill).
+    record["intended_skill"] = _intended_skill(fixture["name"])
     return record
 
 
@@ -846,13 +995,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--set",
         default="verified",
-        choices=["verified", "domain"],
+        choices=["verified", "domain", "private"],
         help=(
             "fixture set: 'verified' = the 8 §80 multi/long fixtures (default), "
-            "'domain' = the domain-knowledge fixtures (domain_tasks.py)"
+            "'domain' = the domain-knowledge fixtures (domain_tasks.py), "
+            "'private' = the private-knowledge fixtures (private_tasks.py, the "
+            "E2 instrument — arm R's set)"
         ),
     )
-    parser.add_argument("--arms", default="K,N", help="comma subset of K,N,S,P")
+    parser.add_argument("--arms", default="K,N", help="comma subset of K,N,S,P,R")
     parser.add_argument("--repeat", type=int, default=3, help="runs per case per arm (default 3)")
     parser.add_argument("--parallel", type=int, default=4, help="concurrent runs (default 4)")
     parser.add_argument("--max-turns", type=int, default=12)
@@ -888,9 +1039,14 @@ def main(argv: list[str] | None = None) -> int:
         print("no API key — set ACI_AGENT_MODEL_API_KEY or --api-key", file=sys.stderr)
         return 2
     arms = [a.strip().upper() for a in args.arms.split(",") if a.strip()]
-    unknown_arms = [a for a in arms if a not in ("K", "N", "S", "P")]
+    unknown_arms = [a for a in arms if a not in ("K", "N", "S", "P", "R")]
     if unknown_arms:
-        print(f"unknown arms {unknown_arms!r} — pick from K,N,S,P", file=sys.stderr)
+        print(f"unknown arms {unknown_arms!r} — pick from K,N,S,P,R", file=sys.stderr)
+        return 2
+    if "R" in arms and args.set != "private":
+        # Arm R preloads the case's private skill (fixture['skill']) — the
+        # private set is the only one that carries one.
+        print("arm R needs --set private (the private-skill fixtures)", file=sys.stderr)
         return 2
     ablations = [a.strip() for a in args.ablate.split(",") if a.strip()]
     unknown = [a for a in ablations if a not in ABLATIONS]
@@ -976,7 +1132,7 @@ def main(argv: list[str] | None = None) -> int:
                     "arm": arm,
                     "fixture": fixture["name"],
                     "h_ref": H_REFS.get(fixture["name"], ""),
-                    "intended_skill": DOMAIN_INTENDED_SKILLS.get(fixture["name"], ""),
+                    "intended_skill": _intended_skill(fixture["name"]),
                     "status": "crashed",
                     "stop_reason": type(exc).__name__,
                     "accepted": False,
@@ -1085,6 +1241,10 @@ def main(argv: list[str] | None = None) -> int:
         # The skill axis: which production skill each fixture's fix needs —
         # the report answers "was the INTENDED skill preloaded?" per run.
         report["intended_skills"] = dict(DOMAIN_INTENDED_SKILLS)
+    elif args.set == "private":
+        # The E2 skill axis: which PRIVATE skill each fixture's fix needs —
+        # documented only in the skill, pinned in the tests as digests.
+        report["intended_skills"] = dict(PRIVATE_INTENDED_SKILLS)
     out = Path(args.out) if args.out else REPORT_ROOT / f"hbench-{stamp}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2), encoding="utf-8")
