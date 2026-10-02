@@ -34,6 +34,32 @@ def _one(conn: Any, sql: str) -> Any:
     return conn.execute(text(sql)).scalar()
 
 
+def latest_run_mean_recall(rows: list[tuple[Any, ...]]) -> dict[str, float]:
+    """(label, run_id, created_at, case_id, recall|None) rows → label → mean
+    recall of the LATEST RUN per label (§41, over non-null recalls).
+
+    The latest RUN, not the latest result per case: a later run that covered
+    fewer cases (a partial or aborted run) must not be averaged together
+    with an older run's results for the cases it did not cover — that mixes
+    benchmark eras under a header that says "latest run per label". A label
+    whose latest run produced no non-null recalls is omitted (no recall to
+    report), never back-filled from an older run.
+    """
+    latest_run: dict[str, tuple[Any, str]] = {}
+    for label, run_id, created_at, _case_id, _recall in rows:
+        prev = latest_run.get(label)
+        if prev is None or (created_at, run_id) > prev:
+            latest_run[label] = (created_at, run_id)
+    sums: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for label, run_id, _created_at, _case_id, recall in rows:
+        if latest_run.get(label, (None, None))[1] != run_id or recall is None:
+            continue
+        sums[label] = sums.get(label, 0.0) + float(recall)
+        counts[label] = counts.get(label, 0) + 1
+    return {label: sums[label] / counts[label] for label in sorted(sums) if counts[label]}
+
+
 def section_corpus(conn: Any) -> None:
     print("== corpus ==")
     total = _one(conn, "SELECT count(*) FROM capabilities")
@@ -166,20 +192,18 @@ def section_benchmark(conn: Any) -> None:
     ):
         print(f"  {label}: {count} run(s), last {created}")
     print("latest run per label (mean recall over non-null results):")
-    for label, recall in _rows(
+    rows = _rows(
         conn,
         """
-        SELECT label, round(avg((metrics->>'recall')::numeric), 3) FROM (
-            SELECT DISTINCT ON (r.label, res.case_id)
-                r.label, res.case_id, res.variant, res.metrics
-            FROM benchmark_runs r
-            JOIN benchmark_results res ON res.run_id = r.run_id
-            WHERE res.variant = 'full_pipeline'
-            ORDER BY r.label, res.case_id, r.created_at DESC
-        ) latest GROUP BY label ORDER BY label
+        SELECT r.label, r.run_id, r.created_at, res.case_id,
+               (res.metrics->>'recall')::numeric AS recall
+        FROM benchmark_runs r
+        JOIN benchmark_results res ON res.run_id = r.run_id
+        WHERE res.variant = 'full_pipeline'
         """,
-    ):
-        print(f"  {label}: full_pipeline mean recall {recall}")
+    )
+    for label, recall in latest_run_mean_recall(rows).items():
+        print(f"  {label}: full_pipeline mean recall {round(recall, 3)}")
 
 
 def main() -> int:
