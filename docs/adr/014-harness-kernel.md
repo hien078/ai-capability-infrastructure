@@ -362,6 +362,34 @@ INVALID, bị loại và chạy bù.
     84,859 → 3,859, wall 116 s → 10 s; route từ host cách DB 3 ms: 16 s → ~1 s (trước đó
     plugin OpenCode timeout 2 s và fail-open thầm lặng mọi prompt).
 
+26. **E2C — nhân rộng E2B trên 7 fixture tri thức riêng MỚI (F vs Bp): ✓ lặp lại, trong
+    phạm vi bài model giải được.** 7 chuẩn hư cấu do 4 builder song song viết (tiền tệ &
+    kỳ tài chính, bucket rollout feature flag, che PII trong log, header deprecation API,
+    ID có ký tự kiểm tra, retry/DLQ của queue, thứ tự ưu tiên cấu hình); 3 prompt nêu
+    tên chuẩn, 4 prompt gián tiếp. Luật hợp lệ đăng ký trước: K n=2 phải 0/2 (giữ: 0/13
+    run hợp lệ — không bài nào lộ chuẩn); R n=3 phải ≥2/3 → **chỉ 3/7 bài đạt**
+    (drawbridge 3/3, palisade 3/3, vellum 2/3; 4 bài bị loại: ở 7/9 run R thất bại model
+    không sửa nguồn trong 12 turn dù chuẩn đã ở ngữ cảnh — bài quá khó, không phải lỗi
+    giao tri thức). Vòng chính n=8/case/arm trên 3 bài: **F 8/24 (0.33) vs Bp 17/24
+    (0.71), Fisher p=0.0199 — primary đăng ký trước: LẶP LẠI E2B.** Từng bài: drawbridge
+    (gián tiếp) F 0/8 vs Bp 4/8; palisade (nêu tên) 2/8 vs 6/8; vellum (nêu tên) 6/8 vs
+    7/8. Router: hạng 1 ở 7/7 prompt ex-ante (cả 4 gián tiếp) và 24/24 run Bp, không nạp
+    skill nhiễu nào. Cơ chế giống E2B: F tìm thấy doc 9/24 (gián tiếp 0/8) → khi tìm thấy
+    pass 8/9, không thấy 0/15. **Đọc:** nút thắt của doc-trong-repo là việc model tự tìm
+    doc, và nó sụp khi ticket không nêu tên chuẩn; router không phụ thuộc cách viết prompt
+    trên corpus 44 skill này. §34: 3 bài hợp lệ, một họ model, gateway 5xx (18 run
+    MODEL_FAILURE loại + chạy bù). Không đổi default nào.
+
+27. **Lỗi kernel sửa trong đợt OpenCode tự chọn việc (bug/security — không mở rộng).**
+    `StateManager.commit/_mutate` không nguyên tử (INV-01): event lỗi giữa danh sách để
+    lại record nửa vời, commit lại thì áp dụng hai lần → nay áp vào bản nháp rồi mới thay
+    (`7e9a256`, 3 test đỏ-trước). Seatbelt ghi file profile theo symlink do model cài
+    trong workspace (server ghi đè file ngoài sandbox) → `O_NOFOLLOW`, từ chối
+    (`1ce060d`). **Còn treo, cần một vòng H-bench trước khi sửa** (đổi bằng chứng verifier
+    nhìn thấy): guardrail post-tool BLOCK làm mất `side_effects` của lệnh (`tool_runtime`);
+    docstring `verification.py` hứa INCONCLUSIVE nhưng `verify()` chỉ ra PASS/FAIL (lệnh
+    verify timeout bị ghi là FAIL).
+
 ## Verification
 
 - `tests/security/test_harness_invariants.py` — INV-04/06/07/08 + §7.6 trên đường

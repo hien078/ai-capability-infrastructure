@@ -113,6 +113,12 @@ giai đoạn này.
 > ON cho kho tri thức riêng là quyết định treo (cần người dùng + vòng đăng ký trước trên
 > use case thật). Ghi chi tiết: ADR-014 amendment 24.
 
+> **E2C (2026-10-02, Mac): ✓ lặp lại E2B trên fixture mới.** 7 chuẩn mới (3 nêu tên, 4 gián
+> tiếp); K 0/13 (không lộ); chỉ 3/7 qua cổng R ≥2/3 (4 bài quá khó dù có chuẩn — giới hạn
+> của bộ fixture). Trên 3 bài hợp lệ: **F 8/24 vs Bp 17/24, p=0.0199**; router hạng 1 ở
+> 24/24 run và 7/7 prompt ex-ante kể cả gián tiếp; F tìm thấy doc 0/8 ở bài gián tiếp.
+> Ghi chi tiết: ADR-014 amendment 26.
+
 ### E3 — Có dùng thật không?
 
 - **Thiết kế:** thử nghiệm 30 ngày với workflow thật, telemetry bật, **không xây gì mới** (đúng
