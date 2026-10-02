@@ -415,6 +415,10 @@ class _CountingCapabilityRuntime(CapabilityRuntime):
         self.requests = 0
         self.loaded: list[str] = []
         self.preloaded: list[str] = []
+        #: Registry exceptions seen by the plane (``<phase>:<ExceptionType>``).
+        #: The kernel treats them as best-effort gaps and runs on, so without
+        #: this record a registry OUTAGE reads as an honest skill-less result.
+        self.errors: list[str] = []
         #: The run-scoped client (kept public for the registry arms' evidence
         #: read-out: its ``decisions`` carry the kernel's kept/dropped ranks).
         self.client = aci
@@ -424,7 +428,11 @@ class _CountingCapabilityRuntime(CapabilityRuntime):
     ) -> list[CapabilityActivation]:
         """The kernel's run-start preload — NOT a model request (not
         counted in ``requests``); its skills are loaded skills all the same."""
-        activations = super().preload(request, snapshot)
+        try:
+            activations = super().preload(request, snapshot)
+        except Exception as exc:
+            self.errors.append(f"preload:{type(exc).__name__}")
+            raise
         ids = [f"{a.capability_id}@{a.version}" for a in activations]
         self.preloaded.extend(ids)
         self.loaded.extend(ids)
@@ -434,7 +442,11 @@ class _CountingCapabilityRuntime(CapabilityRuntime):
         self, request: CapabilityRequest, snapshot: RuntimeStateSnapshot
     ) -> list[CapabilityActivation]:
         self.requests += 1
-        activations = super().handle_request(request, snapshot)
+        try:
+            activations = super().handle_request(request, snapshot)
+        except Exception as exc:
+            self.errors.append(f"request:{type(exc).__name__}")
+            raise
         self.loaded.extend(f"{a.capability_id}@{a.version}" for a in activations)
         return activations
 
@@ -1004,6 +1016,11 @@ def run_registry_arm(
     record["skills_loaded"] = list(runtime.loaded)
     record["skills_preloaded"] = list(runtime.preloaded)
     record.update(private_skill_evidence(runtime.client, str(fixture["skill_id"])))
+    # A registry exception is infrastructure, not a result (E2D-turns: an
+    # unreachable aci_e2b turned 42 Bp rows into skill-less 0-pass rows).
+    # INVALID like MODEL_FAILURE: exclude and top up.
+    record["registry_errors"] = list(runtime.errors)
+    record["invalid_reason"] = "REGISTRY_UNAVAILABLE" if runtime.errors else None
     return record
 
 

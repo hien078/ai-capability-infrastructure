@@ -279,6 +279,64 @@ class TestRegistryArms:
             }
         ]
 
+    def test_registry_arm_marks_a_registry_outage_invalid(self, tmp_path: Path) -> None:
+        """E2D-turns: the experiment registry was unreachable for a whole
+        round — every Bp preload raised OperationalError, the kernel (best
+        effort) ran on with NO skill, and 42 rows read as honest 0-pass Bp
+        results. A registry exception is infrastructure, not a result: the
+        record names it (``registry_errors``) and is marked
+        ``invalid_reason=REGISTRY_UNAVAILABLE`` (excluded + topped up, like
+        MODEL_FAILURE)."""
+
+        class _DownClient(_RecordingClient):
+            def search(self, request: object) -> list[object]:  # noqa: ARG002
+                raise ConnectionError("registry down")
+
+        fixture = PRIVATE_TASKS[0]
+        container = SimpleNamespace(agent_capability_clients=_DownClient)
+        sources = tmp_path / "src"
+        _materialize(fixture, sources)
+        contract, spec = run_hbench._contract_spec(fixture)
+        record = run_hbench.run_registry_arm(
+            fixture,
+            contract,
+            spec,
+            FakeModelGateway([ContinueAction()]),
+            sources,
+            tmp_path / "runs",
+            max_turns=1,
+            container=container,
+            sandbox=available_sandbox(),
+            arm="Bp",
+            preload_capabilities=True,
+        )
+        assert record["skills_preloaded"] == []
+        assert record["registry_errors"] == ["preload:ConnectionError"]
+        assert record["invalid_reason"] == "REGISTRY_UNAVAILABLE"
+
+    def test_registry_arm_healthy_run_is_valid(self, tmp_path: Path) -> None:
+        """A reachable registry leaves the record valid (no false invalids)."""
+        fixture = PRIVATE_TASKS[0]
+        container = SimpleNamespace(agent_capability_clients=_RecordingClient)
+        sources = tmp_path / "src"
+        _materialize(fixture, sources)
+        contract, spec = run_hbench._contract_spec(fixture)
+        record = run_hbench.run_registry_arm(
+            fixture,
+            contract,
+            spec,
+            FakeModelGateway([ContinueAction()]),
+            sources,
+            tmp_path / "runs",
+            max_turns=1,
+            container=container,
+            sandbox=available_sandbox(),
+            arm="Bp",
+            preload_capabilities=True,
+        )
+        assert record["registry_errors"] == []
+        assert record["invalid_reason"] is None
+
     def test_private_skill_evidence_miss_is_honest(self) -> None:
         """A client whose decisions never contain the private skill records
         selected=False / rank=None — a MISS is a result, never a guess."""
