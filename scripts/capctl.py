@@ -22,8 +22,12 @@ Usage:
 """
 
 import argparse
+import fcntl
 import json
+import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -60,8 +64,53 @@ def _load_candidate(candidate_id: str) -> CandidateRecord:
 
 
 def _save_candidate(record: CandidateRecord) -> None:
+    """Durable write of the §80 human-gate audit record: temp + fsync +
+    atomic rename + directory fsync (the QueueState.save pattern — a crash
+    mid-write can never leave a truncated/corrupt candidate file, which is
+    the append-only record of who approved/rejected what). The temp name
+    ends in ``.tmp`` so the candidates list glob (``*.json``) never sees a
+    partial file."""
     path = CANDIDATE_ROOT / f"{record.proposal.candidate_id}.json"
-    path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(record.model_dump_json(indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    try:
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+    except OSError:
+        return  # parent gone: the rename above is still atomic
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+@contextmanager
+def _candidate_lock(candidate_id: str) -> Iterator[None]:
+    """Advisory exclusive lock around one candidate's load→advance→save
+    read-modify-write: two concurrent capctl decisions (a human and the
+    weekly cycle) would otherwise silently drop one to last-write-wins.
+    Fail closed if flock is unavailable (same rule as QueueState)."""
+    if fcntl is None:  # pragma: no cover — every supported host has fcntl
+        raise SystemExit("flock unavailable — refusing to run unsupervised (fail closed)")
+    CANDIDATE_ROOT.mkdir(parents=True, exist_ok=True)
+    lock_path = CANDIDATE_ROOT / f"{candidate_id}.json.lock"
+    with open(lock_path, "w", encoding="utf-8") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise SystemExit(
+                f"another capctl process is deciding on {candidate_id} — retry shortly ({exc})"
+            ) from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 # ---------------------------------------------------------------------------
@@ -94,20 +143,21 @@ def cmd_candidates_show(args: argparse.Namespace) -> int:
 
 
 def _transition(args: argparse.Namespace, to_status: str) -> int:
-    record = _load_candidate(args.candidate_id)
-    now = datetime.now(UTC)
-    try:
-        advanced = advance_candidate(
-            record,
-            to_status,
-            decided_by=args.by,
-            decided_at=now,  # type: ignore[arg-type]
-            rejection_reason=args.reason,
-        )
-    except ValueError as exc:
-        print(f"REJECTED: {exc}", file=sys.stderr)
-        return 1
-    _save_candidate(advanced)
+    with _candidate_lock(args.candidate_id):
+        record = _load_candidate(args.candidate_id)
+        now = datetime.now(UTC)
+        try:
+            advanced = advance_candidate(
+                record,
+                to_status,
+                decided_by=args.by,
+                decided_at=now,  # type: ignore[arg-type]
+                rejection_reason=args.reason,
+            )
+        except ValueError as exc:
+            print(f"REJECTED: {exc}", file=sys.stderr)
+            return 1
+        _save_candidate(advanced)
     print(f"{advanced.proposal.candidate_id}: {record.status} -> {advanced.status} (by {args.by})")
     return 0
 
