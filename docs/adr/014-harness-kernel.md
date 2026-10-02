@@ -390,6 +390,38 @@ INVALID, bị loại và chạy bù.
     docstring `verification.py` hứa INCONCLUSIVE nhưng `verify()` chỉ ra PASS/FAIL (lệnh
     verify timeout bị ghi là FAIL).
 
+28. **E2D + K1 trên model thứ hai (DeepSeek V4, `OneNexus/dsv4`).** Upstream glm-5.3 treo
+    từ ~15:31 ngày 2026-10-02 (gateway không trả completion nào) → user chuyển sang dsv4.
+    Luật: MỌI arm của một so sánh chạy trên dsv4 trong cùng job (pre-registration được bổ
+    sung TRƯỚC run dsv4 đầu tiên); hàng glm-5.3 đã thu chỉ lưu trữ, không gộp. Mọi số dưới
+    đây lead tính lại từ JSON (hàng MODEL_FAILURE loại, n=6/ô theo thứ tự FIFO).
+    - **E2D-turns — ngân sách turn là nút thắt: ✓.** R@20 **32/42** vs R@12 **22/42**,
+      Fisher **p=0.0396** (primary đăng ký trước). LIMIT_TURNS 36/42 → 13/42, acceptance
+      6 → 19, tokens_in trung bình 64k → 137k, false_success 0. 3/4 bài bị E2C loại ở 12
+      turn đạt ≥4/6 ở 20 turn (cairn-money 5/6, cairn-sunset 6/6, infra-config 5/6);
+      queue-consumer-retry vẫn 2/6. K@20 **0/14** — cổng tri thức giữ trên dsv4. **Bp@20
+      KHÔNG đo được:** `aci_e2b` không tới được qua tailnet suốt vòng → 42/42 preload rỗng
+      (OperationalError) mà runner vẫn ghi như kết quả 0-pass → runner nay đánh dấu
+      `invalid_reason=REGISTRY_UNAVAILABLE` (`a83dcd5`), hàng đó bị loại + chạy bù.
+    - **E2D-format — cách viết skill KHÔNG đổi kết quả: ✗.** R (v1, luật dạng văn xuôi)
+      **23/42** vs R2 (v2 "actionable": checklist + bảng + ví dụ đầu vào mới; cùng 79 luật,
+      reviewer độc lập đối chiếu từng luật, 29 pin) **24/42**, p=1; acceptance 10 vs 9,
+      LIMIT_TURNS 32 vs 33. K **0/14**; **R vs K p=0.00027 → hướng E2/E2C (skill tri thức
+      riêng ≫ không skill) lặp lại trên họ model thứ hai.** Hai vòng R@12 dsv4 độc lập
+      (e2d-turns 22/42, e2d-format 23/42) khớp nhau.
+    - **K1 — nudge đề xuất (option A) KHÔNG sửa được under-claim: ✗.** dsv4 K cũng
+      under-claim: acceptance **34/64** vs tests_pass **54/64** (gap 0.31, như glm E1). KN
+      (sau batch có ghi file, kernel chạy verification; PASS → một ghi chú "propose now";
+      lượt cuối → "propose or report") acceptance **32/64** (p=0.86), tests_pass **49/64**
+      (dưới ngưỡng K−0.05) → FIX NOT SHOWN. Nudge bắn ở 17/17 run "fix đã xong mà không
+      claim", model vẫn chạy tới LIMIT_TURNS. Vòng sạch chạy `--parallel 1`: 128/128 hợp
+      lệ (hai lần `--parallel 3` trên gateway dùng chung: 63% MODEL_FAILURE). **Code nudge
+      (default OFF, chạm `run_controller`) KHÔNG merge** — giữ ở nhánh `mac/k1-underclaim`
+      cho vòng lặp lại trên glm-5.3. Option B (PASS lúc hết turn = thành công) vẫn là
+      quyết định của user; counterfactual: E1 85→127/136, E2C Bp 3→16/24.
+    - **Tiếp theo (user quyết định):** lặp lại cả 4 phép đo trên glm-5.3 sau đợt này, + Bp@20.
+    §34: n=6/ô (K n=2), chuẩn hư cấu do tác giả fixture viết, một gateway; định hướng.
+
 ## Verification
 
 - `tests/security/test_harness_invariants.py` — INV-04/06/07/08 + §7.6 trên đường

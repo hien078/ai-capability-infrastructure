@@ -119,6 +119,13 @@ giai đoạn này.
 > 24/24 run và 7/7 prompt ex-ante kể cả gián tiếp; F tìm thấy doc 0/8 ở bài gián tiếp.
 > Ghi chi tiết: ADR-014 amendment 26.
 
+> **E2D + K1 (2026-10-02, Mac, model dsv4 — glm-5.3 upstream treo):** ngân sách turn LÀ nút
+> thắt (R@20 32/42 vs R@12 22/42, p=0.0396; 3/4 bài E2C loại hồi phục ở 20 turn); cách viết
+> skill KHÔNG quan trọng (R v1 23/42 vs R2 v2 24/42, p=1); E2 lặp lại trên họ model thứ hai
+> (R 23/42 vs K 0/14, p=0.00027); nudge đề xuất không sửa under-claim (K 34/64 vs KN 32/64,
+> tests_pass tụt) — code không merge. Bp@20 bị chặn (registry không tới được → hàng nay bị
+> đánh dấu INVALID). Kế tiếp: lặp lại trên glm-5.3. Ghi chi tiết: ADR-014 amendment 28.
+
 ### E3 — Có dùng thật không?
 
 - **Thiết kế:** thử nghiệm 30 ngày với workflow thật, telemetry bật, **không xây gì mới** (đúng
