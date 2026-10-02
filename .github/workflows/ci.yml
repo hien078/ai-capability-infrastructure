@@ -137,6 +137,10 @@ jobs:
             paths = ['''^tests/unit/test_guardrails\.py$''']
 
             [[allowlists]]
+            description = "PII-redaction fixture (E2C palisade): fake tokens/cards/emails ARE the input under test"
+            paths = ['''^scripts/private2_tasks_b\.py$''', '''^tests/unit/test_private2_tasks_b\.py$''']
+
+            [[allowlists]]
             description = "worker-queue tests: fixed fake unit_token fixture (16 hex, not a credential)"
             condition = "AND"
             paths = ['''^tests/unit/test_aci_worker_queue(_darwin)?\.py$''']
