@@ -437,6 +437,26 @@ INVALID, bị loại và chạy bù.
     `mac/e3-oc-plugin`. Sự cố hạ tầng cùng ngày: host Linux (giữ `aci_e2b`) offline ~1 giờ
     — cùng nguyên nhân Bp@20 hỏng ở mục 28.
 
+30. **rc-bench — OpenCode thật trên Linux: ACI KHÔNG hơn skill gốc của OpenCode (✗ cho
+    câu hỏi "OpenCode có cần ACI không").** `scripts/rc_bench.py`, glm-5.3, 4 bài private2
+    prompt GIÁN TIẾP, n=3/ô, pre-registration `data/rc-bench/PREREGISTERED.md` (2 amendment).
+    Arm: OC-N (không skill), OC-A (plugin ACI route + catalog `aci_e2b`), OC-S (CÙNG 45
+    skill export nguyên văn thành skill gốc `<name>/SKILL.md`, không plugin/router).
+    Kết quả (lead tính lại từ JSON + transcript): **OC-A 12/12, OC-S 12/12, OC-N 0/12**
+    (OC-N timeout 900 s cả 12). Primary OC-A vs OC-S p=1; OC-A vs OC-N p=7.4e-7. OC-S tự
+    gọi tool `skill` nạp ĐÚNG skill ở 12/12 run (lượt smoke trước round: 1 run không nạp,
+    timeout); OC-A: catalog phục vụ đúng skill 12/12. Chi phí: OC-S rẻ/nhanh hơn — tokens_in
+    (kể cả cache) trung vị 179k vs 263k, wall 145 s vs 195 s (bundle ACI kéo theo 3 skill
+    phụ). 0 run nhiễm, 0 test bị sửa. **Đọc:** với ~45 skill, mô tả skill tốt và prompt có
+    tín hiệu miền, cơ chế skill gốc đã đủ — giá trị đo được của ACI ở đây = 0; lợi thế
+    "đưa sẵn" của router (E2B Bp 19/20 vs Bq 9/20) KHÔNG lặp lại trên OpenCode, vì skill tool
+    của OpenCode liệt kê tên+mô tả ngay trong ngữ cảnh. Còn mở: corpus lớn (hàng trăm skill,
+    nhiều skill gần nhau), nhiều client dùng chung, quản trị. Goose bỏ theo quyết định user
+    (2 lượt G-A thử: 1/2 pass, model tự gọi tool ACI 56–65 lần). **Harness:** bwrap per-run —
+    tmpfs TOÀN BỘ `/home` + `/.snapshots` + `/tmp` + `/var/tmp`, PID namespace + procfs riêng,
+    docker socket bị che; round 1 bị hủy vì `find /` thấy repo qua `/home/.snapshots`
+    (snapshot btrfs), round 2 dừng khi user đổi arm.
+
 ## Verification
 
 - `tests/security/test_harness_invariants.py` — INV-04/06/07/08 + §7.6 trên đường
