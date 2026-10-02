@@ -368,6 +368,30 @@ def test_prepare_writes_profile_only_into_workspace(
     assert not (tmp_path / ".aci-sandbox-profile.sb").exists()
 
 
+def test_prepare_refuses_a_model_planted_profile_symlink(
+    tmp_path: Path, sandbox: SeatbeltSandbox
+) -> None:
+    """The profile name lives INSIDE the model-writable workspace, so a
+    run_command can plant it as a symlink to any server-user-writable host
+    file; ``prepare`` runs as the SERVER user, outside the sandbox, and must
+    never write the SBPL text through that symlink (an unsandboxed
+    arbitrary-file clobber). Fail closed; the model can remove its own
+    symlink and retry."""
+    from aci.domain.capability.errors import DomainError, ErrorCode
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    victim = tmp_path / "operator-file.txt"
+    victim.write_text("operator data", encoding="utf-8")
+    (ws / ".aci-sandbox-profile.sb").symlink_to(victim)
+    with pytest.raises(DomainError) as exc:
+        sandbox.prepare(["true"], ws)
+    assert exc.value.code is ErrorCode.PERMISSION_DENIED
+    assert "symlink" in str(exc.value)
+    # The victim is untouched — the write never followed the symlink.
+    assert victim.read_text(encoding="utf-8") == "operator data"
+
+
 def test_probe_refuses_on_non_darwin(tmp_path: Path) -> None:
     """Fail closed: on a non-macOS host with sandbox-exec present (Linux CI
     images sometimes ship a stub), the probe still refuses."""

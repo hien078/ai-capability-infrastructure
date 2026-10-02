@@ -607,9 +607,31 @@ class SeatbeltSandbox:
         ]
 
     def _write_profile(self, workspace: Path) -> Path:
-        """Write the SBPL profile into the workspace; returns its path."""
+        """Write the SBPL profile into the workspace; returns its path.
+
+        The name lives in the MODEL-WRITABLE workspace, so a run_command can
+        plant it as a symlink to any server-user-writable host file — a plain
+        ``write_text`` would follow it, and this write happens as the SERVER
+        user, outside the sandbox (an unsandboxed arbitrary-file clobber).
+        ``O_NOFOLLOW`` refuses a symlinked name instead: fail closed, the
+        model can remove its own symlink and retry."""
         target = Path(os.path.realpath(workspace)) / ".aci-sandbox-profile.sb"
-        target.write_text(self.profile(workspace), encoding="utf-8")
+        try:
+            fd = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                0o644,
+            )
+        except OSError as exc:
+            raise DomainError(
+                ErrorCode.PERMISSION_DENIED,
+                "process execution refused: the sandbox profile path "
+                f"{target.name!r} in the workspace is a symlink (planted by a "
+                f"run?) — refusing to write through it ({type(exc).__name__}); "
+                "remove it and retry",
+            ) from exc
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(self.profile(workspace))
         return target
 
     # -- usability ----------------------------------------------------------
