@@ -138,7 +138,7 @@ jobs:
 
             [[allowlists]]
             description = "PII-redaction fixture (E2C palisade): fake tokens/cards/emails ARE the input under test"
-            paths = ['''^scripts/private2_tasks_b\.py$''', '''^tests/unit/test_private2_tasks_b\.py$''']
+            paths = ['''^scripts/private2_tasks_b\.py$''', '''^tests/unit/test_private2_tasks_b\.py$''', '''^scripts/private2_skill_v2\.py$''', '''^tests/unit/test_e2d_format\.py$''']
 
             [[allowlists]]
             description = "worker-queue tests: fixed fake unit_token fixture (16 hex, not a credential)"
