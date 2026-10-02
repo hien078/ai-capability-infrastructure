@@ -87,6 +87,26 @@ class TestClassifyRouteRun:
     def test_unknown_client_type_is_never_silently_bucketed(self) -> None:
         assert ur.classify_route_run("some-future-client") == ur.UNKNOWN
 
+    @pytest.mark.parametrize("principal", sorted(ur.MEASUREMENT_PRINCIPAL_IDS))
+    def test_known_measurement_principals_are_never_organic(self, principal: str) -> None:
+        """AGENTS.md (Mac worker record, 2026-10-02): the Mac's OpenCode
+        instance routes worker health checks to aci_bench under principal
+        ``opencode-mac-check`` — client_type ``opencode`` would count them
+        ORGANIC and corrupt the E3 30-day organic count (the branch-decision
+        variable). A known check principal is MEASUREMENT whatever the
+        client_type says."""
+        for client_type in ("opencode", "rest-client", "mystery-client", "harness-kernel"):
+            assert ur.classify_route_run(client_type, principal_id=principal) == ur.MEASUREMENT
+
+    def test_organic_principal_is_unaffected_by_the_check_principal_set(self) -> None:
+        assert ur.classify_route_run("opencode", principal_id="opencode") == ur.ORGANIC
+
+    def test_measurement_principals_are_disclosed_as_a_limitation(self) -> None:
+        """The exclusion must be visible in every report, not silent."""
+        assert any("opencode-mac-check" in limitation for limitation in ur.LIMITATIONS), (
+            ur.LIMITATIONS
+        )
+
 
 class TestInAnyWindow:
     W = (datetime(2026, 10, 1, 3, 51, 29, tzinfo=UTC), datetime(2026, 10, 1, 3, 52, 42, tzinfo=UTC))
@@ -141,6 +161,22 @@ class TestRouteRunAggregation:
         assert w41_bucket[ur.ORGANIC]["total"] == 1
         assert w41_bucket[ur.UNKNOWN]["total"] == 1
         assert w41_bucket[ur.UNKNOWN]["by_principal"] == {"who": 1}
+
+    def test_check_principal_routes_land_in_the_measurement_bucket(self) -> None:
+        """A Mac worker health-check route (opencode client_type,
+        opencode-mac-check principal) is counted MEASUREMENT — visible under
+        by_principal, never silently dropped."""
+        w40 = datetime(2026, 9, 30, tzinfo=UTC)
+        facts = [
+            _fact("r1", w40, "opencode", "opencode"),
+            _fact("r2", w40, "opencode", "opencode-mac-check"),
+        ]
+        bucket = ur.summarize_route_runs(facts)
+        assert bucket[ur.ORGANIC]["total"] == 1
+        assert bucket[ur.ORGANIC]["by_principal"] == {"opencode": 1}
+        assert bucket[ur.MEASUREMENT]["total"] == 1
+        assert bucket[ur.MEASUREMENT]["by_client_type"] == {"opencode": 1}
+        assert bucket[ur.MEASUREMENT]["by_principal"] == {"opencode-mac-check": 1}
 
     def test_counts_sort_count_desc_then_key(self) -> None:
         facts = [

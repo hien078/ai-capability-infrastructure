@@ -69,6 +69,14 @@ MEASUREMENT_CLIENT_TYPES = frozenset({"benchmark-harness", "probe", "sec-suite"}
 #: The kernel's capability client — used by BOTH real delegated runs
 #: (REST /v1/agent-runs) and run_hbench arm S/P; split by agent-run linkage.
 HARNESS_KERNEL = "harness-kernel"
+#: Principals that are INFRASTRUCTURE, not use: a known check/worker identity
+#: is never organic regardless of its client_type. AGENTS.md (Mac worker
+#: record, 2026-10-02): the Mac's OpenCode instance routes worker health
+#: checks to aci_bench under principal ``opencode-mac-check`` with client_type
+#: ``opencode`` — without this set they would count ORGANIC and corrupt the
+#: E3 30-day organic count (the branch-decision variable). Extend this set
+#: when a new worker/check principal starts driving a real client surface.
+MEASUREMENT_PRINCIPAL_IDS = frozenset({"opencode-mac-check"})
 
 #: Honest bounds of this instrument — printed with every report (text and JSON).
 LIMITATIONS: tuple[str, ...] = (
@@ -89,6 +97,11 @@ LIMITATIONS: tuple[str, ...] = (
     "is 2026-10-01), but on another DB they would count as MEASUREMENT.",
     "A2A delegated tasks (agent_tasks) create no route_runs and are not reported; only "
     "HarnessKernel agent_runs are.",
+    "Route runs by a principal in MEASUREMENT_PRINCIPAL_IDS (currently "
+    f"{sorted(MEASUREMENT_PRINCIPAL_IDS)}) are counted MEASUREMENT regardless of "
+    "client_type: they are worker/health-check identities (the Mac OpenCode worker's "
+    "opencode-mac-check), not organic use. The runs stay visible in the report under "
+    "MEASUREMENT by_principal — nothing is dropped, only classified.",
 )
 
 
@@ -154,13 +167,19 @@ def iso_week(moment: datetime) -> str:
     return f"{iso.year:04d}-W{iso.week:02d}"
 
 
-def classify_route_run(client_type: str, agent_run_linked: bool = False) -> str:
+def classify_route_run(
+    client_type: str, agent_run_linked: bool = False, principal_id: str = ""
+) -> str:
     """ORGANIC / MEASUREMENT / UNKNOWN for one route run.
 
     harness-kernel is the only ambivalent client_type (real delegated runs
     and run_hbench arm S/P share it): linked → ORGANIC, unlinked →
-    MEASUREMENT. Unknown client_types are never silently bucketed.
+    MEASUREMENT. A known MEASUREMENT_PRINCIPAL_IDS check identity is
+    MEASUREMENT whatever the client_type (a worker health check is not use).
+    Unknown client_types are never silently bucketed.
     """
+    if principal_id in MEASUREMENT_PRINCIPAL_IDS:
+        return MEASUREMENT
     if client_type in ORGANIC_CLIENT_TYPES:
         return ORGANIC
     if client_type in MEASUREMENT_CLIENT_TYPES:
@@ -198,7 +217,7 @@ def summarize_route_runs(facts: Iterable[RouteRunFact]) -> dict[str, Any]:
     bucket = _route_run_bucket()
     for fact in facts:
         bucket["total"] += 1
-        cls = classify_route_run(fact.client_type, fact.agent_run_linked)
+        cls = classify_route_run(fact.client_type, fact.agent_run_linked, fact.principal_id)
         cb = bucket[cls]
         cb["total"] += 1
         cb["by_client_type"][fact.client_type] += 1
