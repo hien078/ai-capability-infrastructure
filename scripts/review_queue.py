@@ -39,6 +39,7 @@ from aci.config import Settings
 from aci.control_plane.promotion.service import PromotionService
 from aci.domain.provenance.models import LicenseAssessment
 from aci.providers.licensing import spdx_permissions
+from aci.providers.licensing.detector import SPDX_PERMISSIONS
 
 
 def _engine_and_factories() -> tuple[
@@ -166,6 +167,19 @@ def cmd_show(capability_id: str) -> int:
 def cmd_approve_license(
     capability_id: str, version: str, spdx_id: str, reviewer: str, notes: str, promote: bool
 ) -> int:
+    # The human gate's own gate: spdx_permissions() falls back to UNKNOWN for
+    # any unrecognized id (can_redistribute=False — promotion still fails
+    # closed), but the append-only audit trail would carry a TYPO as if it
+    # were a real human decision. Refuse ids the detector cannot resolve.
+    if spdx_id not in SPDX_PERMISSIONS:
+        known = ", ".join(sorted(SPDX_PERMISSIONS))
+        print(
+            f"refusing: {spdx_id!r} is not a known SPDX id (known: {known}); a typo "
+            "would be recorded as the human decision and still block promotion "
+            "(unknown license)",
+            file=sys.stderr,
+        )
+        return 1
     _, sessions, licenses, securities, source_records = _engine_and_factories()
     permissions = spdx_permissions(spdx_id)
     now = datetime.now(UTC)
