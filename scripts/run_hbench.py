@@ -65,6 +65,15 @@ outcomes?", not "does the model?"):
       experiment registry plane with the preload OFF — today's product
       default (request_capability offered only). Bq−K isolates what the
       OFF default actually delivers when the knowledge is non-public.
+  R2 — skill-FORMAT arm (E2D, --set private2 ONLY): arm R EXACTLY (the
+      case's private skill preloaded from a LOCAL in-process handler, no
+      registry, no DB) but serving the fixture's v2 skill text
+      (scripts/private2_skill_v2.py — the SAME rules restructured for
+      action: a "What to change" checklist, compact tables/pseudocode,
+      worked examples with non-test inputs, a verify line) at version
+      2.0.0. R2−R isolates HOW the standard is WRITTEN — same knowledge,
+      same kernel, same fixtures/model/tools/sandbox/max_turns/
+      verification; the only difference is the text in context.
 
 The delta K−N is what the kernel adds. The headline metric is FALSE
 SUCCESS (§44): N reports "done" the verifier refutes; K can only report
@@ -90,7 +99,7 @@ Usage:
     ACI_AGENT_MODEL_API_KEY=... .venv/bin/python scripts/run_hbench.py \
         [--base-url http://localhost:20128/v1] [--model OneNexus/glm-5.3] \
         [--set verified|domain|private|private2|horizon] [--cases multi-config-precedence,...] \
-        [--arms K,N,S,P,R,F,Bp,Bq] [--repeat 3] [--parallel 4] [--max-turns 12] \
+        [--arms K,N,S,P,R,R2,F,Bp,Bq] [--repeat 3] [--parallel 4] [--max-turns 12] \
         [--registry-db-url URL] [--object-store-root DIR]
 
 Fixture sets (--set): 'verified' (default) = the 8 §80 multi/long fixtures;
@@ -112,7 +121,10 @@ file-in-repo vs registry-routed-preload vs registry-routed-default).
 same contract PLUS a per-fixture ``directness`` axis: 'named' prompts name
 the standard, 'indirect' ones say only that an internal policy exists).
 Arms R/F/Bp/Bq are valid on it too — the E2C replication of the E2B
-measurement (F vs Bp) on new, varied fixtures and indirect prompts.
+measurement (F vs Bp) on new, varied fixtures and indirect prompts — and
+so is arm R2 (E2D): the v2 'actionable' rewrite of each fixture's skill
+(scripts/private2_skill_v2.py, same rules) served instead of the v1
+prose, R2−R isolating the skill-text FORMAT.
 'horizon' = the §80 long-horizon fixtures (scripts/horizon_tasks.py,
 verified by scripts/verify_horizon_fixtures.py with the STRONGER
 red-when-symptom-patched pin) — 8-10 file packages, symptom-only prompts,
@@ -144,6 +156,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from domain_tasks import DOMAIN_INTENDED_SKILLS, DOMAIN_TASKS  # noqa: E402
 from horizon_tasks import HORIZON_TASKS  # noqa: E402
+from private2_skill_v2 import PRIVATE2_SKILL_V2  # noqa: E402
 from private2_tasks import (  # noqa: E402
     PRIVATE2_DIRECTNESS,
     PRIVATE2_INTENDED_SKILLS,
@@ -644,7 +657,15 @@ def run_kernel_arm(
         trace_dir.mkdir(parents=True, exist_ok=True)
         (trace_dir / f"trace-{fixture['name']}-{result.run_id}.json").write_text(
             json.dumps(
-                [{"event": e.event_type, "turn": e.turn_id, "payload": e.payload} for e in history],
+                [
+                    {
+                        "event": e.event_type,
+                        "turn": e.turn_id,
+                        "ts": e.timestamp.isoformat(),
+                        "payload": e.payload,
+                    }
+                    for e in history
+                ],
                 indent=2,
             ),
             encoding="utf-8",
@@ -768,12 +789,14 @@ class _PrivateSkillACIClient:
     Serves exactly the case's private skill text with its real sha256
     digest (the same ACIClient contract the registry client implements;
     search returns the one skill for any need — there is nothing to
-    route)."""
+    route). Arm R2 (E2D) reuses this unchanged with the fixture's v2 text
+    at version 2.0.0 — the FORMAT is the only difference."""
 
     VERSION = "1.0.0"
 
-    def __init__(self, *, skill_id: str, skill_text: str) -> None:
+    def __init__(self, *, skill_id: str, skill_text: str, version: str = VERSION) -> None:
         self._skill_id = skill_id
+        self._version = version
         self._payload = skill_text.encode("utf-8")
         self._digest = hashlib.sha256(self._payload).hexdigest()
         self.searches = 0
@@ -783,14 +806,14 @@ class _PrivateSkillACIClient:
         return [
             _PrivateSkillSelection(
                 self._skill_id,
-                self.VERSION,
+                self._version,
                 self._digest,
                 max(1, len(self._payload) // 4),
             )
         ]
 
     def resolve(self, capability_id: str, version: str) -> tuple[bytes, str]:
-        if capability_id != self._skill_id or version != self.VERSION:
+        if capability_id != self._skill_id or version != self._version:
             raise KeyError(f"unknown capability {capability_id}@{version}")
         return self._payload, self._digest
 
@@ -807,6 +830,8 @@ def run_private_arm(
     ablations: list[str] | None = None,
     sandbox: ProcessSandbox | None = None,
     trace_dir: Path | None = None,
+    skill_text: str | None = None,
+    arm: str = "R",
 ) -> dict[str, Any]:
     """Arm R = arm K + the case's PRIVATE skill preloaded from a LOCAL
     in-process handler (no registry, no DB). The handler is the same
@@ -816,10 +841,17 @@ def run_private_arm(
     context from the FIRST model request on. Everything else is arm K's
     path unchanged (fixtures, tools, sandbox, max_turns, verification,
     turn-budget note, ablations plumbing) — R−K on the private sets isolates
-    the private-skill contribution."""
+    the private-skill contribution.
+
+    Arm R2 (E2D, ``arm="R2"`` + ``skill_text=PRIVATE2_SKILL_V2[name]``) is
+    this function UNCHANGED except for the served text: the fixture's v2
+    skill (the same rules restructured for action) at version 2.0.0 —
+    R2−R isolates the FORMAT of the skill text."""
     runtime = _skills_capability_runtime(
         lambda: _PrivateSkillACIClient(
-            skill_id=str(fixture["skill_id"]), skill_text=str(fixture["skill"])
+            skill_id=str(fixture["skill_id"]),
+            skill_text=str(skill_text if skill_text is not None else fixture["skill"]),
+            version="2.0.0" if skill_text is not None else "1.0.0",
         )
     )
     record = run_kernel_arm(
@@ -833,7 +865,7 @@ def run_private_arm(
         ablations=ablations,
         trace_dir=trace_dir,
         sandbox=sandbox,
-        arm="R",
+        arm=arm,
         capability_factory=_Factory(runtime),
         preload_capabilities=True,
     )
@@ -1308,6 +1340,26 @@ def _run_one(
             sandbox=sandbox,
             trace_dir=trace_dir,
         )
+    elif arm == "R2":
+        # Arm R2 (E2D) = arm R EXACTLY, but serving the fixture's v2 skill
+        # text (the same rules restructured for action) at version 2.0.0 —
+        # the FORMAT is the only difference. main() has already checked
+        # that --set private2 selected this fixture (the v2 texts exist
+        # only for the 7 private2 fixtures).
+        record = run_private_arm(
+            fixture,
+            contract,
+            spec,
+            gateway,
+            sources,
+            runs,
+            max_turns=max_turns,
+            ablations=ablations,
+            sandbox=sandbox,
+            trace_dir=trace_dir,
+            skill_text=PRIVATE2_SKILL_V2[str(fixture["name"])],
+            arm="R2",
+        )
     elif arm == "F":
         # Arm F = arm K's wiring exactly, but the workspace source is the F
         # root (fixture files + the skill text as a plain repo document).
@@ -1387,15 +1439,19 @@ def main(argv: list[str] | None = None) -> int:
             "'private' = the private-knowledge fixtures (private_tasks.py, the E2 "
             "instrument — arms R/F/Bp/Bq's set), "
             "'private2' = the E2C private-knowledge fixtures (private2_tasks.py — "
-            "7 new fictional internal standards, arms R/F/Bp/Bq valid), "
+            "7 new fictional internal standards, arms R/R2/F/Bp/Bq valid — R2 "
+            "serves the v2 'actionable' skill texts, private2_skill_v2.py)",
             "'horizon' = the §80 long-horizon fixtures (horizon_tasks.py — "
-            "verified fail-as-shipped/pass-when-fixed/red-when-symptom-patched)"
+            "verified fail-as-shipped/pass-when-fixed/red-when-symptom-patched)",
         ),
     )
     parser.add_argument(
         "--arms",
         default="K,N",
-        help="comma subset of K,N,S,P,R,F,Bp,Bq (Bp/Bq: experiment registry arms)",
+        help=(
+            "comma subset of K,N,S,P,R,R2,F,Bp,Bq "
+            "(R2: private2 v2 skill text; Bp/Bq: experiment registry arms)"
+        ),
     )
     parser.add_argument("--repeat", type=int, default=3, help="runs per case per arm (default 3)")
     parser.add_argument("--parallel", type=int, default=4, help="concurrent runs (default 4)")
@@ -1456,9 +1512,9 @@ def main(argv: list[str] | None = None) -> int:
         # Canonical labels: the experiment arms are Bp/Bq (mixed case reads
         # better in the report than BP/BQ); everything else is uppercase.
         arms.append("Bp" if label == "BP" else "Bq" if label == "BQ" else label)
-    unknown_arms = [a for a in arms if a not in ("K", "N", "S", "P", "R", "F", "Bp", "Bq")]
+    unknown_arms = [a for a in arms if a not in ("K", "N", "S", "P", "R", "R2", "F", "Bp", "Bq")]
     if unknown_arms:
-        print(f"unknown arms {unknown_arms!r} — pick from K,N,S,P,R,F,Bp,Bq", file=sys.stderr)
+        print(f"unknown arms {unknown_arms!r} — pick from K,N,S,P,R,R2,F,Bp,Bq", file=sys.stderr)
         return 2
     #: The fixture sets that carry a private skill per case (fixture['skill']
     #: + fixture['skill_id']) — the only sets arms R/F/Bp/Bq are defined for.
@@ -1467,6 +1523,14 @@ def main(argv: list[str] | None = None) -> int:
         # Arm R preloads the case's private skill (fixture['skill']) — the
         # private sets are the only ones that carry one.
         print("arm R needs --set private or private2 (the private-skill fixtures)", file=sys.stderr)
+        return 2
+    if "R2" in arms and args.set != "private2":
+        # Arm R2 serves the fixture's v2 skill text (private2_skill_v2.py) —
+        # the v2 texts exist ONLY for the 7 private2 fixtures.
+        print(
+            "arm R2 needs --set private2 (the v2 skill texts exist only for the private2 fixtures)",
+            file=sys.stderr,
+        )
         return 2
     if "F" in arms and args.set not in private_sets:
         # Arm F writes the case's skill text (fixture['skill']) into the
