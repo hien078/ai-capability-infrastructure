@@ -422,6 +422,21 @@ INVALID, bị loại và chạy bù.
     - **Tiếp theo (user quyết định):** lặp lại cả 4 phép đo trên glm-5.3 sau đợt này, + Bp@20.
     §34: n=6/ô (K n=2), chuẩn hư cấu do tác giả fixture viết, một gateway; định hướng.
 
+29. **E3-oc — đo qua client thật (OpenCode + plugin ACI), dsv4: primary BỊ CHẶN.** Arm A
+    (plugin route → inject skill) không chạy được: server thí nghiệm :8010 ghi **0
+    `POST /v1/routes`** trong mọi run A — hook prompt của plugin không bắn dưới
+    `opencode run --standalone` + `.opencode` cấp project (nguyên nhân chưa ghim; plugin
+    toàn cục vẫn route :8000 bình thường). Không có A vs F. Phụ: F (doc trong repo) **27/33**
+    (JSON); N thô 27/48 nhưng **OpenCode không có sandbox** — dsv4 đọc doc của arm F, JSON
+    tổng hợp (`output_tail` chứa bản sửa), log round và workspace anh em: worker phân loại
+    lại 29/48 run N bị nhiễm → N sạch 1/19 (số này chưa được lead kiểm lại từ stream).
+    Máy quét nhiễm đăng ký trước bỏ sót các file đáp án nằm TRÊN stamp root. **Bài học:**
+    mọi phép đo qua client thật phải cô lập root từng run (hoặc sandbox) và để file tổng
+    hợp/log ngoài tầm với — nếu không "naked" không còn naked. Instrument
+    (`scripts/e3_oc_bench.py`) KHÔNG merge cho tới khi sửa hook A + cô lập; nằm ở nhánh
+    `mac/e3-oc-plugin`. Sự cố hạ tầng cùng ngày: host Linux (giữ `aci_e2b`) offline ~1 giờ
+    — cùng nguyên nhân Bp@20 hỏng ở mục 28.
+
 ## Verification
 
 - `tests/security/test_harness_invariants.py` — INV-04/06/07/08 + §7.6 trên đường
