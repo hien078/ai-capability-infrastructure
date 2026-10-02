@@ -13,6 +13,7 @@ Usage:
     .venv/bin/python scripts/verify_horizon_fixtures.py
 """
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -121,9 +122,16 @@ WRONG_FIXES: dict[str, Any] = {
 
 
 def run_pytest(task_dir: Path) -> tuple[int, str]:
+    # PYTHONDONTWRITEBYTECODE: the buggy-state run would leave __pycache__
+    # in the re-materialized fixture tree, and a same-size same-mtime-second
+    # fix write makes CPython reuse the stale .pyc — the FIXED-state run would
+    # silently execute the buggy code (the §80 bytecode-cache trap). Same
+    # guard as verify_multi/private/domain_fixtures.
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     proc = subprocess.run(
         [PYTEST, "-m", "pytest", "-q"],
         cwd=task_dir,
+        env=env,
         capture_output=True,
         text=True,
         timeout=120,

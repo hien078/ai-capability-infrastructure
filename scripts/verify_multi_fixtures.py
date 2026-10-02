@@ -135,7 +135,10 @@ def main() -> int:
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("\nAll 5 multi fixtures verified: failing-when-buggy, passing-when-fixed.")
+    print(
+        f"\nAll {len(MULTI_TASKS) + len(LONG_TASKS)} multi/long fixtures verified: "
+        "failing-when-buggy, passing-when-fixed."
+    )
     return 0
 
 
