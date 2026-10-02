@@ -1,6 +1,7 @@
 """StateManager unit tests (INV-01: one mutable authority, CAS commits)."""
 
 import pytest
+from pydantic import ValidationError
 
 from aci.domain.runtime.authority import GrantEnvelope
 from aci.domain.runtime.state import (
@@ -108,6 +109,69 @@ class TestStateManager:
                 expected_version=snap.run.version,
                 events=[StateEvent(event_type="bogus")],
             )
+
+    def test_commit_is_atomic_when_a_later_event_is_invalid(self) -> None:
+        """INV-01: a failing LATER event must leave the record exactly as it
+        was — earlier events applied under a STALE version would mean the
+        content no longer matches its version, and a retry with the same
+        expected_version would silently double-apply them."""
+        sm = StateManager()
+        _create(sm)
+        before = sm.snapshot("run-1")
+        events = [
+            StateEvent(
+                event_type="plan.set",
+                payload={"items": [{"item_id": "p1", "objective": "step"}]},
+            ),
+            StateEvent(event_type="bogus"),
+        ]
+        with pytest.raises(ValueError, match="unknown state event"):
+            sm.commit("run-1", expected_version=before.run.version, events=events)
+        after = sm.snapshot("run-1")
+        assert after.run.version == before.run.version
+        assert after.plan == before.plan  # nothing applied, no partial state
+
+    def test_commit_retry_after_a_failed_commit_does_not_double_apply(self) -> None:
+        """The recovery path for a failed commit is to retry the SAME
+        expected_version with the bad event removed — that retry must land
+        exactly one append, not two (the first attempt applied nothing)."""
+        sm = StateManager()
+        _create(sm)
+        before = sm.snapshot("run-1")
+        transcript_event = StateEvent(
+            event_type="transcript.append",
+            payload={"entries": [{"role": "user", "content": "hi", "turn": 1}]},
+        )
+        with pytest.raises(ValueError, match="unknown state event"):
+            sm.commit(
+                "run-1",
+                expected_version=before.run.version,
+                events=[transcript_event, StateEvent(event_type="bogus")],
+            )
+        retried = sm.commit("run-1", expected_version=before.run.version, events=[transcript_event])
+        assert retried.run.version == before.run.version + 1
+        assert len(retried.transcript) == 1
+        assert retried.transcript[0].content == "hi"
+
+    def test_mutate_is_atomic_on_a_partially_applied_event(self) -> None:
+        """The single-event path can also die mid-apply (``tool.observed``
+        merges resources BEFORE validating evidence): the merged resources
+        must not survive the failed event."""
+        sm = StateManager()
+        _create(sm)
+        before = sm.snapshot("run-1")
+        bad_observed = StateEvent(
+            event_type="tool.observed",
+            payload={
+                "resources": ["file:src/a.py"],
+                "evidence": [{"kind": "not-a-kind", "ref": "x", "summary": "s"}],
+            },
+        )
+        with pytest.raises(ValidationError):
+            sm._mutate("run-1", bad_observed)  # type: ignore[arg-type]
+        after = sm.snapshot("run-1")
+        assert after.changed_resources == before.changed_resources
+        assert after.observed_evidence == before.observed_evidence
 
     def test_budget_consumption_accumulates(self) -> None:
         sm = StateManager()

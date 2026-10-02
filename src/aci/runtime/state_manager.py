@@ -132,16 +132,26 @@ class StateManager:
         expected_version: int,
         events: list[StateEvent],
     ) -> RuntimeStateSnapshot:
-        """Apply events atomically; CAS on ``expected_version`` (§8.5)."""
+        """Apply events atomically; CAS on ``expected_version`` (§8.5).
+
+        A failing event (unknown type, invalid payload) must leave the record
+        EXACTLY as it was: events are applied to a shallow draft that only
+        swaps into ``self._runs`` after every event applied cleanly. Without
+        that, a mid-list failure leaves earlier events applied under a STALE
+        version — the content no longer matches its version (INV-01) and a
+        retry with the same ``expected_version`` silently double-applies them.
+        """
         record = self._runs[run_id]
         run: RunState = record["run"]
         if run.version != expected_version:
             raise StateCommitConflict(run_id, expected_version, run.version)
+        draft = dict(record)  # _apply only rebinds keys — never mutates in place
         for event in events:
-            self._apply(record, event)
-        record["run"] = run.model_copy(
+            self._apply(draft, event)
+        draft["run"] = run.model_copy(
             update={"version": expected_version + 1, "current_turn": run.current_turn}
         )
+        self._runs[run_id] = draft
         return self.snapshot(run_id)
 
     def transition(
@@ -274,15 +284,26 @@ class StateManager:
 
     def _mutate(self, run_id: str, event: StateEvent) -> RuntimeStateSnapshot:
         """Apply one event and bump the version — every mutation is versioned,
-        so a CAS commit detects ANY intervening write (§8.5)."""
+        so a CAS commit detects ANY intervening write (§8.5). Same atomicity
+        rule as :meth:`commit`: a mid-apply failure (an event that dies after
+        rebinding some keys) leaves the record untouched."""
         record = self._runs[run_id]
-        self._apply(record, event)
-        run: RunState = record["run"]
-        record["run"] = run.model_copy(update={"version": run.version + 1})
+        draft = dict(record)  # _apply only rebinds keys — never mutates in place
+        self._apply(draft, event)
+        run: RunState = draft["run"]
+        draft["run"] = run.model_copy(update={"version": run.version + 1})
+        self._runs[run_id] = draft
         return self.snapshot(run_id)
 
     def _apply(self, record: dict[str, Any], event: StateEvent) -> None:
-        """Apply one StateEvent to the record (called inside commit)."""
+        """Apply one StateEvent to the record (called inside commit).
+
+        ATOMICITY CONTRACT: this function must only REBIND keys on ``record``
+        (``record[key] = <new value>``) — never mutate a stored object in
+        place. Callers pass a shallow draft copy so a raise mid-apply leaves
+        the authoritative record untouched; an in-place mutation here would
+        silently break that isolation.
+        """
         et, p = event.event_type, event.payload
         if et == "plan.set":
             record["plan"] = [PlanItem.model_validate(i) for i in p["items"]]
