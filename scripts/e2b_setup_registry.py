@@ -1,14 +1,14 @@
-"""Set up the EXPERIMENT registry copy for the E2B arms (Bp/Bq) — 2026-10-02.
+"""Set up the EXPERIMENT registry copy for the E2B/E2C arms (Bp/Bq) — 2026-10-02.
 
 Job e2b-routed-vs-file measures whether ACI's registry + §14 router adds
 value over the simplest alternative (the standard as a plain document in the
 repo). Arms Bp/Bq route through the REAL registry plane pointed at a
 DISPOSABLE experiment copy of the operational registry (e.g. aci_e2b — a
-pg_dump of aci_bench) with the two private skills (scripts/private_tasks.py)
-ingested alongside the real corpus.
+pg_dump of aci_bench) with the private skills ingested alongside the real
+corpus.
 
-This script ingests + gates + promotes exactly those two private skills IN
-THE EXPERIMENT COPY ONLY, through the REAL paths — nothing is bypassed:
+This script ingests + gates + promotes those private skills IN THE
+EXPERIMENT COPY ONLY, through the REAL paths — nothing is bypassed:
 
     package (SKILL.md as-is + LICENSE) -> content-addressed blobs
       -> SkillIngestionService.ingest_local (providers/skills — the same
@@ -20,6 +20,12 @@ THE EXPERIMENT COPY ONLY, through the REAL paths — nothing is bypassed:
       -> IngestionGateService.accept (G2-G4: quarantined -> accepted)
       -> PromotionService.promote staging -> production (G5-G8: provenance
          chain, redistributable license, passed scan — every gate printed)
+
+Sets (--set): 'private' (default) = the 2 E2B skills (scripts/private_tasks.py
+— idempotent if they are already ingested); 'private2' = the 7 E2C skills
+(scripts/private2_tasks.py, the four builders' fictional internal standards —
+same faithful first-party MIT license path, lead-authorized for production
+promotion IN THE EXPERIMENT COPY ONLY).
 
 It then indexes them the way the server does (the Container's EmbeddingRetriever
 indexes lazily on the first route query — fastembed, the same embedder the
@@ -36,7 +42,7 @@ or `aci_bench` (operational) — the experiment must never touch either.
 Usage:
     .venv/bin/python scripts/e2b_setup_registry.py \
         --database-url postgresql+psycopg://aci:aci@<host>:5432/aci_e2b \
-        --object-store-root ~/aci-mac/e2b-objects
+        --object-store-root ~/aci-mac/e2b-objects [--set private|private2]
 
 Idempotent: identical content re-ingests as a no-op, assessments are not
 duplicated, promotion pointer moves are pointer-only.
@@ -55,6 +61,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from private2_tasks import PRIVATE2_TASKS  # noqa: E402
 from private_tasks import PRIVATE_TASKS  # noqa: E402
 
 from aci.adapters.outbound.object_store.fs import FsObjectStore  # noqa: E402
@@ -128,6 +135,27 @@ SOFTWARE.
 
 _APPROVED_BY = "e2b-setup-registry.py (lead-authorized: disposable experiment copy only)"
 
+#: Provenance labels per set: the private2 skills are authored for the E2C
+#: experiment — the same faithful first-party path, a distinct source record.
+_SOURCE_LABELS: dict[str, tuple[str, str]] = {
+    "private": (
+        "aci/e2b-private-standards",
+        "first-party internal standard (authored for the e2b experiment)",
+    ),
+    "private2": (
+        "aci/e2c-private-standards",
+        "first-party internal standard (authored for the e2c experiment)",
+    ),
+}
+
+
+def selected_tasks(set_name: str) -> list[dict[str, Any]]:
+    """The fixture set to ingest: 'private' = the 2 E2B skills (default),
+    'private2' = the 7 E2C skills."""
+    if set_name == "private2":
+        return list(PRIVATE2_TASKS)
+    return list(PRIVATE_TASKS)
+
 
 def database_name_from_url(url: str) -> str:
     """The database name from a SQLAlchemy URL (the last path segment)."""
@@ -174,6 +202,9 @@ def ingest_one(
     capabilities: SqlAlchemyCapabilityRepository,
     workdir: Path,
     now: datetime,
+    source_repository: str = "aci/e2b-private-standards",
+    source_url_reference: str = "first-party internal standard (authored for the e2b experiment)",
+    experiment_label: str = "e2b",
 ) -> dict[str, Any]:
     """Ingest + gate + promote ONE private skill through the real paths.
     Returns what happened (for the summary printout)."""
@@ -197,8 +228,8 @@ def ingest_one(
     result = ingestion.ingest_local(
         package,
         license_identifier=det.spdx_id,
-        source_repository="aci/e2b-private-standards",
-        source_url_reference="first-party internal standard (authored for the e2b experiment)",
+        source_repository=source_repository,
+        source_url_reference=source_url_reference,
         commit_sha=None,
         now=now,
     )
@@ -219,7 +250,7 @@ def ingest_one(
                 assessed_at=now,
                 assessed_by="e2b-setup:platform-owner",
                 notes=(
-                    "first-party internal standard authored for the e2b "
+                    f"first-party internal standard authored for the {experiment_label} "
                     f"experiment; detected from package {det.evidence}"
                 ),
             )
@@ -359,6 +390,16 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="where to materialize the skill packages (default: a temp dir)",
     )
+    parser.add_argument(
+        "--set",
+        default="private",
+        choices=["private", "private2"],
+        help=(
+            "which private skills to ingest: 'private' = the 2 E2B skills "
+            "(default), 'private2' = the 7 E2C skills (the four builders' "
+            "fictional internal standards)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     refusal = refuse_operational_database(args.database_url)
@@ -366,6 +407,10 @@ def main(argv: list[str] | None = None) -> int:
         print(refusal, file=sys.stderr)
         return 2
 
+    tasks = selected_tasks(args.set)
+    source_repository, source_url_reference = _SOURCE_LABELS[args.set]
+    experiment_label = "e2b" if args.set == "private" else "e2c"
+    print(f"set: {args.set} ({len(tasks)} private skill(s) to ingest)")
     settings = Settings(
         database_url=args.database_url,
         object_store_root=str(Path(args.object_store_root).expanduser()),
@@ -408,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="e2b-packages-") as tmp:
         root = workdir if workdir is not None else Path(tmp)
         root.mkdir(parents=True, exist_ok=True)
-        for task in PRIVATE_TASKS:
+        for task in tasks:
             print(f"\n=== {task['name']} -> {task['skill_id']} ===")
             record = ingest_one(
                 task,
@@ -420,6 +465,9 @@ def main(argv: list[str] | None = None) -> int:
                 capabilities=capabilities,
                 workdir=root,
                 now=now,
+                source_repository=source_repository,
+                source_url_reference=source_url_reference,
+                experiment_label=experiment_label,
             )
             ingested.append(record)
 
@@ -440,7 +488,7 @@ def main(argv: list[str] | None = None) -> int:
 
     container = Container(settings)
     exante: dict[str, Any] = {}
-    for task in PRIVATE_TASKS:
+    for task in tasks:
         print(f"\n--- {task['name']} ---")
         exante[str(task["name"])] = exante_check(container, task)
 
@@ -457,9 +505,9 @@ def main(argv: list[str] | None = None) -> int:
             f"kernel kept rank {check['kernel_kept_rank']}"
         )
     print(
-        "\nBoth private skills ingested, gated, promoted to production (in the "
-        "experiment copy only) and indexed. A MISS above IS a result — do not "
-        "change anything to make routing succeed."
+        f"\nAll {len(ingested)} private skill(s) of set {args.set!r} ingested, gated, "
+        "promoted to production (in the experiment copy only) and indexed. "
+        "A MISS above IS a result — do not change anything to make routing succeed."
     )
     return 0
 

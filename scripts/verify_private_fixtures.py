@@ -8,10 +8,16 @@ client/gate against the fixture's private standard, not a one-line splice):
 a step of (file, None, content) replaces the file; (file, old, new) splices
 like the multi verifier.
 
+Sets (--set): 'private' (default) = the 2 E2/E2B fixtures
+(scripts/private_tasks.py, fixes in PRIVATE_FIXES below); 'private2' = the
+7 E2C fixtures (scripts/private2_tasks.py, fixes in the builder modules,
+assembled by the private2 aggregator); 'all' = both.
+
 Usage:
-    .venv/bin/python scripts/verify_private_fixtures.py
+    .venv/bin/python scripts/verify_private_fixtures.py [--set private|private2|all]
 """
 
+import argparse
 import os
 import subprocess
 import sys
@@ -20,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from private2_tasks import PRIVATE2_FIXES, PRIVATE2_TASKS  # noqa: E402
 from private_tasks import PRIVATE_TASKS  # noqa: E402
 
 PYTEST = str(Path(__file__).resolve().parent.parent / ".venv/bin/python")
@@ -248,10 +255,24 @@ def run_pytest(task_dir: Path, python: str | None = None) -> tuple[int, str]:
 
 
 def verify_all(python: str | None = None) -> int:
+    """The --set private verification (the default, unchanged): the 2 E2/E2B
+    fixtures against PRIVATE_FIXES. Reads the module-level names at CALL
+    time (tests monkeypatch them)."""
+    return verify_fixtures(PRIVATE_TASKS, PRIVATE_FIXES, python=python)
+
+
+def verify_fixtures(
+    tasks: list[dict[str, Any]],
+    fixes: dict[str, list[tuple[str, str | None, str]]],
+    *,
+    python: str | None = None,
+) -> int:
+    """Fail-as-shipped / pass-when-fixed for an arbitrary private fixture
+    set (verify_all's core, parameterized for --set private2/all)."""
     failures: list[str] = []
-    for task in PRIVATE_TASKS:
+    for task in tasks:
         name = task["name"]
-        fix = PRIVATE_FIXES.get(name)
+        fix = fixes.get(name)
         if fix is None:
             failures.append(f"{name}: no fix defined")
             continue
@@ -274,11 +295,31 @@ def verify_all(python: str | None = None) -> int:
             print(f"  - {f}")
         return 1
     print(
-        f"\nAll {len(PRIVATE_TASKS)} private fixtures verified: "
+        f"\nAll {len(tasks)} private fixtures of this set verified: "
         "failing-when-buggy, passing-when-fixed."
     )
     return 0
 
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--set",
+        default="private",
+        choices=["private", "private2", "all"],
+        help=(
+            "which private fixture set to verify: 'private' = the 2 E2/E2B "
+            "fixtures (default), 'private2' = the 7 E2C fixtures, 'all' = both"
+        ),
+    )
+    args = parser.parse_args(argv)
+    if args.set == "private":
+        return verify_all()
+    if args.set == "private2":
+        return verify_fixtures(PRIVATE2_TASKS, PRIVATE2_FIXES)
+    code = verify_all()
+    return code if code != 0 else verify_fixtures(PRIVATE2_TASKS, PRIVATE2_FIXES)
+
+
 if __name__ == "__main__":
-    raise SystemExit(verify_all())
+    raise SystemExit(main())

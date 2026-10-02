@@ -31,7 +31,7 @@ outcomes?", not "does the model?"):
       carries skills; NOTHING else differs from S (same registry plane,
       fixtures, model, tools, sandbox, max_turns, verification,
       turn-budget note) — P−S isolates preload-vs-offered.
-  R — private-skill arm (E2, --set private ONLY): arm K + the case's
+  R — private-skill arm (E2, --set private/private2): arm K + the case's
       PRIVATE skill preloaded from a LOCAL in-process capability handler
       — no registry, no DB. The private fixtures' required knowledge did
       not exist before today (a fictional internal standard invented with
@@ -40,7 +40,7 @@ outcomes?", not "does the model?"):
       private set isolates what a skill carrying NON-PUBLIC knowledge
       adds — the open axis of ADR-014 amendment 17 (public knowledge was
       proven ungated by the domain round: brand-palette 3/3 naked).
-  F — file-in-repo arm (E2B, --set private ONLY): arm K's wiring EXACTLY
+  F — file-in-repo arm (E2B, --set private/private2): arm K's wiring EXACTLY
       (null capability plane, no preload) with ONE difference — the case's
       skill text sits in the run workspace as a plain repo document
       (``docs/standards/<skill_id>.md``, materialized into the F source
@@ -50,17 +50,18 @@ outcomes?", not "does the model?"):
       document; R−F isolates push-into-context over discoverable-on-disk
       — together they answer "is ACI's registry+router worth it over
       docs-in-repo?" for non-public knowledge.
-  Bp — registry-routed preload arm (E2B, --set private ONLY): arm K + the
+  Bp — registry-routed preload arm (E2B, --set private/private2): arm K + the
       REAL registry capability plane pointed at the EXPERIMENT registry
       copy (``--registry-db-url`` + ``--object-store-root``; the same
       Container composition arms S/P use, fastembed semantics) with the
       kernel's run-start preload ON — the §14 router picks from the
-      objective among the real corpus PLUS the two ingested private
-      skills (scripts/e2b_setup_registry.py). Per run the record carries
+      objective among the real corpus PLUS the ingested private skills
+      (scripts/e2b_setup_registry.py: two for --set private, seven for
+      --set private2). Per run the record carries
       which skills were preloaded and whether the case's private skill
       was among them, at which rank. Bp−R isolates registry+router over
       the pinned handler; Bp−F isolates routed preload over a plain file.
-  Bq — registry-routed default arm (E2B, --set private ONLY): the same
+  Bq — registry-routed default arm (E2B, --set private/private2): the same
       experiment registry plane with the preload OFF — today's product
       default (request_capability offered only). Bq−K isolates what the
       OFF default actually delivers when the knowledge is non-public.
@@ -88,7 +89,7 @@ fixture through the false-success metric.
 Usage:
     ACI_AGENT_MODEL_API_KEY=... .venv/bin/python scripts/run_hbench.py \
         [--base-url http://localhost:20128/v1] [--model OneNexus/glm-5.3] \
-        [--set verified|domain|private|horizon] [--cases multi-config-precedence,...] \
+        [--set verified|domain|private|private2|horizon] [--cases multi-config-precedence,...] \
         [--arms K,N,S,P,R,F,Bp,Bq] [--repeat 3] [--parallel 4] [--max-turns 12] \
         [--registry-db-url URL] [--object-store-root DIR]
 
@@ -106,6 +107,12 @@ before today, documented only in the fixture's private SKILL.md and pinned
 in the tests as sha256 digests. Arms R/F/Bp/Bq require this set; run
 K,R,F,Bp,Bq on it for the E2B measurement (naked vs preloaded-skill vs
 file-in-repo vs registry-routed-preload vs registry-routed-default).
+'private2' = the E2C private-knowledge fixtures (scripts/private2_tasks.py
+— 7 NEW fictional internal standards from four parallel builders, the
+same contract PLUS a per-fixture ``directness`` axis: 'named' prompts name
+the standard, 'indirect' ones say only that an internal policy exists).
+Arms R/F/Bp/Bq are valid on it too — the E2C replication of the E2B
+measurement (F vs Bp) on new, varied fixtures and indirect prompts.
 'horizon' = the §80 long-horizon fixtures (scripts/horizon_tasks.py,
 verified by scripts/verify_horizon_fixtures.py with the STRONGER
 red-when-symptom-patched pin) — 8-10 file packages, symptom-only prompts,
@@ -137,6 +144,11 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from domain_tasks import DOMAIN_INTENDED_SKILLS, DOMAIN_TASKS  # noqa: E402
 from horizon_tasks import HORIZON_TASKS  # noqa: E402
+from private2_tasks import (  # noqa: E402
+    PRIVATE2_DIRECTNESS,
+    PRIVATE2_INTENDED_SKILLS,
+    PRIVATE2_TASKS,
+)
 from private_tasks import PRIVATE_INTENDED_SKILLS, PRIVATE_TASKS  # noqa: E402
 from proof_loop import LONG_TASKS, MULTI_TASKS  # noqa: E402
 
@@ -290,7 +302,11 @@ def _fixture_set(name: str) -> list[dict[str, Any]]:
     fixtures (the default — every existing round's pack, unchanged);
     'domain' = the domain-knowledge fixtures (domain_tasks.py);
     'private' = the private-knowledge fixtures (private_tasks.py, the E2
-    instrument — arm R's private-skill plane); 'horizon' = the §80
+    instrument — arm R's private-skill plane); 'private2' = the E2C
+    private-knowledge fixtures (private2_tasks.py — 7 NEW fictional
+    internal standards from four parallel builders, each carrying a
+    ``directness`` axis: 'named' prompts name the standard, 'indirect'
+    ones say only that an internal policy exists); 'horizon' = the §80
     long-horizon fixtures (horizon_tasks.py — 8-10 file packages,
     symptom-only prompts, verified by verify_horizon_fixtures.py with the
     STRONGER red-when-symptom-patched pin). The PENDING H-cases
@@ -301,6 +317,8 @@ def _fixture_set(name: str) -> list[dict[str, Any]]:
         return list(DOMAIN_TASKS)
     if name == "private":
         return list(PRIVATE_TASKS)
+    if name == "private2":
+        return list(PRIVATE2_TASKS)
     if name == "horizon":
         return list(HORIZON_TASKS)
     return _all_fixtures()
@@ -308,8 +326,12 @@ def _fixture_set(name: str) -> list[dict[str, Any]]:
 
 def _intended_skill(fixture_name: str) -> str:
     """The skill whose knowledge a fixture's fix needs — the domain set's
-    production skill or the private set's local one ("" elsewhere)."""
-    return DOMAIN_INTENDED_SKILLS.get(fixture_name) or PRIVATE_INTENDED_SKILLS.get(fixture_name, "")
+    production skill, the private sets' local one ("" elsewhere)."""
+    return (
+        DOMAIN_INTENDED_SKILLS.get(fixture_name)
+        or PRIVATE_INTENDED_SKILLS.get(fixture_name)
+        or PRIVATE2_INTENDED_SKILLS.get(fixture_name, "")
+    )
 
 
 def _post_hoc(run_dir: Path, sandbox: ProcessSandbox) -> int:
@@ -706,7 +728,7 @@ def run_skills_arm(
 
 
 # ---------------------------------------------------------------------------
-# Arm R — private-skill arm (E2, --set private ONLY): arm K + the case's
+# Arm R — private-skill arm (E2, --set private/private2): arm K + the case's
 # private skill preloaded from a LOCAL in-process capability handler.
 # NO registry, NO DB: the handler is the same counting CapabilityRuntime
 # over a fake ACIClient that serves exactly the fixture's private SKILL.md
@@ -781,7 +803,7 @@ def run_private_arm(
     kernel's run-start preload (``preload_capabilities=True``) puts it in
     context from the FIRST model request on. Everything else is arm K's
     path unchanged (fixtures, tools, sandbox, max_turns, verification,
-    turn-budget note, ablations plumbing) — R−K on --set private isolates
+    turn-budget note, ablations plumbing) — R−K on the private sets isolates
     the private-skill contribution."""
     runtime = _skills_capability_runtime(
         lambda: _PrivateSkillACIClient(
@@ -810,7 +832,7 @@ def run_private_arm(
 
 
 # ---------------------------------------------------------------------------
-# Arm F — file-in-repo (E2B, --set private ONLY): arm K's wiring EXACTLY, but
+# Arm F — file-in-repo (E2B, --set private/private2): arm K's wiring EXACTLY, but
 # the case's skill text sits in the run workspace as a plain repo document.
 # NO capability plane, NO preload, NO hint in the objective — the model must
 # find (or miss) the file on its own, exactly as it would in a real repo.
@@ -878,7 +900,7 @@ def run_file_arm(
 
 
 # ---------------------------------------------------------------------------
-# Arms Bp/Bq — registry-routed (E2B, --set private ONLY): arm K + the REAL
+# Arms Bp/Bq — registry-routed (E2B, --set private/private2): arm K + the REAL
 # registry capability plane pointed at the EXPERIMENT registry copy (the
 # same Container composition arms S/P use), preload ON (Bp) / OFF (Bq).
 # ---------------------------------------------------------------------------
@@ -1311,9 +1333,14 @@ def _run_one(
     record["fixture"] = fixture["name"]
     record["h_ref"] = H_REFS.get(fixture["name"], "")
     # The skill axis: which skill this fixture's fix needs — the domain
-    # set's production skill, the private set's local one, or "" (the
+    # set's production skill, the private sets' local one, or "" (the
     # verified pack has no intended skill).
     record["intended_skill"] = _intended_skill(fixture["name"])
+    # The E2C directness axis (private2 fixtures only — every existing
+    # set's rows stay byte-identical): "named" prompts name the standard,
+    # "indirect" ones say only that an internal policy exists.
+    if fixture.get("directness"):
+        record["directness"] = str(fixture["directness"])
     return record
 
 
@@ -1336,12 +1363,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--set",
         default="verified",
-        choices=["verified", "domain", "private", "horizon"],
+        choices=["verified", "domain", "private", "private2", "horizon"],
         help=(
             "fixture set: 'verified' = the 8 §80 multi/long fixtures (default), "
             "'domain' = the domain-knowledge fixtures (domain_tasks.py), "
-            "'private' = the private-knowledge fixtures (private_tasks.py, the "
-            "E2/E2B instrument — arms R/F/Bp/Bq's set), "
+            "'private' = the private-knowledge fixtures (private_tasks.py, the E2 "
+            "instrument — arms R/F/Bp/Bq's set), "
+            "'private2' = the E2C private-knowledge fixtures (private2_tasks.py — "
+            "7 new fictional internal standards, arms R/F/Bp/Bq valid), "
             "'horizon' = the §80 long-horizon fixtures (horizon_tasks.py — "
             "verified fail-as-shipped/pass-when-fixed/red-when-symptom-patched)"
         ),
@@ -1414,20 +1443,23 @@ def main(argv: list[str] | None = None) -> int:
     if unknown_arms:
         print(f"unknown arms {unknown_arms!r} — pick from K,N,S,P,R,F,Bp,Bq", file=sys.stderr)
         return 2
-    if "R" in arms and args.set != "private":
+    #: The fixture sets that carry a private skill per case (fixture['skill']
+    #: + fixture['skill_id']) — the only sets arms R/F/Bp/Bq are defined for.
+    private_sets = ("private", "private2")
+    if "R" in arms and args.set not in private_sets:
         # Arm R preloads the case's private skill (fixture['skill']) — the
-        # private set is the only one that carries one.
-        print("arm R needs --set private (the private-skill fixtures)", file=sys.stderr)
+        # private sets are the only ones that carry one.
+        print("arm R needs --set private or private2 (the private-skill fixtures)", file=sys.stderr)
         return 2
-    if "F" in arms and args.set != "private":
+    if "F" in arms and args.set not in private_sets:
         # Arm F writes the case's skill text (fixture['skill']) into the
-        # workspace — only the private set carries one.
-        print("arm F needs --set private (the private-skill fixtures)", file=sys.stderr)
+        # workspace — only the private sets carry one.
+        print("arm F needs --set private or private2 (the private-skill fixtures)", file=sys.stderr)
         return 2
     if "Bp" in arms or "Bq" in arms:
-        if args.set != "private":
+        if args.set not in private_sets:
             print(
-                "arms Bp/Bq need --set private (they route the private-skill fixtures)",
+                "arms Bp/Bq need --set private or private2 (they route the private-skill fixtures)",
                 file=sys.stderr,
             )
             return 2
@@ -1557,6 +1589,13 @@ def main(argv: list[str] | None = None) -> int:
                     "fixture": fixture["name"],
                     "h_ref": H_REFS.get(fixture["name"], ""),
                     "intended_skill": _intended_skill(fixture["name"]),
+                    # The E2C directness axis rides along on crashed rows
+                    # too (private2 fixtures only — existing sets unchanged).
+                    **(
+                        {"directness": str(fixture["directness"])}
+                        if fixture.get("directness")
+                        else {}
+                    ),
                     "status": "crashed",
                     "stop_reason": type(exc).__name__,
                     "accepted": False,
@@ -1658,7 +1697,7 @@ def main(argv: list[str] | None = None) -> int:
             "P = S + the run-start preload (skills routed on the objective "
             "and loaded BEFORE turn 1), so P-S isolates preload-vs-offered; "
             "N shares K's prompt base minus the capability protocol. "
-            "E2B arms (--set private): F = K's wiring + the case's skill text "
+            "E2B/E2C arms (--set private/private2): F = K's wiring + the case's skill text "
             "as a plain repo document (objective unchanged); Bp = K + the "
             "EXPERIMENT registry plane with the preload ON; Bq = the same "
             "plane with the preload OFF (today's product default). This "
@@ -1697,6 +1736,12 @@ def main(argv: list[str] | None = None) -> int:
         # The E2 skill axis: which PRIVATE skill each fixture's fix needs —
         # documented only in the skill, pinned in the tests as digests.
         report["intended_skills"] = dict(PRIVATE_INTENDED_SKILLS)
+    elif args.set == "private2":
+        # The E2C axes: the private skill each fixture's fix needs AND the
+        # prompt's directness ("named" names the standard; "indirect" says
+        # only that an internal policy exists — routing must survive it).
+        report["intended_skills"] = dict(PRIVATE2_INTENDED_SKILLS)
+        report["directness"] = dict(PRIVATE2_DIRECTNESS)
     out = Path(args.out) if args.out else REPORT_ROOT / f"hbench-{stamp}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2), encoding="utf-8")
