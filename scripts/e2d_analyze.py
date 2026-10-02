@@ -117,7 +117,11 @@ def load_cells(paths: list[str]) -> dict[tuple, list[dict]]:
     cells: dict[tuple, list[dict]] = defaultdict(list)
     invalid = 0
     for r in rows:
-        if r.get("stop_reason") in INVALID_STOP or r.get("status") == "crashed":
+        if (
+            r.get("stop_reason") in INVALID_STOP
+            or r.get("status") == "crashed"
+            or r.get("invalid_reason")  # e.g. REGISTRY_UNAVAILABLE (Bp/Bq)
+        ):
             invalid += 1
             continue
         key = (r["fixture"], r["arm"])

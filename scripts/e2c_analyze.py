@@ -58,8 +58,18 @@ def fisher_exact_two_sided(a: int, b: int, c: int, d: int) -> float:
 
 
 def passes_fails(rows: list[dict]) -> tuple[int, int]:
-    """(passes, fails) over the VALID rows (MODEL_FAILURE/crashed excluded)."""
-    valid = [r for r in rows if r.get("stop_reason") not in ("MODEL_FAILURE", "crashed")]
+    """(passes, fails) over the VALID rows (MODEL_FAILURE/crashed excluded).
+
+    A crashed row carries ``status='crashed'`` with ``stop_reason`` set to
+    the exception TYPE NAME (the runner records ``type(exc).__name__``), so
+    BOTH signals are checked (2026-10-02, e2d-turns: no E2C round ever had
+    a crashed row — verified over all 12 e2c-*.json — so no published
+    number changes; this is hardening)."""
+    valid = [
+        r
+        for r in rows
+        if r.get("stop_reason") not in ("MODEL_FAILURE", "crashed") and r.get("status") != "crashed"
+    ]
     p = sum(1 for r in valid if r.get("tests_pass_at_end"))
     return p, len(valid) - p
 
