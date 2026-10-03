@@ -42,8 +42,10 @@ build-backend = "hatchling.build"
 packages = ["src/aci"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
+# tests = the platform's own suites; sdk/python/tests = the aci-client SDK's
+# (MockTransport unit tests + the integration-marked contract test).
+testpaths = ["tests", "sdk/python/tests"]
+pythonpath = ["src", "sdk/python/src"]
 # A hung test (blocking network call, deadlocked subprocess) must fail CI,
 # not stall it. "thread" works everywhere (incl. tests that run their own
 # threads/subprocesses); on expiry it dumps every thread's stack and aborts
