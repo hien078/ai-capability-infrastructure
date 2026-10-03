@@ -484,6 +484,36 @@ INVALID, bị loại và chạy bù.
     khác giữ nguyên. Test đỏ-trước: lỗi rải rác không giết run dài, chuỗi dài vẫn bị chặn,
     backoff tăng và có trần, 429 cũng backoff. Hàng H-bench chạy SAU bản sửa có ít
     `MODEL_FAILURE` hơn; hàng hợp lệ trước/sau so sánh được (chỉ đổi cách xử lý lỗi provider).
+    Đo được ngay: Bp@20 trước sửa 32/42 MF (`--parallel 1`), sau sửa 6/42 MF (`--parallel 3`).
+
+33. **g-e2d — E2D lặp lại trên glm-5.3** (lead tính lại từ JSON, n=6/ô FIFO, MF/invalid loại).
+    Ngân sách turn: R@20 **33/42** vs R@12 **26/42**, p=0.151 — cùng hướng dsv4 nhưng KHÔNG
+    significant (glm ở 12 turn đã cao hơn dsv4: 0.62 vs 0.52) → "budget is a bottleneck" chỉ
+    PARTIAL trên glm. Cách viết skill: R2 **30/42** vs R **26/42**, p=0.49 — lặp lại "format
+    không quan trọng". **Bp@20 (router + preload) 33/42 = R@20 33/42 (p=1)** — router giữ trần
+    ở 20 turn (mục 28 bị chặn trên dsv4; đây là số đầu tiên). Cổng tri thức: K@12 0/14, K@20
+    1/14 (palisade — model dò không gian luật bằng brute force, không phải lộ skill) →
+    palisade bị loại khỏi primary theo luật đăng ký (turns không palisade: 27/36 vs 20/36,
+    p=0.137).
+
+34. **rc-bench v2 — corpus DÀY trên OpenCode thật: ACI vẫn KHÔNG hơn skill gốc (✗).**
+    Registry `aci_e3` = aci_e2b + 40 chuẩn "gần nhau" (`scripts/private3_tasks.py`: 8 họ × 5
+    biến thể theo team, mô tả gần trùng, prompt gián tiếp chỉ nêu service) + 296 skill công
+    khai (job corpus-public, qua cổng thật; 4/300 bị chặn) = 382 skill production, catalog 381.
+    Router ex-ante: skill đúng hạng 1 ở 26/40, có trong bundle 39/40, 27/40 bundle lẫn biến
+    thể anh em. Round (glm-5.3, bwrap, n=2/1): **OC-A 78/79, OC-S 77/80** (p=0.62), OC-N 2/29
+    hợp lệ. OC-S (cùng 381 skill làm skill gốc, OpenCode liệt kê 384) tự gọi tool `skill` nạp
+    ĐÚNG biến thể ngay lần đầu ở **77/80** run, **0 lần nạp nhầm anh em** — model đọc danh
+    sách tên+mô tả chọn đúng hơn router. Chi phí ngang nhau (tokens_in trung vị 541k vs 512k,
+    wall 198 s vs 180 s). Nhiễm: 11/40 run OC-N bị loại — model **quét cổng localhost**, tìm ra
+    ACI :8010, đọc openapi rồi TẢI skill (sandbox chỉ che file, mạng dùng chung) → đã vá:
+    `scripts/bench_sandbox.py` dùng `--unshare-net` + cầu unix-socket chỉ tới endpoint của
+    arm (lead kiểm thật trên Linux: OC-N chỉ thấy :20128; OC-A thấy :20128 + :8010). 2 run
+    OC-N hợp lệ pass bằng brute-force digest ở họ rate-limit (không gian đầu ra nhỏ — điểm
+    yếu fixture, không ảnh hưởng primary). **Đọc:** trên OpenCode, kể cả corpus ~380 skill
+    với các chuẩn gần nhau, việc CHỌN skill không phải nút thắt — tool `skill` gốc đã đủ.
+    Giá trị còn lại của ACI cho OpenCode: nguồn tri thức chung/quản trị/phát skill, không phải
+    routing. §34: n=2/ô, một model, fixture do tác giả viết.
 
 ## Verification
 
