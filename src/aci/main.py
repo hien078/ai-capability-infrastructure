@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, text
 from starlette.staticfiles import StaticFiles
 
 from aci.adapters.inbound.a2a.gateway import A2AGateway, create_a2a_router
+from aci.adapters.inbound.mcp.http import mcp_streamable_http_route
 from aci.adapters.inbound.opencode import catalog as opencode_catalog
 from aci.adapters.inbound.rest import agent_runs as rest_agent_runs
 from aci.adapters.inbound.rest import bundles as rest_bundles
@@ -31,8 +32,17 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_logging(settings.log_level)
-    log.info("startup complete")
-    yield
+    # The mounted MCP streamable-HTTP transport (stateless §29.4) needs its
+    # session manager's task group for every request; a raw ASGI route has
+    # no lifespan of its own, so the app's lifespan enters it here.
+    manager = getattr(app.state, "mcp_session_manager", None)
+    if manager is None:
+        log.info("startup complete")
+        yield
+        return
+    async with manager.run():
+        log.info("startup complete")
+        yield
 
 
 def create_app(container: Container | None = None) -> FastAPI:
@@ -51,6 +61,13 @@ def create_app(container: Container | None = None) -> FastAPI:
     app.include_router(rest_agent_runs.router)
     app.include_router(rest_ui.router)
     app.include_router(opencode_catalog.router)
+    # MCP over streamable HTTP (official SDK transport, ADR-006): one process
+    # with REST/catalog/A2A, stateless, gated by ACI_API_TOKEN exactly like
+    # the REST routes. A raw ASGI route (not a Mount) so POST /mcp answers
+    # directly — no trailing-slash redirect.
+    mcp_route, mcp_manager = mcp_streamable_http_route(container)
+    app.router.routes.append(mcp_route)
+    app.state.mcp_session_manager = mcp_manager
     app.mount(
         "/ui/static",
         StaticFiles(directory=str(Path(rest_ui.__file__).parent / "static")),

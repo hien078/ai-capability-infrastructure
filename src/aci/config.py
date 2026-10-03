@@ -78,9 +78,20 @@ class Settings(BaseSettings):
     a2a_principals: dict[str, str] = Field(default_factory=dict)
     #: Bearer token guarding the REST read/write surfaces (/v1/routes,
     #: /v1/bundles, /v1/outcomes, /v1/evaluations, /v1/capabilities,
-    #: /opencode/skills, /ui). Empty (default) = UNAUTHENTICATED mode —
-    #: localhost-only by deployment assumption. /health and /ready stay open.
+    #: /opencode/skills, /ui) AND the mounted MCP streamable-HTTP endpoint
+    #: (/mcp — same gate, same constant-time compare, rest/auth.py). Empty
+    #: (default) = UNAUTHENTICATED mode — localhost-only by deployment
+    #: assumption. /health and /ready stay open.
     api_token: str = ""
+    #: Expose the HarnessKernel agent-run tools (run_agent_task,
+    #: get_agent_run, cancel_agent_run) over MCP. Default OFF: this is a NEW
+    #: execution surface — an MCP client could start runs that execute
+    #: workspace code on this host (sandboxed per ACI_AGENT_SANDBOX). The
+    #: tools call the SAME AgentRunService as /v1/agent-runs; the /mcp
+    #: transport is gated by `api_token` (ACI_AGENT_RUNS_TOKEN guards only
+    #: the REST routes). Turning this ON while `api_token` is empty logs a
+    #: loud warning — keep the port on localhost then.
+    mcp_agent_runs: bool = False
     #: OS sandbox for every agent-run process — the model's run_command AND
     #: the client's verification_command (harness.md §16.5, user decision
     #: 2026-10-01). "bwrap" (Linux default): bubblewrap — read-only system +
