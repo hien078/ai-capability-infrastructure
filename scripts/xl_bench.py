@@ -1345,7 +1345,9 @@ def run_one_cell(
     perturbed), collect metrics, grade post-hoc (hidden paths only)."""
     root = Path(ctx["runs"]) / f"{arm.lower()}-{fixture.name}-{repeat}-{secrets.token_hex(4)}"
     work = root / "work"
-    work.mkdir(parents=True)
+    root.mkdir(parents=True)
+    # copytree creates ``work`` itself (pre-creating it raised FileExistsError
+    # on every cell — caught by the first Linux pilot, 2026-10-03).
     shutil.copytree(fixture.dir / "workspace", work)
     tag = f"xl-bench:{arm}:{fixture.name}:{repeat}"
     base_url, api_key = _gateway()
