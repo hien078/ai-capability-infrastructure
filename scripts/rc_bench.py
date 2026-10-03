@@ -48,6 +48,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 from private2_tasks import PRIVATE2_TASKS  # noqa: E402
+from private3_tasks import PRIVATE3_TASKS  # noqa: E402
 
 HOME = Path.home()
 RC = HOME / ".cache/aci-rc"
@@ -68,6 +69,11 @@ DEFAULT_ARMS = ("OC-N", "OC-A", "OC-S")
 #: The SAME 45 skills the ACI catalog serves, exported as native OpenCode
 #: skills (<name>/SKILL.md) — arm OC-S: OpenCode's own skill mechanism, no ACI.
 NATIVE_SKILLS = RC / "native-skills"
+#: The native-skills tree arm OC-S copies (--native-dir; default the 45-skill one).
+NATIVE_DIR = NATIVE_SKILLS
+#: Fixture sets: private2 = the 4 indirect E2C fixtures (round 3);
+#: private3 = the 40 dense-corpus fixtures (rc-bench v2).
+SETS: dict[str, list[dict[str, Any]]] = {"private2": PRIVATE2_TASKS, "private3": PRIVATE3_TASKS}
 FIXTURES = (
     "private2-drawbridge-rollout",
     "private2-cairn-sunset",
@@ -146,7 +152,7 @@ def _write_client_config(arm: str, root: Path, base_url: str, api_key: str) -> N
             )
         )
         if arm == "OC-S":
-            shutil.copytree(NATIVE_SKILLS, cfg / "opencode/skills")
+            shutil.copytree(NATIVE_DIR, cfg / "opencode/skills")
         if arm == "OC-A":
             work = root / "work"
             shutil.copytree(OC_TEMPLATE, work / ".opencode")
@@ -329,24 +335,47 @@ def _is_model_failure(arm: str, text: str, wall: float) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--arms", default=",".join(DEFAULT_ARMS))
-    parser.add_argument("--fixtures", default=",".join(FIXTURES))
+    parser.add_argument("--set", choices=sorted(SETS), default="private2")
+    parser.add_argument("--fixtures", default=None, help="comma list (default: set default)")
+    parser.add_argument("--native-dir", type=Path, default=NATIVE_SKILLS)
+    parser.add_argument(
+        "--arm-repeats", default="", help="per-arm repeat override, e.g. OC-N=1,OC-A=2"
+    )
     parser.add_argument("--repeat", type=int, default=2)
     parser.add_argument("--parallel", type=int, default=4)
     parser.add_argument("--out", default="data/rc-bench/round.json")
     parser.add_argument("--smoke", choices=ARMS)
     args = parser.parse_args(argv)
+    global NATIVE_DIR
+    NATIVE_DIR = args.native_dir.expanduser()
     ensure_oc_template()
     out = Path(args.out)
     out_dir = out.with_suffix("")
     out_dir.mkdir(parents=True, exist_ok=True)
-    by_name = {f["name"]: f for f in PRIVATE2_TASKS}
-    fixtures = [by_name[n] for n in args.fixtures.split(",")]
+    pack = SETS[args.set]
+    by_name = {f["name"]: f for f in pack}
+    if args.fixtures:
+        names = args.fixtures.split(",")
+    elif args.set == "private2":
+        names = list(FIXTURES)
+    else:
+        names = [str(f["name"]) for f in pack]
+    fixtures = [by_name[n] for n in names]
+    per_arm = {
+        k: int(v) for k, v in (item.split("=") for item in args.arm_repeats.split(",") if item)
+    }
     if args.smoke:
         jobs = [(fixtures[0], args.smoke, 0)]
     else:
         arms = args.arms.split(",")
         # Interleave arms so each arm sees the same gateway load over time.
-        jobs = [(f, a, r) for r in range(args.repeat) for f in fixtures for a in arms]
+        jobs = [
+            (f, a, r)
+            for r in range(args.repeat)
+            for f in fixtures
+            for a in arms
+            if r < per_arm.get(a, args.repeat)
+        ]
     rows: list[dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel) as pool:
         futures = {pool.submit(run_one, f, a, r, out_dir): (f["name"], a, r) for f, a, r in jobs}
