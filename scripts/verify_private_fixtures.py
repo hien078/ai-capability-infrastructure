@@ -8,7 +8,8 @@ client/gate against the fixture's private standard, not a one-line splice):
 a step of (file, None, content) replaces the file; (file, old, new) splices
 like the multi verifier.
 
-Sets (--set): 'private' (default) = the 2 E2/E2B fixtures
+Sets (--set): 'private3' = the 40 dense-corpus fixtures
+(scripts/private3_tasks.py); 'private' (default) = the 2 E2/E2B fixtures
 (scripts/private_tasks.py, fixes in PRIVATE_FIXES below); 'private2' = the
 7 E2C fixtures (scripts/private2_tasks.py, fixes in the builder modules,
 assembled by the private2 aggregator); 'all' = both.
@@ -27,6 +28,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from private2_tasks import PRIVATE2_FIXES, PRIVATE2_TASKS  # noqa: E402
+from private3_tasks import PRIVATE3_FIXES, PRIVATE3_TASKS  # noqa: E402
 from private_tasks import PRIVATE_TASKS  # noqa: E402
 
 PYTEST = str(Path(__file__).resolve().parent.parent / ".venv/bin/python")
@@ -306,10 +308,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--set",
         default="private",
-        choices=["private", "private2", "all"],
+        choices=["private", "private2", "private3", "all"],
         help=(
             "which private fixture set to verify: 'private' = the 2 E2/E2B "
-            "fixtures (default), 'private2' = the 7 E2C fixtures, 'all' = both"
+            "fixtures (default), 'private2' = the 7 E2C fixtures, 'private3' = the "
+            "40 dense-corpus fixtures, 'all' = private + private2"
         ),
     )
     args = parser.parse_args(argv)
@@ -317,6 +320,8 @@ def main(argv: list[str] | None = None) -> int:
         return verify_all()
     if args.set == "private2":
         return verify_fixtures(PRIVATE2_TASKS, PRIVATE2_FIXES)
+    if args.set == "private3":
+        return verify_fixtures(PRIVATE3_TASKS, PRIVATE3_FIXES)
     code = verify_all()
     return code if code != 0 else verify_fixtures(PRIVATE2_TASKS, PRIVATE2_FIXES)
 
