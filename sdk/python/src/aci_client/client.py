@@ -36,7 +36,6 @@ from aci_client.errors import (
 from aci_client.models import (
     DEFAULT_MAX_CONTEXT_TOKENS,
     AgentRun,
-    ArtifactFile,
     Budget,
     CapabilitySearchResult,
     OutcomeEvidence,
@@ -772,60 +771,11 @@ class AsyncACIClient(_ClientCore):
             )
             return response.content
 
-        # The verification loop is synchronous over awaited bytes.
-        artifact = resolved.artifact
-        if artifact is None:
-            raise ACIError(
-                "CAPABILITY_NOT_FOUND",
-                f"{capability_id}@{active_version} has no artifact",
-                status_code=404,
-            )
-        by_path: dict[str, ArtifactFile] = {f.path: f for f in artifact.files}
-        files: list[SkillFile] = []
-        skill_md: str | None = None
-        for catalog_path in catalog_files:
-            artifact_path = "SKILL.md" if catalog_path == f"{capability_id}.md" else catalog_path
-            manifest_file = by_path.get(artifact_path)
-            if manifest_file is None:
-                raise ACIError(
-                    "ARTIFACT_INTEGRITY_ERROR",
-                    f"catalog advertises {catalog_path!r} but the artifact manifest "
-                    f"for {capability_id}@{active_version} has no {artifact_path!r}",
-                )
-            data = await fetch(catalog_path)
-            digest = hashlib.sha256(data).hexdigest()
-            if digest != manifest_file.sha256:
-                raise SkillIntegrityError(
-                    f"{capability_id}/{artifact_path}: sha256 mismatch "
-                    f"(expected {manifest_file.sha256}, got {digest})"
-                )
-            text = _decode_text(data)
-            if artifact_path == "SKILL.md":
-                if text is None:
-                    raise ACIError(
-                        "SKILL_PACKAGE_INVALID",
-                        f"{capability_id}@{active_version}: SKILL.md is not UTF-8 text",
-                    )
-                skill_md = text
-            files.append(
-                SkillFile(
-                    path=artifact_path,
-                    sha256=manifest_file.sha256,
-                    size_bytes=manifest_file.size_bytes,
-                    text=text,
-                )
-            )
-        if skill_md is None:
-            raise ACIError(
-                "SKILL_PACKAGE_INVALID",
-                f"{capability_id}@{active_version} advertises no entry file (SKILL.md)",
-            )
-        return SkillContent(
-            capability_id=capability_id,
-            version=active_version,
-            package_digest=artifact.package_digest,
-            skill_md=skill_md,
-            files=files,
+        # Await the bytes, then run the SAME verification as the sync path
+        # (one source of truth for the §39 integrity boundary).
+        prefetched = {path: await fetch(path) for path in catalog_files}
+        return _skill_content(
+            capability_id, active_version, resolved, catalog_files, prefetched.__getitem__
         )
 
     async def report_outcome(
