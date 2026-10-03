@@ -457,6 +457,21 @@ INVALID, bị loại và chạy bù.
     docker socket bị che; round 1 bị hủy vì `find /` thấy repo qua `/home/.snapshots`
     (snapshot btrfs), round 2 dừng khi user đổi arm.
 
+31. **Lặp lại trên glm-5.3 (đợt g-, Mac) — K1 và E3-oc.** Số do lead tính lại từ JSON.
+    - **g-k1 — nudge KHÔNG sửa under-claim: lặp lại.** K acceptance **36/64** vs KN
+      **32/64** (p=0.60); tests_pass K 56/64 vs KN 52/64; false_success 0/0; gap under-claim
+      K = 0.31 (giống dsv4 và E1). Nudge bắn ở 20/20 run "fix xong mà không claim", model
+      không propose lần nào — 37/37 trên hai họ model. 128/128 hàng hợp lệ ở `--parallel 2`.
+      Code nudge tiếp tục KHÔNG merge.
+    - **g-e3 — OpenCode thật trên Mac, plugin ACI vs doc trong repo: hoà ở trần.** Sau khi
+      sửa harness (gốc từng run tách riêng, file đáp án ngoài tầm với, scan nghiêm: mọi lần
+      đọc ra ngoài workdir = nhiễm): A **30/30** (route 30/30, nạp skill 30/30) vs F **29/29**
+      (p=1); N sạch 0/3 — 112/115 run N bị nhiễm vì model đi lục ngoài workdir (không
+      sandbox). **Đính chính mục 29:** arm A trên dsv4 hỏng do DB `aci_e2b` mất kết nối
+      (host Linux suspend 17:28), KHÔNG phải lỗi hook plugin — trên CLI 2.0.22 hook bắn
+      bình thường. Cùng hướng với mục 30: trên OpenCode thật, ACI không hơn cách đưa tri
+      thức đơn giản (doc/skill gốc) ở quy mô corpus hiện tại.
+
 ## Verification
 
 - `tests/security/test_harness_invariants.py` — INV-04/06/07/08 + §7.6 trên đường
