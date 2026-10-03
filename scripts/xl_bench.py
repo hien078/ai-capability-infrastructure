@@ -103,6 +103,9 @@ MAX_LEAF_TURNS = 60
 NOISE_DIRS = frozenset(
     {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".git", "node_modules"}
 )
+#: Files the KERNEL itself writes into a run workspace (its Seatbelt profile)
+#: — infrastructure, never task output; excluded from the merge diff.
+NOISE_FILES = frozenset({".aci-sandbox-profile.sb"})
 #: The marker file the sidecar plants in every snapshot so a cancel can find
 #: the run id while the (synchronous) POST /v1/agent-runs is still executing.
 LEAF_MARKER = ".xl-leaf"
@@ -315,6 +318,8 @@ def _tree_hashes(root: Path) -> dict[str, str]:
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root)
         if NOISE_DIRS & set(rel.parts) or rel.name == LEAF_MARKER:
+            continue
+        if NOISE_FILES & {rel.name, rel.as_posix()}:
             continue
         if path.is_symlink() or not path.is_file():
             continue

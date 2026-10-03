@@ -171,6 +171,26 @@ def test_delegate_rejects_bad_objective_and_snapshot(bench) -> None:
     assert aci.posts == []
 
 
+def test_tree_hashes_exclude_kernel_infrastructure(tmp_path: Path) -> None:
+    """The kernel writes its Seatbelt profile into the run workspace — that is
+    infrastructure, never merged leaf output (seen live in the wiring smoke)."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "mod.py").write_text("fix\n")
+    (run_dir / xb.LEAF_MARKER).write_text("leaf_x")
+    (run_dir / ".aci-sandbox-profile.sb").write_text("(version 1)")
+    (run_dir / "__pycache__").mkdir()
+    (run_dir / "__pycache__" / "m.pyc").write_text("junk")
+    snapshot = tmp_path / "snap"
+    snapshot.mkdir()
+    (snapshot / "mod.py").write_text("bug\n")
+    changed, deleted, diff, files = xb.diff_trees(snapshot, run_dir)
+    assert changed == ["mod.py"]
+    assert deleted == []
+    assert ".aci-sandbox-profile.sb" not in files
+    assert xb.LEAF_MARKER not in diff
+
+
 def test_delegate_rejects_escaping_tar(bench) -> None:
     sidecar, _, tmp = bench
     buf = io.BytesIO()
