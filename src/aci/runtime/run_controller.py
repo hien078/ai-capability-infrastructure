@@ -8,6 +8,7 @@ lives in the StateManager (INV-01); every model request is re-assembled from
 it within the context budget (INV-09).
 """
 
+import hashlib
 import time
 import uuid
 from collections.abc import Callable, Iterable, Sequence
@@ -86,6 +87,7 @@ from aci.runtime.event_bus import (
 )
 from aci.runtime.model_gateway import ModelMessage, ModelRequest, ModelResponse
 from aci.runtime.recovery import (
+    PROVIDER_CAPACITY_CLASSES,
     RETRY_ACTIONS,
     RecoveryAction,
     RecoveryManager,
@@ -106,6 +108,11 @@ from aci.runtime.verification import VerificationManager
 _MAX_TOKENS_PER_REQUEST = 8_192
 _DEFAULT_CONTEXT_TOKENS = 60_000
 _MAX_BACKOFF_SECONDS = 8.0
+#: Provider-capacity backoff (TRANSIENT_MODEL / RATE_LIMITED): 2 s doubling,
+#: capped at 60 s, times a deterministic per-run jitter in [0.75, 1] so
+#: parallel runs hitting the same limited gateway do not retry in lockstep.
+_PROVIDER_BACKOFF_BASE_SECONDS = 2.0
+_MAX_PROVIDER_BACKOFF_SECONDS = 60.0
 
 #: Turn-budget signal: a pinned system note once the run is within this many
 #: turns of its limit (the current turn included). It tells the model the
@@ -690,13 +697,22 @@ class HarnessKernel:
                     payload={"failure_class": failure_class.value},
                     turn_id=f"turn-{turn}",
                 )
+                provider = failure_class in PROVIDER_CAPACITY_CLASSES
                 decision = self._decide(
-                    r, _failure(failure_class, "model_gateway", [_error_text(exc)])
+                    r,
+                    _failure(failure_class, "model_gateway", [_error_text(exc)]),
+                    # A provider-capacity streak is ONE recovery (§18.4):
+                    # only its first failure is charged to the run budget.
+                    charge=not (provider and attempt > 0),
                 )
                 if decision is None:
                     return self._fail(r, StopReason.MODEL_FAILURE, detail=failure_class.value)
                 if decision.action in ("RETRY_BACKOFF", "RETRY_SAME"):
-                    self._sleep(min(_MAX_BACKOFF_SECONDS, float(2**attempt)))
+                    self._sleep(
+                        _provider_backoff(r.run_id, attempt)
+                        if provider
+                        else min(_MAX_BACKOFF_SECONDS, float(2**attempt))
+                    )
                     attempt += 1
                     r.cancel.raise_if_cancelled()
                     continue
@@ -713,6 +729,7 @@ class HarnessKernel:
                     )
                     return None
                 return self._fail(r, StopReason.MODEL_FAILURE, detail=failure_class.value)
+            self._provider_call_succeeded()
             # §7.6: consume usage as soon as it is known.
             usage = response.usage
             self._state.consume_budget(
@@ -736,10 +753,22 @@ class HarnessKernel:
         )
         return response
 
-    def _decide(self, r: _Run, failure: FailureEnvelope) -> RecoveryAction | None:
-        """§18.4: recovery consumes budget; None means terminal."""
+    def _provider_call_succeeded(self) -> None:
+        """End the provider-capacity streak (a recovery that is not a
+        RecoveryManager — e.g. a test double — simply has no streak)."""
+        reset = getattr(self._recovery, "provider_call_succeeded", None)
+        if callable(reset):
+            reset()
+
+    def _decide(
+        self, r: _Run, failure: FailureEnvelope, *, charge: bool = True
+    ) -> RecoveryAction | None:
+        """§18.4: recovery consumes budget; None means terminal. ``charge``
+        False = a continuation of an already-charged provider streak."""
         action = self._recovery.decide(failure)
-        snapshot = self._state.count_recovery(r.run_id)
+        snapshot = (
+            self._state.count_recovery(r.run_id) if charge else self._state.snapshot(r.run_id)
+        )
         return self._gate(
             r,
             failure,
@@ -1812,6 +1841,15 @@ def _tool_call_stop(snapshot: RuntimeStateSnapshot, batch_size: int) -> StopReas
     if b.consumed_tool_calls + batch_size > b.max_tool_calls:
         return StopReason.LIMIT_TOOL_CALLS
     return None
+
+
+def _provider_backoff(run_id: str, attempt: int) -> float:
+    """Exponential provider-capacity backoff with a deterministic per-run
+    jitter in [0.75, 1] (no RNG: replayable, and parallel runs spread)."""
+    ceiling = min(_MAX_PROVIDER_BACKOFF_SECONDS, _PROVIDER_BACKOFF_BASE_SECONDS * 2.0**attempt)
+    digest = hashlib.sha256(f"{run_id}:{attempt}".encode()).digest()
+    jitter = 0.75 + 0.25 * (int.from_bytes(digest[:4], "big") / 0xFFFFFFFF)
+    return ceiling * jitter
 
 
 def _classify_model_error(exc: Exception) -> FailureClass:

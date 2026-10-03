@@ -139,9 +139,33 @@ class TestRecoveryManager:
 
     def test_budget_exhausted_after_max_attempts(self) -> None:
         rm = RecoveryManager(max_attempts_total=2)
-        assert rm.decide(self._failure(FailureClass.TRANSIENT_MODEL)).action == "RETRY_BACKOFF"
         assert rm.decide(self._failure(FailureClass.TRANSIENT_TOOL)).action == "RETRY_SAME"
-        assert rm.decide(self._failure(FailureClass.TRANSIENT_MODEL)).action == "FAIL"
+        assert rm.decide(self._failure(FailureClass.TOOL_TIMEOUT)).action == "RETRY_SAME"
+        assert rm.decide(self._failure(FailureClass.TRANSIENT_TOOL)).action == "FAIL"
+
+    def test_provider_streak_is_bounded_and_counts_once(self) -> None:
+        """Provider-capacity failures (TRANSIENT_MODEL / RATE_LIMITED) count
+        CONSECUTIVELY: up to max_provider_retries retries, then ESCALATE;
+        the whole streak is ONE unit of the total attempt budget."""
+        rm = RecoveryManager(max_attempts_total=2, max_provider_retries=6)
+        for _ in range(6):
+            assert rm.decide(self._failure(FailureClass.TRANSIENT_MODEL)).action == (
+                "RETRY_BACKOFF"
+            )
+        assert rm.attempts == 1
+        assert rm.decide(self._failure(FailureClass.RATE_LIMITED)).action == "ESCALATE"
+
+    def test_provider_success_ends_the_streak(self) -> None:
+        rm = RecoveryManager(max_provider_retries=2)
+        for _ in range(3):
+            assert rm.decide(self._failure(FailureClass.TRANSIENT_MODEL)).action == (
+                "RETRY_BACKOFF"
+            )
+            assert rm.decide(self._failure(FailureClass.TRANSIENT_MODEL)).action == (
+                "RETRY_BACKOFF"
+            )
+            rm.provider_call_succeeded()
+        assert rm.attempts == 3
 
     def test_repeated_same_class_escalates(self) -> None:
         rm = RecoveryManager(max_same_failure_retries=1)
@@ -204,9 +228,9 @@ class TestRecoveryManager:
 
     def test_escalation_and_total_budget_interplay(self) -> None:
         rm = RecoveryManager(max_attempts_total=3, max_same_failure_retries=1)
-        first = rm.decide(self._failure(FailureClass.TRANSIENT_MODEL))
+        first = rm.decide(self._failure(FailureClass.WORKSPACE_UNAVAILABLE))
         assert first.action == "RETRY_BACKOFF"
-        assert rm.decide(self._failure(FailureClass.TRANSIENT_MODEL)).action == "ESCALATE"
+        assert rm.decide(self._failure(FailureClass.WORKSPACE_UNAVAILABLE)).action == "ESCALATE"
         assert rm.decide(self._failure(FailureClass.TRANSIENT_TOOL)).action == "RETRY_SAME"
         assert rm.decide(self._failure(FailureClass.TOOL_TIMEOUT)).action == "FAIL"
         assert rm.attempts == 4

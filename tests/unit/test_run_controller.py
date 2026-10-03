@@ -396,10 +396,15 @@ class TestRecovery:
         assert result.stop_reason is StopReason.SUCCESS
         assert len(sleeps) == 2
         assert sleeps[0] < sleeps[1]
-        assert state.snapshot(RUN_ID).budget.consumed_recoveries == 2
+        # One provider-capacity STREAK (consecutive failures of one model
+        # call) is one recovery, however many retries it took.
+        assert state.snapshot(RUN_ID).budget.consumed_recoveries == 1
         assert result.usage.turns == 1
 
-    def test_transient_model_error_escalates_after_repeats(self) -> None:
+    def test_transient_model_error_escalates_after_a_long_streak(self) -> None:
+        """A provider that stays down ends the run — bounded: 6 consecutive
+        retries with exponential backoff (2 s doubling, capped 60 s, jitter
+        in [0.75, 1]), the 7th consecutive failure escalates."""
         sleeps: list[float] = []
         model = ScriptedModel([DomainError(ErrorCode.MODEL_UNAVAILABLE, "503") for _ in range(20)])
         kernel, _ = _kernel(model, sleep=sleeps.append)
@@ -407,9 +412,40 @@ class TestRecovery:
         assert result.status is RunStatus.FAILED
         assert result.stop_reason is StopReason.MODEL_FAILURE
         assert result.detail_code == "TRANSIENT_MODEL"
-        # RecoveryManager: 2 same-class retries, the third repeat escalates.
-        assert len(sleeps) == 2
-        assert model.calls == 3
+        assert len(sleeps) == 6
+        assert model.calls == 7
+        for i, slept in enumerate(sleeps):
+            ceiling = min(60.0, 2.0 * 2**i)
+            assert 0.75 * ceiling <= slept <= ceiling, (i, slept)
+        assert sleeps == sorted(sleeps)
+
+    def test_sporadic_provider_errors_do_not_kill_a_long_run(self) -> None:
+        """2026-10-03 (g-e2d Bp@20, 32/42 rows MODEL_FAILURE): the
+        same-class counter was RUN-WIDE, so the 3rd transient gateway error
+        of a run's whole life escalated, even with successful calls in
+        between. A successful model call ends the streak: sporadic errors
+        separated by successes never accumulate toward escalation."""
+        sleeps: list[float] = []
+        err = DomainError(ErrorCode.MODEL_UNAVAILABLE, "503")
+        model = ScriptedModel(
+            [err, ContinueAction(), err, ContinueAction(), err, ContinueAction(), err]
+            + [FinalCandidate(summary="done")]
+        )
+        kernel, state = _kernel(model, sleep=sleeps.append)
+        result = kernel.run(_contract(), _spec(max_turns=10))
+        assert result.status is RunStatus.SUCCEEDED, result.stop_reason
+        assert len(sleeps) == 4
+        assert state.snapshot(RUN_ID).budget.consumed_recoveries == 4
+
+    def test_rate_limited_streak_also_backs_off(self) -> None:
+        sleeps: list[float] = []
+        err = DomainError(ErrorCode.RATE_LIMITED, "429")
+        model = ScriptedModel([err, err, err, err, FinalCandidate(summary="done")])
+        kernel, state = _kernel(model, sleep=sleeps.append)
+        result = kernel.run(_contract(), _spec())
+        assert result.status is RunStatus.SUCCEEDED
+        assert len(sleeps) == 4
+        assert state.snapshot(RUN_ID).budget.consumed_recoveries == 1
 
     def test_malformed_output_gets_a_repair_turn(self) -> None:
         sleeps: list[float] = []

@@ -36,6 +36,13 @@ RECOVERY_ACTIONS = frozenset(
 #: Recovery actions that re-run the failed operation.
 RETRY_ACTIONS = frozenset({"RETRY_SAME", "RETRY_BACKOFF"})
 
+#: Provider-capacity failures: the model endpoint is overloaded or limiting
+#: us, not the run going wrong. They are bounded by CONSECUTIVE failures of
+#: one model call (a success ends the streak) — a run-wide count let the 3rd
+#: sporadic gateway error of a long run's whole life end it (2026-10-03,
+#: g-e2d Bp@20: 32/42 rows MODEL_FAILURE at turn 1 under a shared gateway).
+PROVIDER_CAPACITY_CLASSES = frozenset({FailureClass.TRANSIENT_MODEL, FailureClass.RATE_LIMITED})
+
 
 @dataclass(frozen=True, slots=True)
 class RecoveryAction:
@@ -131,14 +138,17 @@ class RecoveryManager:
         *,
         max_attempts_total: int = 8,
         max_same_failure_retries: int = 2,
+        max_provider_retries: int = 6,
     ) -> None:
         self._matrix = dict(_DEFAULT_MATRIX)
         if matrix:
             self._matrix.update(matrix)
         self._max_attempts = max_attempts_total
         self._max_same = max_same_failure_retries
+        self._max_provider = max_provider_retries
         self._attempts = 0
         self._per_class: dict[FailureClass, int] = {}
+        self._provider_streak = 0
 
     def decide(
         self, failure: FailureEnvelope, *, idempotency: IdempotencyClass | None = None
@@ -147,6 +157,17 @@ class RecoveryManager:
         ``idempotency`` is the failed tool's class when known: RETRY_SAME is
         never issued for a call that may have had a side effect or that is
         not declared idempotent (§12.6, §18.3)."""
+        if failure.failure_class in PROVIDER_CAPACITY_CLASSES:
+            # One streak = one attempt of the total budget; bounded by the
+            # consecutive cap, reset by provider_call_succeeded().
+            self._provider_streak += 1
+            if self._provider_streak == 1:
+                self._attempts += 1
+            if self._attempts > self._max_attempts:
+                return RecoveryAction("FAIL", "recovery budget exhausted")
+            if self._provider_streak > self._max_provider:
+                return RecoveryAction("ESCALATE", f"{failure.failure_class} persisted")
+            return self._matrix[failure.failure_class]
         self._attempts += 1
         self._per_class[failure.failure_class] = self._per_class.get(failure.failure_class, 0) + 1
         if self._attempts > self._max_attempts:
@@ -172,6 +193,15 @@ class RecoveryManager:
         if action.action in RETRY_ACTIONS and not tool_retry_safe(tool):
             return RecoveryAction("REPLAN", "non-idempotent tool — no automatic retry")
         return action
+
+    def provider_call_succeeded(self) -> None:
+        """A model call went through: the provider-capacity streak is over."""
+        self._provider_streak = 0
+
+    @property
+    def provider_streak(self) -> int:
+        """Consecutive provider-capacity failures of the current model call."""
+        return self._provider_streak
 
     @property
     def attempts(self) -> int:

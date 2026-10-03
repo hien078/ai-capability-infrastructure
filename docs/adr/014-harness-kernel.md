@@ -472,6 +472,19 @@ INVALID, bị loại và chạy bù.
       bình thường. Cùng hướng với mục 30: trên OpenCode thật, ACI không hơn cách đưa tri
       thức đơn giản (doc/skill gốc) ở quy mô corpus hiện tại.
 
+32. **Sửa lỗi recovery khi provider quá tải (bug, không mở rộng).** g-e2d Bp@20 trên glm:
+    32/42 run `MODEL_FAILURE` ngay turn 1 (~4 s, cả ở `--parallel 1`) khi 7 phiên OpenCode
+    dùng chung gateway. Trace: 2 lần `RETRY_BACKOFF` (1 s, 2 s) rồi `ESCALATE`. Gốc lỗi:
+    bộ đếm cùng-loại của `RecoveryManager` tính TOÀN RUN và không reset — lỗi gateway tạm
+    thời thứ 3 trong cả đời một run (dù xen giữa là các lần gọi thành công) giết run; với
+    task dài (tới 200 turn) gần như chắc chắn chết. Sửa: `TRANSIENT_MODEL`/`RATE_LIMITED`
+    (`PROVIDER_CAPACITY_CLASSES`) tính theo CHUỖI liên tiếp của một lần gọi model, reset khi
+    gọi thành công; tối đa 6 lần thử lại/chuỗi; backoff 2 s nhân đôi, trần 60 s, jitter tất
+    định theo run_id ∈ [0.75, 1]; một chuỗi = MỘT recovery của ngân sách §18.4. Các loại lỗi
+    khác giữ nguyên. Test đỏ-trước: lỗi rải rác không giết run dài, chuỗi dài vẫn bị chặn,
+    backoff tăng và có trần, 429 cũng backoff. Hàng H-bench chạy SAU bản sửa có ít
+    `MODEL_FAILURE` hơn; hàng hợp lệ trước/sau so sánh được (chỉ đổi cách xử lý lỗi provider).
+
 ## Verification
 
 - `tests/security/test_harness_invariants.py` — INV-04/06/07/08 + §7.6 trên đường
