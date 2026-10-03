@@ -17,10 +17,24 @@ replaced by empty tmpfs, the docker socket masked, and ONLY its own run root
 (workdir + per-run XDG config/data/cache) bound back, plus the client
 binaries read-only. The repo, object store, transcripts, other runs and the
 ACI servers' files are unreachable by path. The ACI servers (REST :8010,
-MCP :8011, both on the disposable ``aci_e2b`` copy) run outside the sandbox;
-the network is shared (the gateway lives on localhost) — transcripts are
-scanned for any attempt to reach those ports, the DB, or paths outside the
-run root.
+MCP :8011, both on the disposable ``aci_e2b`` copy) run outside the sandbox.
+
+NETWORK isolation (rc-bench v2 lesson, 2026-10-03: a no-skill run
+port-scanned localhost, found the ACI server, searched its API and
+downloaded the skill): the sandbox has NO network at all
+(``--unshare-net``); every endpoint an arm legitimately needs is re-exposed
+inside at ``127.0.0.1:<port>`` through a unix-socket bridge — the model
+gateway for EVERY arm, the ACI REST server for OC-A only (its plugin routes
+through it), the ACI MCP server for G-A only. Nothing else is reachable;
+transcripts are still scanned for any attempt to reach other ports, the DB,
+or paths outside the run root.
+
+PROCESS-TREE cleanup (macOS 2026-10-03 lesson: orphaned model-written
+brute-force scripts ignored SIGTERM and kept 8 cores busy for hours after
+their session ended): every client runs in its OWN session and on timeout
+the WHOLE process group is SIGKILLed (``bench_sandbox.run_sandboxed`` — the
+ONE shared helper both benches use); runs are always
+``opencode run --standalone``, never a shared ``opencode serve --service``.
 
 Usage::
 
@@ -47,6 +61,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
+from bench_sandbox import Endpoint, run_sandboxed  # noqa: E402
 from private2_tasks import PRIVATE2_TASKS  # noqa: E402
 from private3_tasks import PRIVATE3_TASKS  # noqa: E402
 
@@ -181,29 +196,26 @@ def _write_client_config(arm: str, root: Path, base_url: str, api_key: str) -> N
         )
 
 
-def _bwrap(root: Path, extra_ro: list[Path]) -> list[str]:
-    cmd = [
-        "bwrap",
-        "--dev-bind", "/", "/",
-        # ALL of /home (not just $HOME) and the btrfs snapshot trees: the
-        # first round showed `find /` reaching the repo through
-        # /home/.snapshots/<n>/snapshot/hien/Data/Projects/... .
-        "--tmpfs", "/home",
-        "--tmpfs", "/.snapshots",
-        "--tmpfs", "/tmp",
-        "--tmpfs", "/var/tmp",
-        "--ro-bind", "/dev/null", "/run/docker.sock",
-        # Own PID namespace + procfs: no other process (sibling runs, the
-        # ACI servers) is visible, so /proc/<pid>/{cwd,root,environ} cannot
-        # bypass the tmpfs masks (seen in the G-A smoke: the model ran ps).
-        "--unshare-pid",
-        "--proc", "/proc",
-        "--bind", str(root), str(root),
-        "--die-with-parent",
-    ]  # fmt: skip
-    for path in extra_ro:
-        cmd += ["--ro-bind", str(path), str(path)]
-    return cmd
+def _gateway_endpoint(base_url: str) -> tuple[str, int]:
+    """(host, port) of the model gateway from its base URL."""
+    import urllib.parse
+
+    parts = urllib.parse.urlsplit(base_url)
+    return parts.hostname or "127.0.0.1", parts.port or 80
+
+
+def _arm_endpoints(arm: str, gateway: tuple[str, int]) -> list[Endpoint]:
+    """The unix-socket network bridges an arm gets (the sandbox itself has NO
+    network): the model gateway for EVERY arm; the ACI REST server for OC-A
+    only (its plugin routes through it); the ACI MCP server for G-A only.
+    Nothing else is reachable — not the DB, not sibling runs, not the repo."""
+    host, port = gateway
+    endpoints: list[Endpoint] = [(host, port, "gateway")]
+    if arm == "OC-A":
+        endpoints.append(("127.0.0.1", 8010, "rest"))
+    elif arm == "G-A":
+        endpoints.append(("127.0.0.1", 8011, "mcp"))
+    return endpoints
 
 
 def run_one(fixture: dict[str, Any], arm: str, repeat: int, out_dir: Path) -> dict[str, Any]:
@@ -249,20 +261,22 @@ def run_one(fixture: dict[str, Any], arm: str, repeat: int, out_dir: Path) -> di
     timed_out = False
     # Stream to files: a timed-out run keeps its full transcript (captured
     # pipes lost it, which blinded the contamination scan on every timeout).
+    # The client runs in the bwrap sandbox (NO network — only the arm's
+    # bridges) in its OWN session; on timeout the WHOLE process group is
+    # SIGKILLed (bench_sandbox.run_sandboxed does all of it).
     with transcript.open("w") as out_fh, err_path.open("w") as err_fh:
-        try:
-            proc = subprocess.run(
-                _bwrap(root, ro) + ["--chdir", str(work), "--"] + client,
-                env=env,
-                stdout=out_fh,
-                stderr=err_fh,
-                timeout=WALL_CAP,
-                check=False,
-            )
-            exit_code = proc.returncode
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            exit_code = -9
+        rc, timed_out = run_sandboxed(
+            root,
+            ro,
+            client,
+            endpoints=_arm_endpoints(arm, _gateway_endpoint(base_url)),
+            workdir=work,
+            env=env,
+            timeout=WALL_CAP,
+            stdout=out_fh,
+            stderr=err_fh,
+        )
+        exit_code = rc if not timed_out else -9
     wall = round(time.time() - started, 1)
     stdout = transcript.read_text(errors="replace")
     stderr = err_path.read_text(errors="replace")

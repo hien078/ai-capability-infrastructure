@@ -46,12 +46,18 @@ RECORDED FINDINGS (the kernel is FROZEN — everything here is bench-side):
    (clarification/approval) cannot wait for a human inside a bench run —
    the sidecar cancels it and reports the pause honestly.
 
-Isolation (rc_bench pattern, ADR-014 amendment 29 — reused, NOT weakened):
-measurement runs happen on the LINUX host inside bubblewrap (``_bwrap``
-imported from scripts/rc_bench.py: tmpfs over /home, /.snapshots, /tmp,
-/var/tmp; docker socket masked; own PID ns). The ACI server and this
-sidecar run OUTSIDE the sandbox; the kernel's own workspace processes use
-its OS sandbox as usual (bwrap/Seatbelt, fail-closed). Hidden suites and
+Isolation (the shared ``scripts/bench_sandbox.py`` helper — used by BOTH
+benches, rc_bench pattern, ADR-014 amendment 29 — reused, NOT weakened):
+measurement runs happen on the LINUX host inside bubblewrap (tmpfs over
+/home, /.snapshots, /tmp, /var/tmp; docker socket masked; own PID ns;
+--die-with-parent). The sandbox has NO NETWORK (``--unshare-net``): the
+model gateway is bridged back in for every arm and the delegation sidecar
+for A2/A3 only, through unix-socket bridges (socat) under the run root —
+nothing else (the ACI server, the DB, sibling runs) is reachable. On timeout
+the WHOLE process group is SIGKILLed (a model-written script that ignores
+SIGTERM must not outlive its session — the macOS lesson). The ACI server and
+this sidecar run OUTSIDE the sandbox; the kernel's own workspace processes
+use its OS sandbox as usual (bwrap/Seatbelt, fail-closed). Hidden suites and
 reference solutions are NEVER inside a run workspace; post-hoc suites run
 OUTSIDE the sandbox in a fresh copy. On macOS the round is REFUSED (no
 bwrap) — only --smoke runs here, and the smoke is NOT a measurement.
@@ -87,10 +93,12 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
+
+from bench_sandbox import Endpoint, run_sandboxed, run_with_session  # noqa: E402
 
 #: The OpenCode custom-tool template the runner copies into a run's .opencode/.
 TEMPLATE = ROOT / "scripts/xl_oc_template"
@@ -964,6 +972,25 @@ def _gateway() -> tuple[str, str]:
     return str(opts["baseURL"]), str(opts["apiKey"])
 
 
+def _url_endpoint(base_url: str) -> tuple[str, int]:
+    """(host, port) of a local http URL (the gateway / the sidecar)."""
+    parts = urlsplit(base_url)
+    return parts.hostname or "127.0.0.1", parts.port or 80
+
+
+def _arm_endpoints(arm: str, gateway_url: str, sidecar_url: str) -> list[Endpoint]:
+    """The unix-socket network bridges an arm gets (the sandbox itself has NO
+    network, bench_sandbox): the model gateway for EVERY arm (it must reach
+    its model); the delegation SIDECAR for A2/A3 only (A1 has no delegate
+    tool). Nothing else is reachable — not the ACI server, not the DB, not
+    sibling runs (the rc-bench v2 lesson: an unsandboxed-network run
+    port-scanned localhost and reached the ACI server)."""
+    endpoints: list[Endpoint] = [(*_url_endpoint(gateway_url), "gateway")]
+    if arm != "A1":
+        endpoints.append((*_url_endpoint(sidecar_url), "sidecar"))
+    return endpoints
+
+
 def ensure_oc_template(cache: Path) -> Path:
     """Install the xl tool template into ``cache`` (bun install there — the
     repo template dir stays clean) and return the ready-to-copy template."""
@@ -1040,10 +1067,9 @@ def run_one_cell(
     perturbed: bool,
     ctx: dict[str, Any],
 ) -> dict[str, Any]:
-    """One orchestrator run: materialize, isolate (bwrap), run (with the
-    change@35% pause/resume when perturbed), collect metrics, grade post-hoc."""
-    from rc_bench import _bwrap  # noqa: PLC0415 — reused, NOT weakened (amendment 29)
-
+    """One orchestrator run: materialize, isolate (bwrap, NO network — only
+    the arm's unix-socket bridges), run (with the change@35% pause/resume when
+    perturbed), collect metrics, grade post-hoc (hidden paths only)."""
     root = Path(ctx["runs"]) / f"{arm.lower()}-{fixture.name}-{repeat}-{secrets.token_hex(4)}"
     work = root / "work"
     work.mkdir(parents=True)
@@ -1054,6 +1080,7 @@ def run_one_cell(
     if arm != "A1":
         shutil.copytree(ctx["template"], work / ".opencode")
     env = _opencode_env(root, work, ctx["sidecar_url"], tag)
+    endpoints = _arm_endpoints(arm, base_url, ctx["sidecar_url"])
     prompt = (
         fixture.task
         if arm == "A1"
@@ -1101,19 +1128,19 @@ def run_one_cell(
         if session:
             cmd += ["--session", session]
         cmd += [message]
-        try:
-            with stream.open("w") as out_fh:
-                subprocess.run(
-                    _bwrap(root, ctx["extra_ro"]) + ["--chdir", str(work), "--"] + cmd,
-                    env=env,
-                    stdout=out_fh,
-                    stderr=subprocess.STDOUT,
-                    timeout=cap,
-                    check=False,
-                )
-        except subprocess.TimeoutExpired:
-            return True  # the "pause": the session survives on disk
-        return False
+        with stream.open("w") as out_fh:
+            _rc, expired = run_sandboxed(
+                root,
+                ctx["extra_ro"],
+                cmd,
+                endpoints=endpoints,
+                workdir=work,
+                env=env,
+                timeout=cap,
+                stdout=out_fh,
+                stderr=subprocess.STDOUT,
+            )
+        return expired  # the "pause": the session survives on disk
 
     budget = float(ctx["wall_budget"])
     timed_out = False
@@ -1432,14 +1459,13 @@ def run_smoke(args: argparse.Namespace) -> int:
         print("orchestrator: opencode run (UNSANDBOXED on this Mac — the smoke is not a round)")
         started = time.time()
         with stream.open("w") as out_fh:
-            subprocess.run(
+            _rc, _timed_out = run_with_session(
                 [str(OPENCODE), "run", "--standalone", "--auto", "--format=json", prompt],
                 env=env,
                 cwd=work,
+                timeout=args.wall_budget,
                 stdout=out_fh,
                 stderr=subprocess.STDOUT,
-                timeout=args.wall_budget,
-                check=False,
             )
         wall = round(time.time() - started, 1)
         parsed = parse_opencode_stream(stream)
