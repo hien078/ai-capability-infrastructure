@@ -87,6 +87,11 @@ class TestClassifyRouteRun:
     def test_unknown_client_type_is_never_silently_bucketed(self) -> None:
         assert ur.classify_route_run("some-future-client") == ur.UNKNOWN
 
+    def test_review_and_bench_principals_are_measurement(self) -> None:
+        """Worker review sessions (OpenCode+ACI, principal opencode-review)
+        and the real-client bench plugin (rc-bench) are measurement, not use."""
+        assert {"opencode-review", "rc-bench"} <= ur.MEASUREMENT_PRINCIPAL_IDS
+
     @pytest.mark.parametrize("principal", sorted(ur.MEASUREMENT_PRINCIPAL_IDS))
     def test_known_measurement_principals_are_never_organic(self, principal: str) -> None:
         """AGENTS.md (Mac worker record, 2026-10-02): the Mac's OpenCode

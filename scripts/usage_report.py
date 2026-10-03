@@ -76,7 +76,9 @@ HARNESS_KERNEL = "harness-kernel"
 #: ``opencode`` — without this set they would count ORGANIC and corrupt the
 #: E3 30-day organic count (the branch-decision variable). Extend this set
 #: when a new worker/check principal starts driving a real client surface.
-MEASUREMENT_PRINCIPAL_IDS = frozenset({"opencode-mac-check"})
+#: ``opencode-review`` (2026-10-03): OpenCode+ACI review sessions of bench
+#: fixtures run by Mac workers; ``rc-bench``: the real-client bench's plugin.
+MEASUREMENT_PRINCIPAL_IDS = frozenset({"opencode-mac-check", "opencode-review", "rc-bench"})
 
 #: Honest bounds of this instrument — printed with every report (text and JSON).
 LIMITATIONS: tuple[str, ...] = (
