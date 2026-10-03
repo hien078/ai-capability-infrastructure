@@ -45,17 +45,32 @@ retired); unperturbed runs on the original suite.
 
 ## Fixtures
 
-Five XL fixtures, one per kind from the question — build-software,
-fix-hard-bug, research, project-scale, UI — each: a seed workspace + a
-written task + a HIDDEN acceptance suite kept outside the workspace (post-hoc
-only) + a REQUIREMENT-CHANGE pack (change note + extra hidden tests +
-invalidated-originals list) + a reference solution kept outside the workspace.
-Every fixture must pass `scripts/xl_bench.py verify-fixture` BEFORE the
-round: fail-as-shipped (seed fails the suite), pass-when-solved (reference
-passes BOTH the original and the post-change suites). Hidden suites are
-sized for partial credit: the primary outcome is pass FRACTION
-(passed/(passed+failed+errors)), never only all-or-nothing. Grading is
-objective only (pytest / Playwright / answer keys) — never a model judge.
+SEVEN XL fixtures, one per kind — build-software, UI, fix-hard-bug,
+cross-module feature, refactor/migration, research, project-scale — each: a
+seed workspace + a written task + a HIDDEN acceptance suite kept outside the
+workspace (post-hoc only) + a REQUIREMENT-CHANGE pack (change note + extra
+hidden tests + invalidated-originals list + the reference's own change
+patch + the declared guards) + a PRE-change reference solution kept outside
+the workspace. Every fixture must pass `scripts/xl_bench.py verify-fixture`
+BEFORE the round (the UNIFIED change semantics, job xl-fix 2026-10-03):
+
+- fail-as-shipped: the seed fails BOTH the original and the post-change
+  suites;
+- pass-when-solved: the PRE-change reference passes the original suite;
+- THE BITE: the unpatched reference fails the post-change suite — every
+  change test that is not a declared guard (an unchanged-behavior pin)
+  fails on it;
+- pass-when-solved (perturbed): reference + change patch passes the
+  post-change suite;
+- the reversal is EXACT: the original suite against the patched reference
+  fails exactly the invalidated tests.
+
+Hidden suites are sized for partial credit: the primary outcome is pass
+FRACTION (passed/(passed+failed+errors)), never only all-or-nothing. The
+grade counts ONLY the hidden suite (agent-written test files and conftests
+are stripped from the graded copy; pytest runs on the hidden paths only).
+Grading is objective only (pytest / stdlib HTTP harness / answer keys) —
+never a model judge.
 
 ## Pre-registered hypotheses
 
@@ -69,11 +84,11 @@ objective only (pytest / Playwright / answer keys) — never a model judge.
 ## n per cell
 
 n = 3 repeats per (fixture × arm × perturbation):
-5 fixtures × 3 arms × 2 perturbations × 3 repeats = **90 runs** (30/arm).
+7 fixtures × 3 arms × 2 perturbations × 3 repeats = **126 runs** (42/arm).
 Wall budget per run = the fixture kind's budget, **≤ 3 h** (the design cap);
 the change lands at 35% of that budget. Cells run serially (the shared
 gateway prefers parallel 1 — the E2D lesson); expected campaign length at
-mean 1.5 h/run ≈ 6 days of host time, so the round may be split by fixture
+mean 1.5 h/run ≈ 8 days of host time, so the round may be split by fixture
 kind without changing this plan (each split still runs every arm).
 
 ## Analysis (fixed before data)
@@ -107,6 +122,9 @@ A row is INVALID and excluded when any of:
    server port, the DB (5432/psql), docker, sibling run roots, the bench
    object store, `~/Data/Projects`, or any hidden-suite/reference path.
    (The sidecar port is legitimate — the delegate tool itself uses it.)
+   Structurally prevented for the network since xl-fix: the run sandbox has
+   NO network (`--unshare-net`) and only the arm's endpoints are bridged
+   back in through unix sockets — the scan stays as belt and suspenders.
 3. **HARNESS_CRASH** — the cell raised (recorded as a row with
    invalid_reason=HARNESS_CRASH:<type>).
 4. **NO_TESTS_RAN** — the post-hoc grade collected zero tests (a fixture or

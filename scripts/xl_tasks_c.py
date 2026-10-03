@@ -34,31 +34,35 @@ The two fixtures (one per this job's assignment):
 2. xl-project-postbox (kind "project") — a small multi-component service
    (HTTP API + file storage + background delivery worker + CLI + docs)
    built FROM a product brief (27 numbered requirements), stdlib-only.
-   The brief is deliberately ARCHITECTURE-NEUTRAL where the coming
-   requirement change bites: the original hidden suite is satisfiable by
-   an embedded-worker, cached-stats design AND by a clean shared-store
-   design; the REQUIREMENT CHANGE (operations now mandates API and worker
-   as SEPARATE processes sharing one store, stats correct across
-   processes) is cheap for the clean design and expensive for the embedded/
-   cached one — that is the "wrong early architectural choice is costly"
-   lever the perturbation exploits.
+   The v1 brief MANDATES the single-process model (``postbox serve`` starts
+   the delivery worker in-process; the original suite pins it), and the
+   REQUIREMENT CHANGE reverses exactly that (operations splits the
+   processes: serve = API only, worker = separate process, stats correct
+   across processes) — so an agent that built the v1 design faithfully
+   must REWORK serve and the stats path when the change lands. That is the
+   "wrong early architectural choice is costly" lever the perturbation
+   exploits.
 
 Fixture contract (what scripts/xl_bench.py verify-fixture checks, and what
-tests/unit/test_xl_tasks_c.py proves mechanically here):
+tests/unit/test_xl_tasks_c.py proves mechanically here) — the UNIFIED change
+semantics (job xl-fix, 2026-10-03), identical for all 7 fixtures:
 
 - FAIL-AS-SHIPPED: the seed alone fails the original hidden suite
   (research: no answers.json; project: no postbox package).
-- PASS-WHEN-SOLVED: the reference (kept OUTSIDE the workspace, applied as a
-  file overlay) passes BOTH the original suite AND the post-change suite
-  (original minus invalidated plus the change tests).
-- INVALIDATES semantics — IMPORTANT, this is a harness constraint, not a
-  style choice: xl_bench.verify_fixture requires the ONE reference to pass
-  the FULL original suite (unperturbed case) AND the post-change suite, so
-  the change can only ADD requirements and RETIRE original tests whose
-  coverage the change subsumes; it can never reverse a behavior an
-  original test pins. The retired tests still pass under the final
-  reference — they are listed in change/invalidates.txt because the change
-  supersedes them as the canonical pin of that coverage.
+- PASS-WHEN-SOLVED: the PRE-change reference passes the ORIGINAL suite.
+- THE BITE: the unpatched reference FAILS the post-change suite — every
+  change test that is not a declared GUARD fails on it (research: all 7
+  audit tests — no q15/q16 entries, no quote fields; project: the two
+  separation tests, which the v1 embedded-worker design cannot satisfy).
+- PASS-WHEN-SOLVED (perturbed): reference + change/patch passes the
+  post-change suite (original minus invalidates plus the change tests).
+- THE REVERSAL IS EXACT: each invalidated original test FAILS on the
+  patched reference (research: the withdrawn q07 entry is REMOVED, so
+  test_q07_latency.py fails; project: serve no longer embeds the worker,
+  so test_serve_embeds.py fails) and no other original test does.
+- GUARDS: change tests EXPECTED to pass pre-patch, declared and auditable
+  (project: the four separation-adjacent tests the embedded worker
+  satisfies from inside serve; research: none).
 - Hidden tests are NEVER inside the seed workspace; the task text reveals
   no hidden test; all paths are safe relative paths.
 
@@ -2128,8 +2132,9 @@ top of whatever you have already produced.
 
 1. q07 is WITHDRAWN. The 2026-02 and 2026-03 rows of data/latency.csv are
    under investigation (the probe firmware was misconfigured for those
-   months), so the question is no longer graded. If you already answered
-   it, leave the entry in place — it is not graded either way.
+   months), so the question is no longer graded. REMOVE its entry from
+   answers.json — a withdrawn question must not ship an answer (the audit
+   greps the deliverable for stale entries).
 
 2. Two audit questions are ADDED (answer them into the same answers.json,
    ids q15 and q16):
@@ -2359,11 +2364,30 @@ def _research_change_tests() -> dict[str, str]:
 
 
 def _research_reference() -> dict[str, str]:
-    """The reference solution: answers.json with every question answered
-    (the audit questions and quotes included — the reference is the FINAL
-    post-change state, which is what xl_bench.verify_fixture requires)."""
+    """The PRE-change reference solution: answers.json answering q01–q14
+    (exactly the original QUESTIONS.md set) with answers + citations and NO
+    quote fields — the quote requirement arrives with the change. The PATCH
+    (below) is the same deliverable after the audit addendum."""
+    answers = [
+        {
+            "id": qid,
+            "answer": _RESEARCH_KEY[qid]["answer"],
+            "citations": list(_RESEARCH_KEY[qid]["citations"]),
+        }
+        for qid in sorted(_RESEARCH_KEY)
+    ]
+    return {"answers.json": json.dumps({"answers": answers}, indent=1) + "\n"}
+
+
+def _research_patch() -> dict[str, str]:
+    """The REFERENCE's own implementation of the audit addendum, as a
+    full-file overlay over the pre-change reference: q15/q16 answered, the
+    audited quotes added, and the WITHDRAWN q07 entry removed — the
+    invalidated test_q07_latency.py fails on this (the reversal is real)."""
     answers: list[dict[str, Any]] = []
     for qid in sorted(_RESEARCH_KEY):
+        if qid == "q07":
+            continue  # withdrawn — removed from the deliverable
         entry: dict[str, Any] = {
             "id": qid,
             "answer": _RESEARCH_KEY[qid]["answer"],
@@ -2394,7 +2418,14 @@ def _research_task() -> dict[str, Any]:
         "change": {
             "note": _RESEARCH_CHANGE_NOTE,
             "hidden_tests": _research_change_tests(),
+            # the withdrawn q07 test is RETIRED from the post-change grade —
+            # and it FAILS on the patch (the entry is removed): the reversal.
             "invalidates": ["test_q07_latency.py"],
+            # the reference's own implementation of the audit addendum.
+            "patch": _research_patch(),
+            # no guards: every change test bites on the pre-change reference
+            # (no q15/q16 entries, no quote fields).
+            "guards": [],
         },
         "reference": _research_reference(),
         "expected_hours": 2.0,
@@ -2427,8 +2458,12 @@ Storage on the local filesystem. Operated from the command line.
 ## Components you must build
 
 1. `postbox/` — the Python package, importable from the repo root.
-2. `postbox serve` — the HTTP API server (the main process).
-3. The delivery worker — the background job that delivers queued messages.
+2. `postbox serve` — the HTTP API server (the main process). serve runs the
+   WHOLE service: it starts the delivery worker IN-PROCESS (a background
+   thread is fine) — running Postbox is ONE command, one process.
+3. The delivery worker — the background job that delivers queued messages;
+   `postbox serve` starts it in-process, and `postbox worker` also runs it
+   standalone (for operators who want it separate).
 4. `postbox` CLI — the operator commands (`python -m postbox ...`).
 5. `docs/` — API reference + operations guide.
 6. `README.md` — what it is, quickstart, config table.
@@ -2585,11 +2620,13 @@ Update whatever the change makes wrong, and keep the docs truthful.
 
 # ---------------------------------------------------------------------------
 # The Postbox REFERENCE solution (kept OUTSIDE the workspace; the bench
-# overlays it on the seed to prove pass-when-solved). This is the FINAL
-# post-change state: serve = API only (no embedded worker), the worker is
-# a separate process, stats scan the store per request (correct across
-# processes). Stdlib only.
-# ---------------------------------------------------------------------------
+# overlays it on the seed to prove pass-when-solved). This is the SEPARATED
+# design — serve = API only (no embedded worker), the worker is a separate
+# process, stats scan the store per request (correct across processes).
+# Stdlib only. It is the CHANGE PATCH's target: the PRE-change reference
+# (what the v1 brief mandates) is the NAIVE single-process design below,
+# and the patch reverses exactly the naive bits.
+# -----------------------------------------------------------------------------
 
 _POSTBOX_REFERENCE: dict[str, str] = {}
 
@@ -4147,6 +4184,36 @@ def test_malformed_config_uses_defaults(tmp_path):
         assert body["status"] == "queued"
 """)
 
+#: v1's single-process model, pinned by the ORIGINAL suite: the brief
+#: mandates that serve starts the delivery worker IN-PROCESS, so a message
+#: enqueued with ONLY serve running is delivered (and stats see it). The
+#: REQUIREMENT CHANGE reverses exactly this — both tests below are
+#: INVALIDATED by it (they fail on the separated design) and the change's
+#: own tests pin the reversal.
+_POSTBOX_HIDDEN["test_serve_embeds.py"] = _pb("""
+def test_serve_delivers_without_worker(tmp_path):
+    # v1 (the brief): serve runs the WHOLE service — the delivery worker is
+    # embedded, so a message enqueued with ONLY serve running is delivered.
+    home = tmp_path / "home"
+    with Serve(home) as api:
+        _s, _h, body = _enqueue(api.base, recipient="ops@example", payload="embedded")
+        assert _wait_for(lambda: _delivered(api, body["id"]))
+        assert _spool_file(home, "ops@example", body["id"]).is_file()
+
+
+def test_stats_refresh_without_worker(tmp_path):
+    # v1: with only serve running, stats reflect the embedded worker's
+    # deliveries in the same process.
+    home = tmp_path / "home"
+    with Serve(home) as api:
+        _s, _h, body = _enqueue(api.base, recipient="ops@example", payload="stats")
+        assert _wait_for(lambda: _delivered(api, body["id"]))
+        status, _headers, stats = _req(api.base, "GET", "/v1/stats")
+        assert status == 200
+        assert stats["delivered"] == 1
+        assert stats["queued"] == 0
+""")
+
 #: The CHANGE pack's extra hidden tests: the process-separation contract.
 #: These are the tests that punish the embedded-worker / cached-stats
 #: designs — the original suite is deliberately neutral on both.
@@ -4247,6 +4314,68 @@ def test_worker_restart_continues(tmp_path):
 """)
 
 
+def _postbox_naive_overlays() -> dict[str, str]:
+    """The v1 single-process design (what the ORIGINAL brief mandates): serve
+    embeds the delivery worker as a background thread, and stats come from an
+    in-process cache warmed at startup and updated by this process's own
+    writes. Generated from the SEPARATED reference text by exact string
+    anchors (the same anchors tests/unit/test_xl_tasks_c.py pins) so the two
+    designs cannot drift apart. The CHANGE PATCH reverses exactly these
+    overlays — that is the fixture's rework lever."""
+    store = _POSTBOX_REFERENCE["postbox/store.py"]
+    server = _POSTBOX_REFERENCE["postbox/server.py"]
+    for old, new in (
+        (
+            '''    def stats(self) -> dict[str, int]:
+        """Counts per status, computed from the store on EVERY call (R7) —
+        never cached, so a separately-running worker's writes are visible."""
+        counts = {status: 0 for status in STATUSES}
+        for message in self.all_messages():
+            status = message.get("status")
+            if status in counts:
+                counts[status] += 1
+        return counts''',
+            """    def stats(self) -> dict[str, int]:
+        counts = {status: 0 for status in STATUSES}
+        for status in self._status.values():
+            if status in counts:
+                counts[status] += 1
+        return counts""",
+        ),
+        (
+            """        self.messages.mkdir(parents=True, exist_ok=True)
+        self.idempotency.mkdir(parents=True, exist_ok=True)""",
+            """        self.messages.mkdir(parents=True, exist_ok=True)
+        self.idempotency.mkdir(parents=True, exist_ok=True)
+        self._status = {m["id"]: m.get("status") for m in self.all_messages()}""",
+        ),
+        (
+            """    def put(self, message: dict[str, Any]) -> None:
+        self.write_atomic(self._path(message["id"]), message)""",
+            """    def put(self, message: dict[str, Any]) -> None:
+        self.write_atomic(self._path(message["id"]), message)
+        self._status[message["id"]] = message.get("status")""",
+        ),
+    ):
+        assert old in store, "naive anchor missing in postbox/store.py"
+        store = store.replace(old, new)
+    old_serve = """def serve(store: Store, port: int) -> None:
+    httpd = create_server(store, port)"""
+    new_serve = """def serve(store: Store, port: int) -> None:
+    import threading
+
+    from postbox.config import load_config
+    from postbox.delivery import run_worker
+
+    threading.Thread(
+        target=run_worker, args=(store, load_config(store.home)), daemon=True
+    ).start()
+    httpd = create_server(store, port)"""
+    assert old_serve in server, "naive anchor missing in postbox/server.py"
+    server = server.replace(old_serve, new_serve)
+    return {"postbox/store.py": store, "postbox/server.py": server}
+
+
 def _postbox_task() -> dict[str, Any]:
     return {
         "name": "xl-project-postbox",
@@ -4257,9 +4386,32 @@ def _postbox_task() -> dict[str, Any]:
         "change": {
             "note": _POSTBOX_CHANGE_NOTE,
             "hidden_tests": {"test_change_separation.py": _POSTBOX_HIDDEN_CHANGE},
-            "invalidates": ["test_stats.py", "test_worker_cli.py"],
+            # the v1 embedded-worker tests are RETIRED from the post-change
+            # grade — and they FAIL on the patch (serve no longer embeds the
+            # worker): the change REVERSES the brief's single-process model.
+            "invalidates": ["test_serve_embeds.py"],
+            # the reference's own implementation of the change: the
+            # SEPARATED design (serve = API only, stats scan per request).
+            "patch": {
+                "postbox/store.py": _POSTBOX_REFERENCE["postbox/store.py"],
+                "postbox/server.py": _POSTBOX_REFERENCE["postbox/server.py"],
+            },
+            # guards: the change tests the v1 design satisfies WITHOUT
+            # rework (the embedded worker delivers from inside serve, so
+            # the worker-CLI/pickup/API-while-down/restart tests pass under
+            # both designs). The change's BITE is carried by the two
+            # separation tests, which fail on the v1 design.
+            "guards": [
+                "test_change_separation.py::test_worker_subprocess_delivers",
+                "test_change_separation.py::test_worker_picks_up_enqueued_while_down",
+                "test_change_separation.py::test_api_serves_while_worker_down",
+                "test_change_separation.py::test_worker_restart_continues",
+            ],
         },
-        "reference": dict(_POSTBOX_REFERENCE),
+        # the PRE-change reference: the v1 single-process design (the brief
+        # mandates it; the original suite — test_serve_embeds.py included —
+        # pins it). The patch above turns it into the separated design.
+        "reference": {**_POSTBOX_REFERENCE, **_postbox_naive_overlays()},
         "expected_hours": 2.5,
     }
 
@@ -4283,8 +4435,10 @@ def write_fixture(task: dict[str, Any], out_dir: Path) -> Path:
         <out_dir>/hidden/<relpath>      the ORIGINAL hidden suite (post-hoc only)
         <out_dir>/change/CHANGE_NOTE.md  sent as the 35% perturbation message
         <out_dir>/change/hidden/<relpath>  the extra tests encoding the change
-        <out_dir>/change/invalidates.txt   original hidden files the change retires
-        <out_dir>/reference/<relpath>  the reference solution (pass-when-solved)
+        <out_dir>/change/invalidates.txt   original tests the change RETIRES
+        <out_dir>/change/patch/<relpath>   the reference's change implementation
+        <out_dir>/change/guards.txt        change tests expected to pass pre-patch
+        <out_dir>/reference/<relpath>  the PRE-change reference solution
 
     Nothing here ever enters a run workspace: the bench copies workspace/
     in and grades post-hoc from hidden/ + change/hidden/.
@@ -4311,6 +4465,14 @@ def write_fixture(task: dict[str, Any], out_dir: Path) -> Path:
         target.write_text(content, encoding="utf-8")
     (out / "change" / "invalidates.txt").write_text(
         "\n".join(change["invalidates"]) + ("\n" if change["invalidates"] else ""),
+        encoding="utf-8",
+    )
+    for rel, content in change["patch"].items():
+        target = out / "change" / "patch" / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    (out / "change" / "guards.txt").write_text(
+        "\n".join(change["guards"]) + ("\n" if change["guards"] else ""),
         encoding="utf-8",
     )
     for rel, content in task["reference"].items():

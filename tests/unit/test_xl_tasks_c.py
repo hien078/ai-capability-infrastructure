@@ -1,25 +1,27 @@
 """The XL fixtures (builder "c") are real fixtures — verified here
 mechanically, no model, no network, no DB (the §34 discipline, applied to
-fixture-building itself), against the contract scripts/xl_bench.py (the
-xl-harness job) enforces on disk:
+fixture-building itself), through the REAL harness grader
+(``xl_bench.hidden_suite_result`` — hidden paths only, agent tests
+stripped) against the UNIFIED change semantics (job xl-fix, 2026-10-03):
 
 - FAIL-AS-SHIPPED: the seed alone fails the ORIGINAL hidden suite.
-- PASS-WHEN-SOLVED: the reference (kept outside the workspace) passes BOTH
-  the original suite AND the post-change suite (original minus invalidated
-  plus the change tests) — the xl_bench.verify_fixture requirement that
-  forces the reference to be the FINAL post-change state.
+- PASS-WHEN-SOLVED: the PRE-change reference passes the ORIGINAL suite.
+- THE BITE: the unpatched reference fails the POST-CHANGE suite (original
+  minus invalidates plus the change tests) — every change test that is not
+  a declared GUARD has a failing parametrization.
+- PASS-WHEN-SOLVED (perturbed): reference + change/patch passes the
+  post-change suite.
+- THE REVERSAL IS EXACT: the original suite against the PATCHED reference
+  fails exactly the invalidated tests.
 - The hidden tests are NEVER inside the seed; the task text reveals no
   hidden test; every path is a safe relative path.
 - The research answer key is DERIVED from the same world model that renders
   the corpus (corpus and key cannot drift) — proven here by RECOMPUTING the
   CSV answers from the rendered CSV text itself.
-- The postbox ORIGINAL suite is ARCHITECTURE-NEUTRAL where the requirement
-  change bites: an embedded-worker + cached-stats implementation passes it
-  (proven here by patching the reference into exactly that naive design),
-  and the CHANGE pack is what punishes that design — that asymmetry is the
-  fixture's whole point (the perturbation must be able to arrive mid-run
-  and cost re-planning, so the original suite must not have forced the
-  right architecture already).
+- The postbox v1 design (serve embeds the worker, stats cached in-process)
+  is what the BRIEF mandates and the original suite pins; the reference IS
+  that design (generated from the separated text by anchors) and the change
+  patch reverses exactly it — the rework lever the perturbation exploits.
 
 §34 caveat for any round run on these fixtures: author-built, small n,
 one model — directional only.
@@ -28,7 +30,6 @@ one model — directional only.
 import json
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -37,19 +38,19 @@ from typing import Any
 SCRIPTS = Path(__file__).resolve().parent.parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import xl_bench as xb  # noqa: E402
 import xl_tasks_c as xlc  # noqa: E402
 
 PY = sys.executable
-NOISE = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".git", "node_modules")
 RESEARCH = next(t for t in xlc.TASKS if t["kind"] == "research")
 POSTBOX = next(t for t in xlc.TASKS if t["kind"] == "project")
 
 
 # ---------------------------------------------------------------------------
-# Materialize + grade — a faithful mirror of xl_bench.hidden_suite_result
-# (the consumer's exact mechanics: fresh copy, hidden tests copied in at
-# their relative paths, invalidated originals deleted for perturbed runs,
-# pytest -q, pass fraction from the summary line).
+# Materialize + grade — through the REAL harness grader
+# (xb.hidden_suite_result: fresh copy, agent tests stripped, hidden tests
+# copied in at their relative paths, invalidated originals removed/deselected,
+# pytest on the hidden paths only, pass fraction + FAILED ids from -rf).
 # ---------------------------------------------------------------------------
 
 
@@ -68,69 +69,129 @@ def _materialize(task: dict[str, Any], root: Path, *, reference: bool = False) -
     return work
 
 
+def _apply_patch(task: dict[str, Any], work: Path) -> None:
+    """The change patch: a full-file overlay over the reference."""
+    for rel, content in task["change"]["patch"].items():
+        target = work / rel
+        assert target.is_file(), f"patch targets a non-reference file: {rel}"
+        target.write_text(content, encoding="utf-8")
+
+
 def _grade(work: Path, task: dict[str, Any], *, perturbed: bool) -> dict[str, Any]:
-    fresh = work.parent / f"{work.name}-posthoc-{task['name'][:12]}"
-    shutil.copytree(work, fresh, ignore=shutil.ignore_patterns(*NOISE))
-    try:
-        sources = [task["hidden_tests"]]
+    """One hidden-suite grade through the REAL harness mechanics."""
+    with tempfile.TemporaryDirectory(prefix="xl-c-hidden-") as hidden_tmp:
+        hidden = Path(hidden_tmp) / "hidden"
+        for rel, content in task["hidden_tests"].items():
+            target = hidden / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        extra = None
         if perturbed:
-            sources.append(task["change"]["hidden_tests"])
-        for source in sources:
-            for rel, content in source.items():
-                (fresh / rel).parent.mkdir(parents=True, exist_ok=True)
-                (fresh / rel).write_text(content, encoding="utf-8")
-        if perturbed:
-            for rel in task["change"]["invalidates"]:
-                (fresh / rel).unlink(missing_ok=True)
-        proc = subprocess.run(
-            [PY, "-m", "pytest", "-q", "--tb=no", "-p", "no:cacheprovider"],
-            cwd=fresh,
-            capture_output=True,
-            text=True,
-            timeout=900,
-            check=False,
-        )
-        out = proc.stdout + proc.stderr
-
-        def _count(pattern: str) -> int:
-            found = re.search(pattern, out)
-            return int(found.group(1)) if found else 0
-
-        passed = _count(r"(\d+) passed")
-        failed = _count(r"(\d+) failed")
-        errors = _count(r"(\d+) error")
-        total = passed + failed + errors
-        return {
-            "fraction": round(passed / total, 4) if total else 0.0,
-            "passed": passed,
-            "failed": failed,
-            "errors": errors,
-            "total": total,
-            "failed_names": sorted(re.findall(r"^FAILED (\S+)", out, re.M)),
-            "tail": out[-400:],
-        }
-    finally:
-        shutil.rmtree(fresh, ignore_errors=True)
+            extra = Path(hidden_tmp) / "change"
+            for rel, content in task["change"]["hidden_tests"].items():
+                target = extra / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+        seed = Path(tempfile.mkdtemp(prefix="xl-c-seed-")) / "workspace"
+        for rel, content in task["seed"].items():
+            target = seed / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        try:
+            return xb.hidden_suite_result(
+                work,
+                hidden,
+                extra_hidden=extra,
+                invalidated=task["change"]["invalidates"] if perturbed else None,
+                seed_dir=seed,
+            )
+        finally:
+            shutil.rmtree(seed.parent, ignore_errors=True)
 
 
 def _assert_case(
     task: dict[str, Any], *, perturbed: bool, reference: bool, expect_pass: bool
 ) -> dict[str, Any]:
-    """One xl_bench.verify_fixture case, as a reusable assertion."""
+    """One unified verify_fixture case, as a reusable assertion."""
     with tempfile.TemporaryDirectory() as tmp:
         work = _materialize(task, Path(tmp), reference=reference)
         result = _grade(work, task, perturbed=perturbed)
     label = f"{task['name']} reference={reference} perturbed={perturbed}"
-    assert result["total"] > 0, f"{label}: zero tests ran (a fixture bug, not a result)"
+    assert result["passed"] + result["failed"] + result["errors"] > 0, (
+        f"{label}: zero tests ran (a fixture bug, not a result)"
+    )
     if expect_pass:
-        assert result["fraction"] == 1.0, (
-            f"{label}: expected pass-when-solved, got {result['fraction']}:\n{result['tail']}"
+        assert result["pass_fraction"] == 1.0, (
+            f"{label}: expected pass-when-solved, "
+            f"got {result['pass_fraction']}:\n{result['summary_tail']}"
         )
     else:
-        assert result["fraction"] < 1.0, (
-            f"{label}: expected fail-as-shipped, got {result['fraction']} (not a fixture)"
+        assert result["pass_fraction"] < 1.0, (
+            f"{label}: expected fail, got {result['pass_fraction']} (not a fixture)"
         )
     return result
+
+
+def _change_ids(task: dict[str, Any]) -> set[str]:
+    return {
+        f"{Path(rel).name}::{name}"
+        for rel, content in task["change"]["hidden_tests"].items()
+        for name in re.findall(r"^def (test_\w+)", content, re.M)
+    }
+
+
+def _assert_unified_matrix(task: dict[str, Any]) -> None:
+    """The SIX unified verify_fixture cases for one fixture (job xl-fix):
+    seed fails both suites; the PRE-change reference passes the original
+    suite; THE BITE (the unpatched reference fails the post-change suite,
+    every non-guard change test failing); reference+patch passes the
+    post-change suite; and the reversal is EXACT (the original suite on the
+    patch fails exactly the invalidated tests)."""
+    # 1. fail-as-shipped (original suite)
+    _assert_case(task, perturbed=False, reference=False, expect_pass=False)
+    # 2. pass-when-solved (original suite)
+    _assert_case(task, perturbed=False, reference=True, expect_pass=True)
+    # 3. fail-as-shipped (post-change suite)
+    _assert_case(task, perturbed=True, reference=False, expect_pass=False)
+    # 4. THE BITE — every non-guard change test fails on the unpatched reference
+    bite = _assert_case(task, perturbed=True, reference=True, expect_pass=False)
+    change_ids = _change_ids(task)
+    guards = set(task["change"]["guards"])
+    assert guards <= change_ids, task["name"]
+    not_biting = {
+        cid
+        for cid in change_ids - guards
+        if not any(xb._id_covers(cid, failed) for failed in bite["failed_ids"])
+    }
+    assert not not_biting, (
+        f"{task['name']}: change tests that do not bite pre-patch "
+        f"(and are not guards): {sorted(not_biting)}"
+    )
+    # 5. pass-when-solved (reference + patch, post-change suite)
+    with tempfile.TemporaryDirectory() as tmp:
+        work = _materialize(task, Path(tmp), reference=True)
+        _apply_patch(task, work)
+        result = _grade(work, task, perturbed=True)
+    assert result["pass_fraction"] == 1.0, (
+        f"{task['name']}: reference+patch fails the post-change suite:\n{result['summary_tail']}"
+    )
+    # 6. the reversal is EXACT — the original suite on the PATCHED reference
+    #    fails exactly the invalidated tests (each one, and nothing else)
+    with tempfile.TemporaryDirectory() as tmp:
+        work = _materialize(task, Path(tmp), reference=True)
+        _apply_patch(task, work)
+        reversal = _grade(work, task, perturbed=False)
+    failed = set(reversal["failed_ids"])
+    for failed_id in failed:
+        assert any(
+            xb._id_covers(entry, failed_id) for entry in task["change"]["invalidates"]
+        ), f"{task['name']}: the reversal over-reaches: {failed_id}"
+    for entry in task["change"]["invalidates"]:
+        file_name = entry if "::" not in entry else entry.split("::", 1)[0]
+        for name in re.findall(r"^def (test_\w+)", task["hidden_tests"][file_name], re.M):
+            assert any(
+                xb._id_covers(f"{file_name}::{name}", failed_id) for failed_id in failed
+            ), f"{task['name']}: invalidated {file_name}::{name} does not fail on the patch"
 
 
 def _collapse(text: str) -> str:
@@ -185,6 +246,8 @@ class TestFixtureContract:
             assert isinstance(change["note"], str) and len(change["note"]) > 100, task["name"]
             assert isinstance(change["hidden_tests"], dict) and change["hidden_tests"], task["name"]
             assert isinstance(change["invalidates"], list), task["name"]
+            assert isinstance(change["patch"], dict) and change["patch"], task["name"]
+            assert isinstance(change["guards"], list), task["name"]
 
     def test_all_paths_are_safe_and_relative(self) -> None:
         for task in xlc.TASKS:
@@ -255,13 +318,23 @@ class TestFixtureContract:
             change = set(task["change"]["hidden_tests"])
             assert change and not (change & original), task["name"]
             for rel in task["change"]["invalidates"]:
-                assert rel in original, f"{task['name']}: invalidates a non-original test {rel}"
+                assert rel.rsplit("::", 1)[0] in original, (
+                    f"{task['name']}: invalidates a non-original test {rel}"
+                )
             assert task["change"]["invalidates"], task["name"]
+            # the patch is a full-file overlay over the reference
+            known = set(task["seed"]) | set(task["reference"])
+            for rel in task["change"]["patch"]:
+                assert rel in known, f"{task['name']}: patch targets an unknown file {rel}"
+            # guards are real change tests
+            for guard in task["change"]["guards"]:
+                assert guard in _change_ids(task), f"{task['name']}: unknown guard {guard}"
 
     def test_write_fixture_layout_matches_the_harness_contract(self) -> None:
         """write_fixture materializes exactly the on-disk layout
         scripts/xl_bench.py consumes (workspace/ + TASK.md + hidden/ +
-        change/{CHANGE_NOTE.md,hidden/,invalidates.txt} + reference/)."""
+        change/{CHANGE_NOTE.md,hidden/,invalidates.txt,patch/,guards.txt} +
+        reference/)."""
         for task in xlc.TASKS:
             with tempfile.TemporaryDirectory() as tmp:
                 out = xlc.write_fixture(task, Path(tmp) / task["name"])
@@ -272,6 +345,7 @@ class TestFixtureContract:
                     task["change"]["note"]
                 )
                 assert (out / "change" / "invalidates.txt").read_text(encoding="utf-8").strip()
+                assert (out / "change" / "guards.txt").is_file(), task["name"]
                 assert (out / "reference").is_dir(), task["name"]
                 for rel, content in task["seed"].items():
                     assert (out / "workspace" / rel).read_text(encoding="utf-8") == content
@@ -279,6 +353,11 @@ class TestFixtureContract:
                     assert (out / "hidden" / rel).read_text(encoding="utf-8") == content
                 for rel, content in task["change"]["hidden_tests"].items():
                     assert (out / "change" / "hidden" / rel).read_text(encoding="utf-8") == content
+                for rel, content in task["change"]["patch"].items():
+                    assert (out / "change" / "patch" / rel).read_text(encoding="utf-8") == content
+                assert (out / "change" / "guards.txt").read_text(encoding="utf-8").split() == (
+                    task["change"]["guards"]
+                )
                 for rel, content in task["reference"].items():
                     assert (out / "reference" / rel).read_text(encoding="utf-8") == content
 
@@ -413,11 +492,28 @@ class TestResearchFixture:
             assert f"## {qid}" not in questions, f"{qid} must arrive only via the change note"
             assert qid in RESEARCH["change"]["note"], f"{qid} missing from the change note"
 
-    def test_reference_answers_every_question_with_the_audited_quotes(self) -> None:
+    def test_reference_answers_the_original_set_without_quotes(self) -> None:
+        """The PRE-change reference: exactly q01–q14 (the original QUESTIONS.md
+        set), answers + citations, NO quote fields (the quote requirement
+        arrives with the change) — so the change tests bite on it."""
         reference = json.loads(RESEARCH["reference"]["answers.json"])
         entries = {a["id"]: a for a in reference["answers"]}
+        assert set(entries) == set(xlc._RESEARCH_KEY), sorted(entries)
+        for qid, entry in entries.items():
+            assert entry["answer"] == xlc._RESEARCH_KEY[qid]["answer"], qid
+            assert set(entry["citations"]) >= set(xlc._RESEARCH_KEY[qid]["citations"]), qid
+            assert "quote" not in entry, qid
+
+    def test_the_patch_answers_every_living_question_with_the_quotes(self) -> None:
+        """The PATCH (the reference's own audit implementation): every
+        question except the WITHDRAWN q07, with the audited quotes."""
+        patched = json.loads(RESEARCH["change"]["patch"]["answers.json"])
+        entries = {a["id"]: a for a in patched["answers"]}
+        assert "q07" not in entries, "the withdrawn q07 must be removed by the patch"
         for source in (xlc._RESEARCH_KEY, xlc._RESEARCH_CHANGE_KEY):
             for qid, entry in source.items():
+                if qid == "q07":
+                    continue
                 assert qid in entries, qid
                 assert entries[qid]["answer"] == entry["answer"], qid
                 assert set(entries[qid]["citations"]) >= set(entry["citations"]), qid
@@ -426,7 +522,7 @@ class TestResearchFixture:
 
     def test_fail_as_shipped_original(self) -> None:
         result = _assert_case(RESEARCH, perturbed=False, reference=False, expect_pass=False)
-        assert result["failed"] + result["errors"] == result["total"]
+        assert result["passed"] == 0, "no answers.json ships: every test must fail"
 
     def test_pass_with_reference_original(self) -> None:
         _assert_case(RESEARCH, perturbed=False, reference=True, expect_pass=True)
@@ -434,8 +530,11 @@ class TestResearchFixture:
     def test_fail_as_shipped_post_change(self) -> None:
         _assert_case(RESEARCH, perturbed=True, reference=False, expect_pass=False)
 
-    def test_pass_with_reference_post_change(self) -> None:
-        _assert_case(RESEARCH, perturbed=True, reference=True, expect_pass=True)
+    def test_the_unified_change_matrix(self) -> None:
+        """All six unified cases (incl. the bite and the exact reversal —
+        the withdrawn q07 entry is REMOVED by the patch, so the invalidated
+        test_q07_latency.py fails on it)."""
+        _assert_unified_matrix(RESEARCH)
 
 
 # ---------------------------------------------------------------------------
@@ -493,7 +592,7 @@ class TestPostboxFixture:
 
     def test_fail_as_shipped_original(self) -> None:
         result = _assert_case(POSTBOX, perturbed=False, reference=False, expect_pass=False)
-        assert result["passed"] == 0, f"tests passing on the bare brief: {result['failed_names']}"
+        assert result["passed"] == 0, f"tests passing on the bare brief: {result['failed_ids']}"
 
     def test_pass_with_reference_original(self) -> None:
         _assert_case(POSTBOX, perturbed=False, reference=True, expect_pass=True)
@@ -501,111 +600,62 @@ class TestPostboxFixture:
     def test_fail_as_shipped_post_change(self) -> None:
         _assert_case(POSTBOX, perturbed=True, reference=False, expect_pass=False)
 
-    def test_pass_with_reference_post_change(self) -> None:
-        _assert_case(POSTBOX, perturbed=True, reference=True, expect_pass=True)
+    def test_the_unified_change_matrix(self) -> None:
+        """All six unified cases: the v1 single-process reference passes the
+        original suite (embeds tests included), the change BITES via the two
+        separation tests (the guards are the four the embedded worker
+        satisfies), reference+patch passes the post-change suite, and the
+        reversal is exact (test_serve_embeds.py fails on the separated patch
+        and nothing else does)."""
+        _assert_unified_matrix(POSTBOX)
+
+    def test_the_brief_mandates_the_v1_single_process_model(self) -> None:
+        """The rework lever, stated in the SEED: the v1 brief mandates the
+        embedded worker (the change reverses a BRIEFED behavior, not just a
+        design choice), and the original suite pins it."""
+        brief = POSTBOX["seed"]["BRIEF.md"]
+        assert "starts the delivery worker IN-PROCESS" in brief
+        assert "ONE command, one process" in brief
+        assert "test_serve_embeds.py" in POSTBOX["hidden_tests"]
+        embeds = POSTBOX["hidden_tests"]["test_serve_embeds.py"]
+        assert "test_serve_delivers_without_worker" in embeds
+        assert "test_stats_refresh_without_worker" in embeds
+
+    def test_the_reference_is_the_v1_design_and_the_patch_reverses_it(self) -> None:
+        """The PRE-change reference is the naive single-process design
+        (serve embeds the worker thread, stats cached in-process); the patch
+        reverses exactly those two files to the separated design."""
+        reference = POSTBOX["reference"]
+        assert "run_worker" in reference["postbox/server.py"], "serve must embed the worker"
+        assert "self._status" in reference["postbox/store.py"], "stats must be cached"
+        patch = POSTBOX["change"]["patch"]
+        assert "run_worker" not in patch["postbox/server.py"], "serve must be API only"
+        assert "self._status" not in patch["postbox/store.py"], "stats must scan per request"
+        # the patch is a full-file overlay over the reference's own files
+        for rel in patch:
+            assert rel in reference, f"patch targets a non-reference file: {rel}"
 
 
-#: The naive early-architecture patches: applied to the reference they
-#: produce exactly the wrong-but-plausible design the change punishes —
-#: serve embeds a worker thread, stats come from an in-memory cache warmed
-#: at startup and updated only by this process's writes.
-_NAIVE_PATCHES: list[tuple[str, str, str]] = [
-    (
-        "postbox/store.py",
-        '''    def stats(self) -> dict[str, int]:
-        """Counts per status, computed from the store on EVERY call (R7) —
-        never cached, so a separately-running worker's writes are visible."""
-        counts = {status: 0 for status in STATUSES}
-        for message in self.all_messages():
-            status = message.get("status")
-            if status in counts:
-                counts[status] += 1
-        return counts''',
-        """    def stats(self) -> dict[str, int]:
-        counts = {status: 0 for status in STATUSES}
-        for status in self._status.values():
-            if status in counts:
-                counts[status] += 1
-        return counts""",
-    ),
-    (
-        "postbox/store.py",
-        """        self.messages.mkdir(parents=True, exist_ok=True)
-        self.idempotency.mkdir(parents=True, exist_ok=True)""",
-        """        self.messages.mkdir(parents=True, exist_ok=True)
-        self.idempotency.mkdir(parents=True, exist_ok=True)
-        self._status = {m["id"]: m.get("status") for m in self.all_messages()}""",
-    ),
-    (
-        "postbox/store.py",
-        """    def put(self, message: dict[str, Any]) -> None:
-        self.write_atomic(self._path(message["id"]), message)""",
-        """    def put(self, message: dict[str, Any]) -> None:
-        self.write_atomic(self._path(message["id"]), message)
-        self._status[message["id"]] = message.get("status")""",
-    ),
-    (
-        "postbox/server.py",
-        """def serve(store: Store, port: int) -> None:
-    httpd = create_server(store, port)""",
-        """def serve(store: Store, port: int) -> None:
-    import threading
-
-    from postbox.config import load_config
-    from postbox.delivery import run_worker
-
-    threading.Thread(
-        target=run_worker, args=(store, load_config(store.home)), daemon=True
-    ).start()
-    httpd = create_server(store, port)""",
-    ),
-]
+#: The v1 single-process design is GENERATED (xl_tasks_c._postbox_naive_overlays)
+#: from the separated reference text by exact string anchors — the same
+#: anchors this file used to patch in the old neutrality proof. If the
+#: separated reference is ever edited without updating the anchors, the
+#: fixture build breaks loudly (by design: it forces a conscious
+#: re-verification of the v1↔separated pair).
 
 
-class TestPostboxDesignNeutrality:
-    def test_the_original_suite_is_architecture_neutral_and_the_change_bites(self) -> None:
-        """The fixture's core claim, proven mechanically: the NAIVE design
-        (embedded worker + cached stats) passes the ORIGINAL suite untouched
-        (so the change can still arrive mid-run and cost re-planning), and
-        the CHANGE pack is what punishes it — exactly the separation tests,
-        nothing else. If this test fails after editing the reference or the
-        suites, the neutrality contract broke: fix the fixture, not the
-        assertion."""
-        with tempfile.TemporaryDirectory() as tmp:
-            work = _materialize(POSTBOX, Path(tmp), reference=True)
-            for rel, old, new in _NAIVE_PATCHES:
-                path = work / rel
-                text = path.read_text(encoding="utf-8")
-                assert old in text, f"naive patch anchor missing in {rel}"
-                path.write_text(text.replace(old, new), encoding="utf-8")
-
-            original = _grade(work, POSTBOX, perturbed=False)
-            assert original["total"] > 0
-            assert original["fraction"] == 1.0, (
-                "the ORIGINAL suite punishes the naive design — neutrality broke:\n"
-                f"{original['failed_names']}\n{original['tail']}"
+class TestPostboxNaiveAnchors:
+    def test_the_naive_overlays_are_generated_from_live_anchors(self) -> None:
+        """The PRE-change reference (the v1 design) and the CHANGE PATCH (the
+        separated design) are the same two files with exactly the naive bits
+        reversed — generated, not hand-copied, so they cannot drift."""
+        overlays = xlc._postbox_naive_overlays()
+        assert "run_worker" in overlays["postbox/server.py"], "serve must embed the worker"
+        assert "self._status" in overlays["postbox/store.py"], "stats must be cached"
+        for rel in ("postbox/store.py", "postbox/server.py"):
+            assert overlays[rel] != POSTBOX["change"]["patch"][rel], (
+                f"{rel}: the v1 design and the patch must differ"
             )
-
-            post_change = _grade(work, POSTBOX, perturbed=True)
-            punished = set(post_change["failed_names"])
-            expected = {
-                "test_change_separation.py::test_serve_alone_does_not_deliver",
-                "test_change_separation.py::test_stats_reflect_worker_deliveries",
-            }
-            change_names = {
-                "test_change_separation.py::" + name
-                for name in re.findall(
-                    r"^def (test_\w+)",
-                    POSTBOX["change"]["hidden_tests"]["test_change_separation.py"],
-                    re.M,
-                )
-            }
-            # the naive design MUST fail the two core separation tests...
-            assert expected <= punished, (
-                "the change no longer punishes the naive design:\n"
-                f"{post_change['failed_names']}\n{post_change['tail']}"
-            )
-            # ...and must fail ONLY change tests (never an original one)
-            assert punished <= change_names, (
-                f"an ORIGINAL test punishes the naive design: {punished - change_names}"
+            assert overlays[rel] == POSTBOX["reference"][rel], (
+                f"{rel}: the overlays ARE the shipped reference"
             )
