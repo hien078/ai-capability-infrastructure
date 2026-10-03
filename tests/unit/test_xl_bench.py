@@ -810,7 +810,7 @@ def test_verify_fixture_accepts_the_unified_semantics(tmp_path: Path, capsys) ->
     assert "the change BITES (reference, post-change suite)" in out
     assert "pass-when-solved (reference + change patch, post-change suite)" in out
     assert "the reversal is exact (reference + patch, ORIGINAL suite)" in out
-    assert "bite detail: 1/1 change tests fail pre-patch" in out
+    assert "bite detail: 1/1 non-guard change tests fail pre-patch" in out
 
 
 def test_verify_fixture_rejects_reference_that_does_not_solve(tmp_path: Path) -> None:
