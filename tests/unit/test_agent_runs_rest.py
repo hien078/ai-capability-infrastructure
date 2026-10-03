@@ -2,6 +2,8 @@
 kernel → RunResult. Deterministic — a scripted model gateway, no network;
 workspace runs use tmp dirs and the interpreter running the tests."""
 
+import hashlib
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -16,6 +18,7 @@ from aci.adapters.inbound.rest.wiring import Container, Settings
 from aci.application.run_agent_task import AgentRunService, ModelGatewayFactory
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.actions import FinalCandidate, ToolCallBatchAction
+from aci.domain.runtime.persistence import AgentRunEventRecord, AgentRunRecord
 from aci.domain.runtime.tools import ToolCall
 from aci.runtime.model_gateway import FakeModelGateway
 from tests.sandbox_support import available_sandbox
@@ -697,3 +700,176 @@ class TestAgentRunsRest:
         context = service._context_factory.build()  # noqa: SLF001
         assert isinstance(context, ContextEngine)
         assert hasattr(context, "build")
+
+
+class _MemoryStore:
+    """In-memory AgentRunStore: the durable store a restarted process reads
+    (the same shape as tests/security/test_agent_run_boundaries.py)."""
+
+    def __init__(self) -> None:
+        self.runs: dict[str, AgentRunRecord] = {}
+
+    def record_run(self, record: AgentRunRecord) -> None:
+        self.runs[record.run_id] = record
+
+    def record_events(self, events: list[AgentRunEventRecord]) -> None:
+        return None
+
+    def get_run(self, run_id: str) -> AgentRunRecord | None:
+        return self.runs.get(run_id)
+
+    def list_recent(self, limit: int = 50) -> list[AgentRunRecord]:
+        return list(self.runs.values())[:limit]
+
+
+class TestRunReadModel:
+    """The shared platform-surface read model (2026-10-03; xl-harness
+    FINDINGS 1-2): ``usage`` (the tokens RunUsage carries) + ``changes``
+    (the run's file changes vs its start manifest) on POST and GET."""
+
+    def test_post_response_carries_usage_and_changes(self, tmp_path: Path) -> None:
+        service = _service(
+            [_write("out.txt", "x = 1\n"), FinalCandidate(summary="done", changes=["out.txt"])],
+            **_workspace(tmp_path),
+        )
+        data = _client(service).post("/v1/agent-runs", json=_body(workspace="proj")).json()
+        assert data["status"] == "succeeded", data
+        # usage: exactly the shared contract's five fields, real values.
+        assert set(data["usage"]) == {
+            "model_input_tokens",
+            "model_output_tokens",
+            "turns",
+            "tool_calls",
+            "wall_seconds",
+        }
+        assert data["usage"]["model_input_tokens"] > 0
+        assert data["usage"]["model_output_tokens"] > 0
+        assert data["usage"]["turns"] == data["turns"]
+        assert data["usage"]["tool_calls"] == data["tool_calls"] == 1
+        assert data["usage"]["wall_seconds"] == data["wall_time_seconds"]
+        # changes: the written file, added, with a unified diff.
+        assert data["changes"] is not None
+        [change] = data["changes"]["files"]
+        assert change["path"] == "out.txt"
+        assert change["status"] == "added"
+        assert change["sha256_before"] is None
+        assert change["sha256_after"] == hashlib.sha256(b"x = 1\n").hexdigest()
+        assert change["size_after"] == 6
+        assert "+x = 1" in data["changes"]["diff"]
+        assert data["changes"]["truncated"] is False
+
+    def test_get_carries_usage_and_changes(self, tmp_path: Path) -> None:
+        service = _service(
+            [_read("notes.txt"), FinalCandidate(summary="done", claims=["notes.txt: cause X"])],
+            **_workspace(tmp_path),
+        )
+        client = _client(service)
+        created = client.post(
+            "/v1/agent-runs", json=_body(requested_profile="researcher", workspace="proj")
+        ).json()
+        got = client.get(f"/v1/agent-runs/{created['run_id']}").json()
+        assert got["usage"] == created["usage"]
+        assert got["changes"] == created["changes"]
+        # A read-only run changed nothing: an honest EMPTY change set.
+        assert got["changes"]["files"] == []
+        assert got["changes"]["diff"] == ""
+        assert got["changes"]["truncated"] is False
+
+    def test_changes_null_without_a_workspace(self) -> None:
+        service = _service([FinalCandidate(summary="x")])
+        client = _client(service)
+        data = client.post("/v1/agent-runs", json=_body()).json()
+        assert data["changes"] is None
+        got = client.get(f"/v1/agent-runs/{data['run_id']}").json()
+        assert got["changes"] is None
+
+    def test_changes_null_when_the_working_copy_vanished(self, tmp_path: Path) -> None:
+        service = _service(
+            [_write("out.txt", "x"), FinalCandidate(summary="done", changes=["out.txt"])],
+            **_workspace(tmp_path),
+        )
+        client = _client(service)
+        created = client.post("/v1/agent-runs", json=_body(workspace="proj")).json()
+        shutil.rmtree(_run_dir(tmp_path, created["run_id"]))
+        got = client.get(f"/v1/agent-runs/{created['run_id']}").json()
+        assert got["status"] == "succeeded"  # the result survives
+        assert got["changes"] is None  # the diff cannot be computed — honestly null
+
+    def test_changes_survive_a_restart_via_the_store(self, tmp_path: Path) -> None:
+        """A run from a PREVIOUS process (the store, migration 0016/0018):
+        GET reads the result AND the changes back — run_dir + manifest."""
+        store = _MemoryStore()
+        options = _workspace(tmp_path)
+        service = _service(
+            [_write("out.txt", "x"), FinalCandidate(summary="done", changes=["out.txt"])],
+            run_store=cast("Any", store),
+            **options,
+        )
+        created = _client(service).post("/v1/agent-runs", json=_body(workspace="proj")).json()
+        # A FRESH service (same store + dirs, empty RAM) — the "restart".
+        restarted = _service([], run_store=cast("Any", store), **options)
+        got = _client(restarted).get(f"/v1/agent-runs/{created['run_id']}").json()
+        assert got["status"] == "succeeded"
+        assert got["usage"]["model_input_tokens"] > 0
+        assert [f["path"] for f in got["changes"]["files"]] == ["out.txt"]
+        assert got["changes"]["files"][0]["status"] == "added"
+
+    def test_changes_are_stable_after_the_source_changes(self, tmp_path: Path) -> None:
+        """The manifest's whole point: the client may rewrite its source
+        workspace after delegation — the change LIST never moves (it never
+        reads the source), and the new source content never leaks in."""
+        service = _service(
+            [
+                _write("notes.txt", "rewritten by the run\n"),
+                FinalCandidate(summary="done", changes=["notes.txt"]),
+            ],
+            **_workspace(tmp_path),
+        )
+        client = _client(service)
+        created = client.post("/v1/agent-runs", json=_body(workspace="proj")).json()
+        before = client.get(f"/v1/agent-runs/{created['run_id']}").json()["changes"]
+        assert "-cause is X" in before["diff"]  # the real start bytes
+        assert "+rewritten by the run" in before["diff"]
+
+        (tmp_path / "sources" / "proj" / "notes.txt").write_text(
+            "the client rewrote the source\n", encoding="utf-8"
+        )
+        after = client.get(f"/v1/agent-runs/{created['run_id']}").json()["changes"]
+        assert after["files"] == before["files"]  # the LIST is manifest-stable
+        assert "[diff unavailable" in after["diff"]  # the hunk degrades honestly
+        assert "the client rewrote the source" not in after["diff"]
+
+    def test_revise_diffs_against_its_own_start(self, tmp_path: Path) -> None:
+        """A revision is a NEW run whose baseline is ITS OWN start (a copy of
+        the previous run's dir): the parent's changes are its unchanged
+        base, only the revision's own writes appear."""
+        script = [
+            _write("out.txt", "x"),
+            FinalCandidate(summary="first", changes=["out.txt"]),
+            _write("second.txt", "y"),
+            FinalCandidate(summary="second", changes=["second.txt"]),
+        ]
+        service = _service(script, **_workspace(tmp_path))
+        client = _client(service)
+        first = client.post("/v1/agent-runs", json=_body(workspace="proj")).json()
+        revision = client.post(
+            f"/v1/agent-runs/{first['run_id']}/revise",
+            json={"failed_criteria": ["test passes"], "feedback": "also add second.txt"},
+        ).json()
+        assert revision["status"] == "succeeded", revision
+        assert [f["path"] for f in revision["changes"]["files"]] == ["second.txt"]
+        assert revision["changes"]["files"][0]["status"] == "added"
+
+    def test_manifest_write_failure_never_fails_the_run(self, tmp_path: Path) -> None:
+        """The manifest is telemetry (§50): when it cannot be written the run
+        completes normally and ``changes`` is honestly null."""
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir(parents=True)
+        (runs_root / ".aci-run-manifests").write_text("a file, not a dir", encoding="utf-8")
+        service = _service(
+            [_write("out.txt", "x"), FinalCandidate(summary="done", changes=["out.txt"])],
+            **_workspace(tmp_path),
+        )
+        data = _client(service).post("/v1/agent-runs", json=_body(workspace="proj")).json()
+        assert data["status"] == "succeeded", data
+        assert data["changes"] is None

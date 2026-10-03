@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 from aci.adapters.inbound.rest.auth import bearer_gate
 from aci.adapters.inbound.rest.wiring import Container, get_container
 from aci.application.run_agent_task import new_run_id
+from aci.application.workspace_changes import WorkspaceChanges
 from aci.config import Settings
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.spec import AgentProfileId
@@ -88,6 +89,20 @@ class AgentRunRequest(BaseModel):
     preload_capabilities: bool | None = None
 
 
+class AgentRunUsage(BaseModel):
+    """The ``usage`` block of the shared read model (2026-10-03): the token
+    counts ``RunUsage`` carries but the flat projection dropped (xl-harness
+    FINDING 2). Exactly the contract's five fields — ``cost_usd`` exists on
+    RunUsage but is not in the shared contract. The flat
+    turns/tool_calls/wall_time_seconds above stay (backward compatible)."""
+
+    model_input_tokens: int = Field(default=0, ge=0)
+    model_output_tokens: int = Field(default=0, ge=0)
+    turns: int = Field(default=0, ge=0)
+    tool_calls: int = Field(default=0, ge=0)
+    wall_seconds: float = Field(default=0.0, ge=0.0)
+
+
 class AgentRunResponse(BaseModel):
     run_id: str
     status: str
@@ -104,6 +119,13 @@ class AgentRunResponse(BaseModel):
     #: Set only while status == "interrupted_approval": name it in
     #: POST /v1/agent-runs/{run_id}/resume to approve or deny the call.
     approval_id: str | None = None
+    #: §41.1 usage on the wire (the shared read model): tokens per run.
+    usage: AgentRunUsage = Field(default_factory=AgentRunUsage)
+    #: The run's file changes vs its start manifest (the shared read model,
+    #: xl-harness FINDING 1): workspace-relative paths, unified diff text
+    #: (text files only, 200 KB cap), None for a run without a workspace —
+    #: or one whose changes are unavailable (vanished copy, no manifest).
+    changes: WorkspaceChanges | None = None
 
 
 def _profile(requested: str) -> AgentProfileId:
@@ -144,7 +166,7 @@ def start_agent_run(
         approval_required_tools=body.approval_required_tools,
         preload_capabilities=body.preload_capabilities,
     )
-    return _to_response(result)
+    return _to_response(result, container.agent_run_service.changes(result.run_id))
 
 
 @router.post("/{run_id}/cancel")
@@ -163,7 +185,7 @@ def get_agent_run(
     result = container.agent_run_service.get(run_id)
     if result is None:
         raise DomainError(ErrorCode.ROUTE_RUN_NOT_FOUND, f"unknown agent run: {run_id}")
-    return _to_response(result)
+    return _to_response(result, container.agent_run_service.changes(run_id))
 
 
 class ReviseRequest(BaseModel):
@@ -191,7 +213,7 @@ def revise_agent_run(
         feedback=body.feedback,
         max_turns=body.max_turns,
     )
-    return _to_response(result)
+    return _to_response(result, container.agent_run_service.changes(result.run_id))
 
 
 class ResumeRequest(BaseModel):
@@ -226,10 +248,10 @@ def resume_agent_run(
     result = container.agent_run_service.resume(
         run_id, approval_id=body.approval_id, approve=body.approve, answer=body.answer
     )
-    return _to_response(result)
+    return _to_response(result, container.agent_run_service.changes(run_id))
 
 
-def _to_response(result: RunResult) -> AgentRunResponse:
+def _to_response(result: RunResult, changes: WorkspaceChanges | None = None) -> AgentRunResponse:
     evidence = result.evidence
     return AgentRunResponse(
         run_id=result.run_id,
@@ -245,4 +267,12 @@ def _to_response(result: RunResult) -> AgentRunResponse:
         tool_calls=result.usage.tool_calls,
         wall_time_seconds=result.usage.wall_time_seconds,
         approval_id=result.approval_id,
+        usage=AgentRunUsage(
+            model_input_tokens=result.usage.model_input_tokens,
+            model_output_tokens=result.usage.model_output_tokens,
+            turns=result.usage.turns,
+            tool_calls=result.usage.tool_calls,
+            wall_seconds=result.usage.wall_time_seconds,
+        ),
+        changes=changes,
     )
