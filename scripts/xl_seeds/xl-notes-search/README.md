@@ -43,6 +43,20 @@ response body.
 `list_notes` returns notes newest first — `created_at` descending,
 tie-broken by `id` ascending. The CLI and the API both show this order.
 
+## Import / export
+
+`jotbase.import_export` moves notes between installs as one JSON
+document — `{"format": 1, "notes": [note dicts]}`:
+
+```
+export_notes(service) / export_to_path(service, path)
+import_notes(service, document, replace=False) / import_from_path(...)
+```
+
+Import merges: a note whose id already exists is kept (skipped) unless
+`replace=True`; the whole document is validated first, so a bad
+document imports nothing.
+
 ## API
 
 | Method | Path | Notes |
