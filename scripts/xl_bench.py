@@ -1194,8 +1194,10 @@ def _invalidated_fails(
     uncollected one — this closes the exactness proof.)"""
     fresh = Path(tempfile.mkdtemp(prefix="xl-invalidated-"))
     try:
-        shutil.copytree(path / "reference", fresh, dirs_exist_ok=True)
+        # seed FIRST, then the reference overlay, then the change patch —
+        # each layer overwrites the one before it.
         shutil.copytree(path / "workspace", fresh, dirs_exist_ok=True)
+        shutil.copytree(path / "reference", fresh, dirs_exist_ok=True)
         shutil.copytree(path / "change" / "patch", fresh, dirs_exist_ok=True)
         strip_agent_tests(fresh, seed)
         for test in sorted((path / "hidden").rglob("*.py")):
