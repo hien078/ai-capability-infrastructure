@@ -297,8 +297,7 @@ class TestChangeBite:
                 f"(and are not guards): {not_biting}\n{out[-800:]}"
             )
             assert guards <= (change_ids - failed), (
-                f"{task['name']}: declared guards do not pass pre-patch: "
-                f"{sorted(guards & failed)}"
+                f"{task['name']}: declared guards do not pass pre-patch: {sorted(guards & failed)}"
             )
 
 

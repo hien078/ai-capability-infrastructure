@@ -183,15 +183,15 @@ def _assert_unified_matrix(task: dict[str, Any]) -> None:
         reversal = _grade(work, task, perturbed=False)
     failed = set(reversal["failed_ids"])
     for failed_id in failed:
-        assert any(
-            xb._id_covers(entry, failed_id) for entry in task["change"]["invalidates"]
-        ), f"{task['name']}: the reversal over-reaches: {failed_id}"
+        assert any(xb._id_covers(entry, failed_id) for entry in task["change"]["invalidates"]), (
+            f"{task['name']}: the reversal over-reaches: {failed_id}"
+        )
     for entry in task["change"]["invalidates"]:
         file_name = entry if "::" not in entry else entry.split("::", 1)[0]
         for name in re.findall(r"^def (test_\w+)", task["hidden_tests"][file_name], re.M):
-            assert any(
-                xb._id_covers(f"{file_name}::{name}", failed_id) for failed_id in failed
-            ), f"{task['name']}: invalidated {file_name}::{name} does not fail on the patch"
+            assert any(xb._id_covers(f"{file_name}::{name}", failed_id) for failed_id in failed), (
+                f"{task['name']}: invalidated {file_name}::{name} does not fail on the patch"
+            )
 
 
 def _collapse(text: str) -> str:

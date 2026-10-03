@@ -316,8 +316,7 @@ class TestFixtureMatrix:
                 f"and are not guards: {not_biting}\n{out[-800:]}"
             )
             assert guards <= (change_ids - failed), (
-                f"{task['name']}: declared guards do not pass pre-patch: "
-                f"{sorted(guards & failed)}"
+                f"{task['name']}: declared guards do not pass pre-patch: {sorted(guards & failed)}"
             )
 
     def test_invalidated_tests_fail_on_the_patched_reference(self) -> None:
