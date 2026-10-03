@@ -1140,17 +1140,17 @@ def verify_fixture(path: Path, venv_python: Path | None = None) -> int:
         expect_pass=False,
     )
     change_ids = _test_ids(path / "change" / "hidden")
+    non_guards = [cid for cid in change_ids if cid not in fixture.guards]
     failing = {
         cid
-        for cid in change_ids
-        if cid not in fixture.guards
-        and not any(_id_covers(cid, failed) for failed in bite["failed_ids"])
+        for cid in non_guards
+        if not any(_id_covers(cid, failed) for failed in bite["failed_ids"])
     }
     if failing:
         problems.append(f"change tests that do not bite pre-patch: {sorted(failing)}")
     print(
-        f"[{fixture.name}] bite detail: {len(change_ids) - len(failing)}/{len(change_ids)} "
-        f"change tests fail pre-patch; guards (expected to pass): {fixture.guards}"
+        f"[{fixture.name}] bite detail: {len(non_guards) - len(failing)}/{len(non_guards)} "
+        f"non-guard change tests fail pre-patch; guards (expected to pass): {fixture.guards}"
     )
     _case(
         "pass-when-solved (reference + change patch, post-change suite)",
