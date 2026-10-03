@@ -1,0 +1,1 @@
+hidden/test_transactions.py::test_nested_transaction_raises
