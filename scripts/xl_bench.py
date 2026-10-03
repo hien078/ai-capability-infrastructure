@@ -695,6 +695,11 @@ def parse_opencode_stream(path: Path) -> dict[str, Any]:
     }
 
 
+def _psycopg_url(db_url: str) -> str:
+    """SQLAlchemy dialect suffixes (postgresql+psycopg://) are not libpq URIs."""
+    return re.sub(r"^postgresql\+\w+://", "postgresql://", db_url)
+
+
 def kernel_usage(db_url: str, run_ids: list[str]) -> dict[str, dict[str, Any]]:
     """FINDING #2's bench-side solution: GET /v1/agent-runs omits token usage
     (RunUsage has model_input_tokens/model_output_tokens; the REST response
@@ -702,7 +707,7 @@ def kernel_usage(db_url: str, run_ids: list[str]) -> dict[str, dict[str, Any]]:
     migration 0016) READ-ONLY from the bench DB."""
     import psycopg
 
-    with psycopg.connect(db_url, connect_timeout=10) as conn:
+    with psycopg.connect(_psycopg_url(db_url), connect_timeout=10) as conn:
         rows = conn.execute(
             "SELECT run_id, usage FROM agent_runs WHERE run_id = ANY(%s)", (run_ids,)
         ).fetchall()

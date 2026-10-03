@@ -534,6 +534,14 @@ def test_parse_opencode_stream_sums_step_finish_tokens(tmp_path: Path) -> None:
     assert parsed["errors"] and "provider.auth" in parsed["errors"][0]
 
 
+def test_kernel_usage_url_normalization() -> None:
+    """The bench DB URL is SQLAlchemy-shaped; psycopg needs a plain libpq URI."""
+    assert xb._psycopg_url("postgresql+psycopg://aci:aci@h:5432/aci_e2b") == (
+        "postgresql://aci:aci@h:5432/aci_e2b"
+    )
+    assert xb._psycopg_url("postgresql://aci:aci@h/aci") == "postgresql://aci:aci@h/aci"
+
+
 def test_is_model_failure_rule() -> None:
     dead = {"tool_uses": 0, "errors": ['{"type": "provider.transport", "message": "5xx"}']}
     assert xb._is_model_failure(dead, wall=30.0)
