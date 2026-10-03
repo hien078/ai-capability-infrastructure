@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from aci.adapters.inbound.rest.auth import bearer_gate
 from aci.adapters.inbound.rest.wiring import Container, get_container
-from aci.application.run_agent_task import new_run_id
+from aci.application.run_agent_task import AgentRunService, new_run_id
 from aci.application.workspace_changes import WorkspaceChanges
 from aci.config import Settings
 from aci.domain.capability.errors import DomainError, ErrorCode
@@ -42,20 +42,20 @@ router = APIRouter(
 #: field otherwise flows into every model request and the durable store.
 #: Generous by design (they bound, they do not model the context budget):
 #: 100k chars ≈ 25k tokens per string field, 100–200 items per list.
-_MAX_CONTEXT_CHARS = 100_000
-_MAX_ITEM_CHARS = 2_000
-_MAX_COMMAND_ITEM_CHARS = 4_000
-_MAX_LIST_ITEMS = 100
+MAX_CONTEXT_CHARS = 100_000
+MAX_ITEM_CHARS = 2_000
+MAX_COMMAND_ITEM_CHARS = 4_000
+MAX_LIST_ITEMS = 100
 
 
 class AgentRunRequest(BaseModel):
     objective: str = Field(min_length=1, max_length=8000)
-    global_context: str = Field(default="", max_length=_MAX_CONTEXT_CHARS)
-    constraints: list[Annotated[str, Field(max_length=_MAX_ITEM_CHARS)]] = Field(
-        default_factory=list, max_length=_MAX_LIST_ITEMS
+    global_context: str = Field(default="", max_length=MAX_CONTEXT_CHARS)
+    constraints: list[Annotated[str, Field(max_length=MAX_ITEM_CHARS)]] = Field(
+        default_factory=list, max_length=MAX_LIST_ITEMS
     )
-    acceptance_criteria: list[Annotated[str, Field(max_length=_MAX_ITEM_CHARS)]] = Field(
-        default_factory=list, max_length=_MAX_LIST_ITEMS
+    acceptance_criteria: list[Annotated[str, Field(max_length=MAX_ITEM_CHARS)]] = Field(
+        default_factory=list, max_length=MAX_LIST_ITEMS
     )
     requested_profile: str = "coder"
     max_turns: int | None = Field(default=None, ge=1, le=200)
@@ -65,18 +65,18 @@ class AgentRunRequest(BaseModel):
     workspace: str | None = None
     #: argv the verifier runs after the model's final candidate; must be a
     #: workspace run and within the run's process prefixes (§19, INV-08).
-    verification_command: list[Annotated[str, Field(max_length=_MAX_COMMAND_ITEM_CHARS)]] | None = (
-        Field(default=None, min_length=1, max_length=_MAX_LIST_ITEMS)
+    verification_command: list[Annotated[str, Field(max_length=MAX_COMMAND_ITEM_CHARS)]] | None = (
+        Field(default=None, min_length=1, max_length=MAX_LIST_ITEMS)
     )
     #: Workspace-relative write scopes (default: whole workspace, "."); an
     #: explicit empty list is a read-only workspace.
-    write_scopes: list[Annotated[str, Field(max_length=_MAX_ITEM_CHARS)]] | None = Field(
-        default=None, max_length=_MAX_LIST_ITEMS
+    write_scopes: list[Annotated[str, Field(max_length=MAX_ITEM_CHARS)]] | None = Field(
+        default=None, max_length=MAX_LIST_ITEMS
     )
     #: Command prefixes the model may run; must narrow the server ceiling
     #: (INV-02). None = the full ceiling.
-    command_prefixes: list[Annotated[str, Field(max_length=_MAX_ITEM_CHARS)]] | None = Field(
-        default=None, max_length=_MAX_LIST_ITEMS
+    command_prefixes: list[Annotated[str, Field(max_length=MAX_ITEM_CHARS)]] | None = Field(
+        default=None, max_length=MAX_LIST_ITEMS
     )
     #: Tool ids whose calls pause the run for this client's approval
     #: (§13.6) — ADDED to the server's own list, never replacing it.
@@ -135,11 +135,11 @@ def _profile(requested: str) -> AgentProfileId:
         raise DomainError(ErrorCode.CLIENT_INCOMPATIBLE, f"unknown profile: {requested}") from exc
 
 
-@router.post("", status_code=201)
-def start_agent_run(
-    body: AgentRunRequest,
-    container: Annotated[Container, Depends(get_container)],
-) -> AgentRunResponse:
+def start_run(service: AgentRunService, body: AgentRunRequest) -> AgentRunResponse:
+    """Shared translation REST and MCP both use (§29A): request →
+    SubtaskContract + RuntimeSpec → AgentRunService.run → the compact
+    RunResult projection. One path — the MCP tool is a closure over this,
+    never a second translation."""
     profile = _profile(body.requested_profile)
     contract = SubtaskContract(
         task_id=new_run_id(),
@@ -155,7 +155,7 @@ def start_agent_run(
         created_at=datetime.now(UTC),
     )
     spec = runtime_spec_for(profile, budget=body.budget)
-    result = container.agent_run_service.run(
+    result = service.run(
         contract,
         spec,
         max_turns=body.max_turns,
@@ -166,7 +166,15 @@ def start_agent_run(
         approval_required_tools=body.approval_required_tools,
         preload_capabilities=body.preload_capabilities,
     )
-    return _to_response(result, container.agent_run_service.changes(result.run_id))
+    return agent_run_response(result, service.changes(result.run_id))
+
+
+@router.post("", status_code=201)
+def start_agent_run(
+    body: AgentRunRequest,
+    container: Annotated[Container, Depends(get_container)],
+) -> AgentRunResponse:
+    return start_run(container.agent_run_service, body)
 
 
 @router.post("/{run_id}/cancel")
@@ -185,7 +193,7 @@ def get_agent_run(
     result = container.agent_run_service.get(run_id)
     if result is None:
         raise DomainError(ErrorCode.ROUTE_RUN_NOT_FOUND, f"unknown agent run: {run_id}")
-    return _to_response(result, container.agent_run_service.changes(run_id))
+    return agent_run_response(result, container.agent_run_service.changes(run_id))
 
 
 class ReviseRequest(BaseModel):
@@ -193,10 +201,10 @@ class ReviseRequest(BaseModel):
     profile, workspace options) comes from the previous attempt."""
 
     objective: str | None = Field(default=None, min_length=1, max_length=8000)
-    failed_criteria: list[Annotated[str, Field(max_length=_MAX_ITEM_CHARS)]] = Field(
-        default_factory=list, max_length=_MAX_LIST_ITEMS
+    failed_criteria: list[Annotated[str, Field(max_length=MAX_ITEM_CHARS)]] = Field(
+        default_factory=list, max_length=MAX_LIST_ITEMS
     )
-    feedback: str = Field(default="", max_length=_MAX_CONTEXT_CHARS)
+    feedback: str = Field(default="", max_length=MAX_CONTEXT_CHARS)
     max_turns: int | None = Field(default=None, ge=1, le=200)
 
 
@@ -213,7 +221,7 @@ def revise_agent_run(
         feedback=body.feedback,
         max_turns=body.max_turns,
     )
-    return _to_response(result, container.agent_run_service.changes(result.run_id))
+    return agent_run_response(result, container.agent_run_service.changes(result.run_id))
 
 
 class ResumeRequest(BaseModel):
@@ -248,10 +256,15 @@ def resume_agent_run(
     result = container.agent_run_service.resume(
         run_id, approval_id=body.approval_id, approve=body.approve, answer=body.answer
     )
-    return _to_response(result, container.agent_run_service.changes(run_id))
+    return agent_run_response(result, container.agent_run_service.changes(run_id))
 
 
-def _to_response(result: RunResult, changes: WorkspaceChanges | None = None) -> AgentRunResponse:
+def agent_run_response(
+    result: RunResult, changes: WorkspaceChanges | None = None
+) -> AgentRunResponse:
+    """RunResult → the compact typed state (§29A: status, verdict, checks,
+    evidence refs, artifacts — never the transcript, never a server path).
+    Shared by the REST routes and the MCP agent-run tools."""
     evidence = result.evidence
     return AgentRunResponse(
         run_id=result.run_id,
