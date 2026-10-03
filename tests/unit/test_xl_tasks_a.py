@@ -121,7 +121,7 @@ def arenas(tmp_path_factory: Any) -> dict[str, dict[str, Path]]:
     for task in TASKS:
         root = tmp_path_factory.mktemp(task["name"])
         patched = _materialize(task["reference"], root / "patched")
-        _apply_patch(patched, task["change"]["reference_patch"])
+        _apply_patch(patched, task["change"]["patch"])
         out[task["name"]] = {
             "seed": _materialize(task["seed"], root / "seed"),
             "reference": _materialize(task["reference"], root / "reference"),
@@ -153,7 +153,8 @@ class TestFixtureSchema:
                 "note",
                 "hidden_tests",
                 "invalidates",
-                "reference_patch",
+                "patch",
+                "guards",
             }
             assert isinstance(task["task"], str) and task["task"]
             assert isinstance(task["change"]["note"], str)
@@ -168,7 +169,7 @@ class TestFixtureSchema:
                 task["hidden_tests"],
                 task["reference"],
                 task["change"]["hidden_tests"],
-                task["change"]["reference_patch"],
+                task["change"]["patch"],
             ]
             for blob in blobs:
                 assert blob
@@ -204,9 +205,9 @@ class TestFixtureSchema:
         for task in TASKS:
             assert task["seed"] != task["reference"], task["name"]
 
-    def test_reference_patch_targets_reference_files(self) -> None:
+    def test_patch_targets_reference_files(self) -> None:
         for task in TASKS:
-            for rel in task["change"]["reference_patch"]:
+            for rel in task["change"]["patch"]:
                 assert rel in task["reference"], f"{task['name']}: patch target {rel}"
 
     def test_invalidates_are_original_test_ids(self) -> None:
@@ -217,6 +218,16 @@ class TestFixtureSchema:
                     original |= {f"{Path(rel).name}::{name}" for name in _test_names(content)}
             assert task["change"]["invalidates"], task["name"]
             assert set(task["change"]["invalidates"]) <= original, task["name"]
+
+    def test_guards_are_real_change_tests(self) -> None:
+        """Every declared guard is a real change-test id (the unified
+        semantics: guards are the ONLY change tests allowed to pass
+        pre-patch)."""
+        for task in TASKS:
+            change_ids: set[str] = set()
+            for rel, content in task["change"]["hidden_tests"].items():
+                change_ids |= {f"{Path(rel).name}::{name}" for name in _test_names(content)}
+            assert set(task["change"]["guards"]) <= change_ids, task["name"]
 
 
 class TestFixtureVerification:
@@ -261,6 +272,33 @@ class TestFixtureVerification:
             assert failed == expected, (
                 f"{task['name']}: unexpected failures {sorted(failed - expected)}, "
                 f"missing {sorted(expected - failed)}\n{out[-1500:]}"
+            )
+
+
+class TestChangeBite:
+    def test_change_tests_bite_on_the_unpatched_reference(
+        self, arenas: dict[str, dict[str, Path]]
+    ) -> None:
+        """The UNIFIED change semantics (job xl-fix): every change test that
+        is NOT a declared guard FAILS on the unpatched reference (the pack
+        is real — a change test that passes pre-patch measures nothing),
+        and the guards (unchanged-behavior pins) pass pre-patch."""
+        for task in TASKS:
+            ws = arenas[task["name"]]
+            returncode, failed, out = _run(ws["change"], ws["reference"])
+            change_ids: set[str] = set()
+            for rel, content in task["change"]["hidden_tests"].items():
+                change_ids |= {f"{Path(rel).name}::{name}" for name in _test_names(content)}
+            guards = set(task["change"]["guards"])
+            assert returncode != 0, f"{task['name']}: change tests pass pre-patch"
+            not_biting = sorted(change_ids - guards - failed)
+            assert not not_biting, (
+                f"{task['name']}: change tests that do not bite pre-patch "
+                f"(and are not guards): {not_biting}\n{out[-800:]}"
+            )
+            assert guards <= (change_ids - failed), (
+                f"{task['name']}: declared guards do not pass pre-patch: "
+                f"{sorted(guards & failed)}"
             )
 
 

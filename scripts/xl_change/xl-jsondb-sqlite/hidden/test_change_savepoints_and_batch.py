@@ -15,7 +15,10 @@ def test_inner_rollback_undoes_only_the_inner_scope(tmp_path):
     db = Database(tmp_path)
     with db.transaction():
         db.table("posts").insert({"slug": "outer"})
-        with pytest.raises(RuntimeError):
+        # match= is load-bearing: v1 raised "nested transaction" AT ENTRY,
+        # which a bare pytest.raises(RuntimeError) would swallow — the test
+        # must discriminate the inner scope's OWN raise from v1's refusal.
+        with pytest.raises(RuntimeError, match="inner boom"):
             with db.transaction():
                 db.table("posts").insert({"slug": "inner"})
                 raise RuntimeError("inner boom")
@@ -25,7 +28,9 @@ def test_inner_rollback_undoes_only_the_inner_scope(tmp_path):
 
 def test_inner_commit_is_undone_by_an_outer_rollback(tmp_path):
     db = Database(tmp_path)
-    with pytest.raises(RuntimeError):
+    # match= is load-bearing (see test_inner_rollback above): v1's entry raise
+    # must not satisfy this raises — only the outer scope's own raise does.
+    with pytest.raises(RuntimeError, match="outer boom"):
         with db.transaction():
             db.table("posts").insert({"slug": "outer"})
             with db.transaction():
@@ -40,7 +45,7 @@ def test_three_levels_deep(tmp_path):
         db.table("posts").insert({"slug": "one"})
         with db.transaction():
             db.table("posts").insert({"slug": "two"})
-            with pytest.raises(RuntimeError):
+            with pytest.raises(RuntimeError, match="deepest boom"):
                 with db.transaction():
                     db.table("posts").insert({"slug": "three"})
                     raise RuntimeError("deepest boom")

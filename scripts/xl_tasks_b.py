@@ -35,13 +35,20 @@ Schema (per task dict):
     seed            {relpath: content}  the shipped workspace (the agent sees this)
     task            str  the ticket text the agent gets
     hidden_tests    {relpath: content}  the ORIGINAL acceptance suite (post-hoc only)
-    change          {note: str, hidden_tests: {...}, patch: {...}, invalidates: [ids]}
+    change          {note: str, hidden_tests: {...}, patch: {...}, invalidates: [ids],
+                    guards: [ids]}
                     the REQUIREMENT-CHANGE pack: the note the run is resumed
                     with, the extra hidden tests that encode it, `patch` (an
                     extension of the job schema) = the reference's own
-                    implementation of the change, and the original test ids
+                    implementation of the change, the original test ids
                     the change invalidates (node ids RELATIVE TO THE HIDDEN
-                    ROOT, e.g. "test_import_parser.py::test_unknown_dialect").
+                    ROOT, e.g. "test_import_parser.py::test_unknown_dialect"),
+                    and `guards` = the change tests that pin UNCHANGED
+                    behavior (the comma dialect stays the default, the
+                    summary flags stay unchanged) — the ONLY change tests
+                    allowed to pass pre-patch; every other change test must
+                    BITE on the unpatched reference (the unified
+                    verify_fixture semantics, job xl-fix 2026-10-03).
     reference       {relpath: content}  the known-good solution, an overlay
                       OVER THE SEED (unchanged files are not repeated)
     expected_hours  float
@@ -60,9 +67,10 @@ shipped (the hidden suite over the seed), PASSES with the reference
 (the same suite over seed+reference), the POST-CHANGE suite (original
 minus invalidated plus the change's tests) passes over
 seed+reference+patch, the change's tests BITE on the unpatched
-reference, each invalidated test FAILS on the patched reference, the
-hidden tests are unreachable from the seed, the task text reveals no
-hidden test, and every path is safe and relative.
+reference (every test that is not a declared guard), each invalidated
+test FAILS on the patched reference, the hidden tests are unreachable
+from the seed, the task text reveals no hidden test, and every path is
+safe and relative.
 
 §34 caveats apply to any bench round on this set: author-built
 fixtures, deterministic hidden suites (no model judge), one author's
@@ -268,6 +276,22 @@ CHANGE_NOTES: dict[str, str] = {
 }
 
 
+#: Change tests that pin UNCHANGED behavior — the ONLY change tests allowed
+#: to pass pre-patch (every other change test must BITE on the unpatched
+#: reference). The ledger change explicitly keeps the comma dialect the
+#: default and the summary flags unchanged; its three guard tests pin that.
+#: notes-search and jsondb have NO guards: every change test bites.
+GUARDS: dict[str, list[str]] = {
+    "xl-ledger-bugfix": [
+        "test_change_dialect.py::test_comma_dialect_is_still_the_default",
+        "test_change_dialect.py::test_unknown_dialect_is_still_rejected",
+        "test_change_since_and_tz.py::test_cli_summary_without_flags_is_unchanged",
+    ],
+    "xl-notes-search": [],
+    "xl-jsondb-sqlite": [],
+}
+
+
 def _fixture(
     name: str,
     kind: str,
@@ -286,6 +310,7 @@ def _fixture(
             "hidden_tests": _load_tree(f"xl_change/{name}/hidden"),
             "patch": _load_tree(f"xl_change/{name}/patch"),
             "invalidates": invalidates,
+            "guards": list(GUARDS[name]),
         },
         "reference": _load_tree(f"xl_reference/{name}"),
         "expected_hours": expected_hours,

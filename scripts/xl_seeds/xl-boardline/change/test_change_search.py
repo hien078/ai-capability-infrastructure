@@ -44,8 +44,11 @@ def test_change_search_is_case_insensitive(add: Any, page: Any) -> None:
 
 def test_change_search_matches_substring(add: Any, page: Any) -> None:
     add("Fix login bug")
+    add("Write API docs")
     board = page("/?q=logi")
     assert board.find("article", {"id": "task-t1"}) is not None
+    # the filter must actually FILTER: a non-matching card is hidden
+    assert board.find("article", {"id": "task-t2"}) is None
 
 
 def test_change_search_no_match_shows_placeholders(add: Any, page: Any) -> None:

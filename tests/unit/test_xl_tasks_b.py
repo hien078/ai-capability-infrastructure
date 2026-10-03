@@ -58,7 +58,7 @@ def _run_pytest(run_root: Path, args: list[str]) -> tuple[int, str]:
         "ACI_ROUTER_DISABLED": "1",
     }
     proc = subprocess.run(
-        [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--tb=no", *args],
+        [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--tb=no", "-rf", *args],
         cwd=str(run_root),
         env=env,
         capture_output=True,
@@ -67,6 +67,27 @@ def _run_pytest(run_root: Path, args: list[str]) -> tuple[int, str]:
         check=False,
     )
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def _failed_ids(out: str) -> set[str]:
+    """FAILED node ids from a -q -rf run, normalized to <file>::<name>."""
+    ids: set[str] = set()
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("FAILED "):
+            nodeid = line.split(" ", 2)[1]
+            path, _, name = nodeid.partition("::")
+            if name:
+                ids.add(f"{Path(path).name}::{name.partition('[')[0]}")
+    return ids
+
+
+def _change_ids(task: dict) -> set[str]:
+    return {
+        f"{Path(rel).name}::{name}"
+        for rel, content in task["change"]["hidden_tests"].items()
+        for name in _TEST_DEF.findall(content)
+    }
 
 
 def _scenario(task: dict, which: str) -> tuple[int, str]:
@@ -153,7 +174,13 @@ class TestSchema:
                 "hidden_tests",
                 "patch",
                 "invalidates",
+                "guards",
             }, task["name"]
+
+    def test_guards_are_real_change_tests(self) -> None:
+        for task in TASKS:
+            for guard in task["change"]["guards"]:
+                assert guard in _change_ids(task), (task["name"], guard)
 
     def test_kinds_names_and_hours(self) -> None:
         for task in TASKS:
@@ -268,6 +295,30 @@ class TestFixtureMatrix:
         for task in TASKS:
             rc, out = _scenario(task, "change_unpatched")
             assert rc != 0, f"{task['name']}: change tests pass without the patch"
+
+    def test_every_non_guard_change_test_bites(self) -> None:
+        """The unified semantics, PER TEST (job xl-fix item 3): every change
+        test that is not a declared guard must FAIL on the unpatched
+        reference — a change test that passes pre-patch measures nothing
+        about the change. (RED when written: the jsondb savepoint tests
+        passed pre-patch coincidentally — v1's "nested transaction" entry
+        raise satisfied their bare pytest.raises — fixed with match=.) The
+        guards (unchanged-behavior pins) pass pre-patch by declaration."""
+        for task in TASKS:
+            rc, out = _scenario(task, "change_unpatched")
+            assert rc != 0, task["name"]
+            failed = _failed_ids(out)
+            change_ids = _change_ids(task)
+            guards = set(task["change"]["guards"])
+            not_biting = sorted(change_ids - guards - failed)
+            assert not not_biting, (
+                f"{task['name']}: change tests that do not bite pre-patch "
+                f"and are not guards: {not_biting}\n{out[-800:]}"
+            )
+            assert guards <= (change_ids - failed), (
+                f"{task['name']}: declared guards do not pass pre-patch: "
+                f"{sorted(guards & failed)}"
+            )
 
     def test_invalidated_tests_fail_on_the_patched_reference(self) -> None:
         """Each invalidated test pinned pre-change behavior — it must now fail."""
