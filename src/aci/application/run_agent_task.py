@@ -19,6 +19,12 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from aci.application.protocols import AgentRunStore
+from aci.application.workspace_changes import (
+    WorkspaceChanges,
+    compute_changes,
+    read_start_manifest,
+    write_start_manifest,
+)
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.authority import (
     ApprovalDecision,
@@ -311,6 +317,62 @@ class AgentRunService:
             if checkpoint is not None and checkpoint.consumed_at is None:
                 result = result.model_copy(update={"approval_id": checkpoint.approval_id})
         return result
+
+    def changes(self, run_id: str) -> WorkspaceChanges | None:
+        """§29 GET read model (the shared platform-surface contract,
+        2026-10-03): the run's FILE CHANGES — its working copy diffed
+        against the per-file sha256 manifest persisted at run start.
+
+        None when there is nothing to diff: no workspace, an unknown run, a
+        vanished working copy, or no manifest (a pre-change run, or the
+        best-effort write failed). A read-model extra, never a failure: it
+        cannot raise, and it never mutates anything — the file list reads
+        the manifest only; diff text reads the copy source solely under the
+        manifest's hash proof (see application/workspace_changes.py)."""
+        try:
+            return self._changes(run_id)
+        except Exception:  # noqa: BLE001 — a read-model extra, never a failure
+            log.warning("agent run %s: changes unavailable", run_id, exc_info=True)
+            return None
+
+    def _changes(self, run_id: str) -> WorkspaceChanges | None:
+        record = self._records.get(run_id)
+        run_dir = record.run_dir if record is not None else None
+        if run_dir is None and self._run_store is not None:
+            stored = self._run_store.get_run(run_id)
+            if stored is not None and stored.run_dir:
+                run_dir = Path(stored.run_dir)
+        if run_dir is None:
+            return None  # no workspace, or a run this process never saw
+        runs_root = self._runs_root.resolve()
+        resolved = run_dir.resolve()
+        if resolved == runs_root or not resolved.is_relative_to(runs_root) or not resolved.is_dir():
+            return None  # a vanished working copy — changes honestly absent
+        manifest = read_start_manifest(self._runs_root, run_id)
+        if manifest is None:
+            return None
+        return compute_changes(
+            manifest.files,
+            resolved,
+            source=self._validated_source(manifest.source),
+        )
+
+    def _validated_source(self, source: str | None) -> Path | None:
+        """The manifest's copy source, re-validated at READ time: it must
+        still sit under this server's workspace root (a first run) or its
+        runs root (a revision copies from a parent run dir). The manifest is
+        server-written, but it is never trusted to point the hash-verified
+        start-bytes read anywhere else."""
+        if not source:
+            return None
+        resolved = Path(source).resolve()
+        roots = [self._runs_root.resolve()]
+        if self._workspace_root is not None:
+            roots.append(self._workspace_root.resolve())
+        for root in roots:
+            if resolved != root and resolved.is_relative_to(root):
+                return resolved
+        return None
 
     def contract(self, run_id: str) -> SubtaskContract | None:
         """The contract a known run executed (a revision's parent link lives
@@ -864,6 +926,21 @@ class AgentRunService:
             if existing_dir is not None
             else provision_workspace(source, self._runs_root, run_id)
         )
+        if existing_dir is None:
+            # The shared read model (xl-harness FINDING 1): persist the
+            # run-start manifest so `changes()` stays stable after the source
+            # workspace changes. Best-effort telemetry (§50): a failed write
+            # never fails the run — its changes are then honestly null. A
+            # RESUMED run re-binds its own copy and keeps its ORIGINAL
+            # manifest (the diff base is the run's start, not the resume).
+            try:
+                write_start_manifest(self._runs_root, run_id, source=source, run_dir=run_dir)
+            except OSError:
+                log.warning(
+                    "agent run %s: start manifest not written (changes unavailable)",
+                    run_id,
+                    exc_info=True,
+                )
         manager = WorkspaceManager()
         # The manager mints the workspace id on create; the bound envelope is
         # keyed by root, so the run id names it here.

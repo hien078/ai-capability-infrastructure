@@ -569,7 +569,10 @@ class TestCancelAndReviseOfAPausedRun:
         checkpoint = store.latest_checkpoint(paused.run_id)
         assert checkpoint is not None and checkpoint.consumed_at is None
         assert store.runs[paused.run_id].status == "interrupted_approval"
-        assert sorted(p.name for p in (tmp_path / "runs").iterdir()) == [paused.run_id]
+        # One run dir (the server's start-manifest dir is infrastructure).
+        assert sorted(
+            p.name for p in (tmp_path / "runs").iterdir() if p.name != ".aci-run-manifests"
+        ) == [paused.run_id]
         resumed = self._fresh(tmp_path, store, [_done()]).resume(
             paused.run_id, approval_id=paused.approval_id, approve=True
         )
@@ -605,5 +608,8 @@ class TestCancelAndReviseOfAPausedRun:
         with pytest.raises(DomainError) as excinfo:
             self._fresh(tmp_path, store, [_read(), _done()]).revise(paused.run_id)
         assert excinfo.value.code is ErrorCode.CHECKPOINT_CONSUMED
-        assert sorted(p.name for p in (tmp_path / "runs").iterdir()) == [paused.run_id]
+        # One run dir (the server's start-manifest dir is infrastructure).
+        assert sorted(
+            p.name for p in (tmp_path / "runs").iterdir() if p.name != ".aci-run-manifests"
+        ) == [paused.run_id]
         assert len(store.runs) == 1

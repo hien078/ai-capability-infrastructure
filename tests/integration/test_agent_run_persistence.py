@@ -328,7 +328,11 @@ class TestCheckpointResumeAfterRestart:
         assert resumed.run_id == run_id
         assert resumed.status.value == "succeeded", resumed
         assert (run_dir / "out.txt").read_text(encoding="utf-8") == "result\n"
-        assert sorted(p.name for p in (tmp_path / "runs").iterdir()) == [run_id]
+        # One run dir — plus the server's start-manifest dir (the change read
+        # model), which is infrastructure, never a run dir.
+        assert sorted(
+            p.name for p in (tmp_path / "runs").iterdir() if p.name != ".aci-run-manifests"
+        ) == [run_id]
         assert resumed.usage.turns == 2  # cumulative across the pause
 
         row = store.get_run(run_id)

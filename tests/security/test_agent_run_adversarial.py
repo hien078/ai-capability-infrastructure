@@ -123,7 +123,9 @@ class Roots:
     def run_dirs(self) -> list[Path]:
         if not self.runs_root.exists():
             return []
-        return sorted(self.runs_root.iterdir())
+        # The runs root also holds the server's start-manifest dir (the
+        # change read model) — infrastructure, never a run dir.
+        return sorted(p for p in self.runs_root.iterdir() if p.name != ".aci-run-manifests")
 
     def run_dir(self, run_id: str) -> Path:
         path = self.runs_root / run_id
