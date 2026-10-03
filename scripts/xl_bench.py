@@ -792,6 +792,64 @@ def parse_pytest_summary(stdout: str) -> dict[str, int]:
     }
 
 
+def _is_test_shaped(name: str) -> bool:
+    """A file pytest would auto-load or auto-collect from a directory scan:
+    any ``test_*.py`` / ``*_test.py`` (collection) or ``conftest.py`` (the
+    plugin auto-load hook — a conftest can monkeypatch anything pytest loads)."""
+    if name == "conftest.py":
+        return True
+    return name.startswith("test_") and name.endswith(".py") or name.endswith("_test.py")
+
+
+def strip_agent_tests(fresh: Path, seed_dir: Path | None) -> list[str]:
+    """FIX 1 (hidden-suite isolation): remove every test-shaped file in the
+    graded copy that is NOT byte-identical to the shipped seed — agent-written
+    tests (an always-pass ``test_*.py`` would inflate the fraction) and agent
+    ``conftest.py`` files (a conftest can monkeypatch the product into
+    passing). Files the fixture itself shipped stay (trusted content). With
+    ``seed_dir=None`` every test-shaped file is removed (fail-closed: an
+    unverified test file never counts). Returns the removed relative paths."""
+    removed: list[str] = []
+    for path in sorted(fresh.rglob("*")):
+        if not path.is_file() or not _is_test_shaped(path.name):
+            continue
+        rel = path.relative_to(fresh).as_posix()
+        seed_file = Path(seed_dir) / rel if seed_dir is not None else None
+        if (
+            seed_file is not None
+            and seed_file.is_file()
+            and seed_file.read_bytes() == path.read_bytes()
+        ):
+            continue  # shipped by the fixture — trusted, keep it
+        path.unlink()
+        removed.append(rel)
+    return removed
+
+
+def _failed_node_ids(out: str) -> list[str]:
+    """FAILED node ids from a pytest -q -rf short summary."""
+    return sorted(
+        line.strip().split(" ", 2)[1]
+        for line in out.splitlines()
+        if line.strip().startswith("FAILED ")
+    )
+
+
+def _id_covers(declared: str, failed_id: str) -> bool:
+    """Does a DECLARED test id (relative to its hidden root) cover a pytest
+    FAILED node id (relative to the graded root)? Handles a directory prefix
+    (``sub/test_x.py`` vs ``test_x.py``), parametrized children
+    (``test_y[p]``), and the file-only form (``test_x.py`` covers every test
+    in that file)."""
+    path, _, name = failed_id.rpartition("::")
+    file_name = path.rsplit("/", 1)[-1]
+    base = name.partition("[")[0]
+    if "::" not in declared:
+        return file_name == declared
+    d_path, _, d_name = declared.rpartition("::")
+    return file_name == d_path.rsplit("/", 1)[-1] and base == d_name
+
+
 def hidden_suite_result(
     work: Path,
     hidden_dir: Path,
@@ -800,20 +858,39 @@ def hidden_suite_result(
     invalidated: list[str] | None = None,
     venv_python: Path | None = None,
     timeout: float = 900.0,
+    seed_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Post-hoc grading OUTSIDE the sandbox in a FRESH copy: hidden tests are
-    copied in (they are never inside a run workspace), invalidated originals
-    are removed for perturbed runs, pytest runs, pass fraction is reported."""
+    """Post-hoc grading OUTSIDE the sandbox in a FRESH copy — and ONLY the
+    hidden suite (FIX 1): agent-written ``test_*.py`` / ``*_test.py`` /
+    ``conftest.py`` are stripped unless byte-identical to the shipped seed,
+    the hidden tests are copied in at their relative paths, invalidated
+    originals are removed (file form) or deselected (node form), and pytest
+    runs on the HIDDEN TEST PATHS ONLY — never a whole-directory collection,
+    so nothing the agent left behind can inflate or sabotage the score.
+    ``-o addopts=`` neutralizes any workspace pytest config (an agent
+    pyproject.toml could otherwise inject addopts); ``-rf`` exposes the
+    failed node ids (the bite / reversal checks); ``XL_WORKSPACE`` points
+    the fixtures' own conftests at the graded copy."""
     fresh = work.parent / f"{work.name}-posthoc-{secrets.token_hex(4)}"
     shutil.copytree(work, fresh, ignore=shutil.ignore_patterns(*NOISE_DIRS))
     try:
+        stripped = strip_agent_tests(fresh, seed_dir)
+        test_args: list[str] = []
         for source in [hidden_dir] + ([extra_hidden] if extra_hidden else []):
-            for test in source.rglob("*.py"):
-                rel = test.relative_to(source)
+            for test in sorted(source.rglob("*.py")):
+                rel = test.relative_to(source).as_posix()
                 (fresh / rel).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(test, fresh / rel)
-        for rel in invalidated or []:
-            (fresh / rel).unlink(missing_ok=True)
+                test_args.append(rel)
+        deselect: list[str] = []
+        for entry in invalidated or []:
+            if "::" in entry:
+                deselect.append(entry)
+            else:
+                (fresh / entry).unlink(missing_ok=True)
+                test_args = [
+                    arg for arg in test_args if arg != entry and not arg.startswith(f"{entry}/")
+                ]
         proc = subprocess.run(
             [
                 str(venv_python or sys.executable),
@@ -823,18 +900,26 @@ def hidden_suite_result(
                 "--tb=no",
                 "-p",
                 "no:cacheprovider",
+                "-o",
+                "addopts=",
+                "-rf",
+                *test_args,
+                *[f"--deselect={entry}" for entry in deselect],
             ],
             cwd=fresh,
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
+            env={**os.environ, "XL_WORKSPACE": str(fresh), "PYTHONDONTWRITEBYTECODE": "1"},
         )
         counts = parse_pytest_summary(proc.stdout + proc.stderr)
         total = counts["passed"] + counts["failed"] + counts["errors"]
         return {
             "pass_fraction": round(counts["passed"] / total, 4) if total else 0.0,
             **counts,
+            "failed_ids": _failed_node_ids(proc.stdout + proc.stderr),
+            "stripped_agent_tests": stripped,
             "exit_code": proc.returncode,
             "summary_tail": (proc.stdout + proc.stderr)[-400:],
         }
@@ -856,9 +941,16 @@ class Fixture:
     hidden/      the ORIGINAL hidden acceptance suite (post-hoc only)
     change/      the REQUIREMENT-CHANGE pack: CHANGE_NOTE.md (sent at 35%),
                  hidden/ (the extra tests encoding the change),
-                 invalidates.txt (original hidden files the change retires)
-    reference/   the reference solution (applied over the seed proves
-                 pass-when-solved for BOTH suites)
+                 invalidates.txt (original tests the change RETIRES from the
+                 post-change grade — "<file>.py" or "<file>.py::<test>";
+                 each one FAILS on the patched reference: the reversal),
+                 patch/ (the REFERENCE's own implementation of the change —
+                 a full-file overlay over reference/),
+                 guards.txt (change tests that pin UNCHANGED behavior and so
+                 are EXPECTED to pass pre-patch; every other change test
+                 must BITE on the unpatched reference)
+    reference/   the PRE-change reference solution (an overlay over the seed;
+                 reference + change/patch is the post-change one)
     """
 
     name: str
@@ -866,51 +958,137 @@ class Fixture:
     task: str
     change_note: str | None
     invalidated: list[str]
+    guards: list[str] = field(default_factory=list)
 
     @property
     def perturbed(self) -> bool:
         return self.change_note is not None
 
 
+def _id_list(path: Path) -> list[str]:
+    """invalidates.txt / guards.txt: one id per line, ``#`` comments allowed."""
+    if not path.is_file():
+        return []
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+
+
 def load_fixture(path: Path) -> Fixture:
     task = (path / "TASK.md").read_text(encoding="utf-8")
     change = path / "change"
     note = (change / "CHANGE_NOTE.md").read_text(encoding="utf-8") if change.is_dir() else None
-    invalidated: list[str] = []
-    if note is not None and (change / "invalidates.txt").is_file():
-        invalidated = [
-            line.strip()
-            for line in (change / "invalidates.txt").read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.startswith("#")
+    invalidated = _id_list(change / "invalidates.txt") if note is not None else []
+    guards = _id_list(change / "guards.txt") if note is not None else []
+    return Fixture(
+        name=path.name,
+        dir=path,
+        task=task,
+        change_note=note,
+        invalidated=invalidated,
+        guards=guards,
+    )
+
+
+def _test_ids(source: Path) -> list[str]:
+    """Every ``<relfile>::<test_name>`` declared under a hidden root."""
+    ids: list[str] = []
+    for test in sorted(source.rglob("*.py")):
+        rel = test.relative_to(source).as_posix()
+        ids += [
+            f"{rel}::{name}"
+            for name in re.findall(r"^def (test_\w+)", test.read_text(encoding="utf-8"), re.M)
         ]
-    return Fixture(name=path.name, dir=path, task=task, change_note=note, invalidated=invalidated)
+    return ids
 
 
 def verify_fixture(path: Path, venv_python: Path | None = None) -> int:
-    """A fixture must be FAIL-AS-SHIPPED and PASS-WHEN-SOLVED for BOTH suites
-    (the reference proves the latter; it is kept outside the workspace)."""
+    """The UNIFIED change semantics, proven for EVERY fixture (job xl-fix):
+
+    * grade(original)    = the ORIGINAL hidden suite vs the workspace
+    * grade(post-change) = (original MINUS ``invalidates``) + the change tests
+
+    1. fail-as-shipped: the SEED fails the original suite.
+    2. pass-when-solved: the REFERENCE (the PRE-change solution) passes the
+       original suite.
+    3. fail-as-shipped (perturbed): the SEED fails the post-change suite.
+    4. THE BITE: the unpatched REFERENCE fails the post-change suite — and
+       every change test that is not a declared GUARD (an unchanged-behavior
+       pin, listed in change/guards.txt) has a failing parametrization. A
+       change test that passes pre-patch measures nothing about the change.
+    5. pass-when-solved (perturbed): the REFERENCE + its CHANGE PATCH
+       (change/patch/, a full-file overlay over reference/) passes the
+       post-change suite — the change is implementable.
+    6. the reversal is EXACT: the original suite against the PATCHED
+       reference fails EXACTLY the invalidated tests (each one fails; no
+       other original test does) — the change reverses what it claims to
+       reverse, nothing more.
+
+    All grading goes through :func:`hidden_suite_result` (hidden paths only,
+    agent tests stripped), so the proof is the same mechanics the round uses.
+    """
     fixture = load_fixture(path)
     seed, reference = path / "workspace", path / "reference"
+    patch = path / "change" / "patch"
     problems: list[str] = []
 
-    def _case(label: str, *, reference_on: bool, perturbed: bool, expect_pass: bool) -> None:
+    # -- cheap data checks first ------------------------------------------
+    if fixture.perturbed:
+        original_files = {t.rsplit("::", 1)[0] for t in _test_ids(path / "hidden")}
+        for entry in fixture.invalidated:
+            if entry.rsplit("::", 1)[0] not in original_files:
+                problems.append(f"invalidates a non-original test: {entry}")
+        change_ids = _test_ids(path / "change" / "hidden")
+        for guard in fixture.guards:
+            if guard not in change_ids:
+                problems.append(f"guard is not a change test: {guard}")
+        known = {
+            p.relative_to(root).as_posix()
+            for root in (seed, reference)
+            for p in root.rglob("*")
+            if p.is_file()
+        }
+        for target in patch.rglob("*"):
+            if target.is_file() and target.relative_to(patch).as_posix() not in known:
+                problems.append(f"patch targets an unknown file: {target.relative_to(patch)}")
+
+    def _materialize(*, reference_on: bool, patch_on: bool) -> tuple[Path, Path]:
         tmp = Path(tempfile.mkdtemp(prefix=f"xl-fixture-{fixture.name}-"))
+        work = tmp / "work"
+        shutil.copytree(seed, work)
+        for source, on in ((reference, reference_on), (patch, patch_on)):
+            if not on:
+                continue
+            for ref in sorted(source.rglob("*")):
+                if ref.is_file():
+                    rel = ref.relative_to(source)
+                    (work / rel).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(ref, work / rel)
+        return tmp, work
+
+    def _grade(work: Path, *, perturbed: bool) -> dict[str, Any]:
+        return hidden_suite_result(
+            work,
+            path / "hidden",
+            extra_hidden=(path / "change" / "hidden") if perturbed else None,
+            invalidated=fixture.invalidated if perturbed else None,
+            venv_python=venv_python,
+            seed_dir=seed,
+        )
+
+    def _case(
+        label: str,
+        *,
+        reference_on: bool,
+        patch_on: bool,
+        perturbed: bool,
+        expect_pass: bool,
+    ) -> dict[str, Any]:
+        tmp, work = _materialize(reference_on=reference_on, patch_on=patch_on)
         try:
-            work = tmp / "work"
-            shutil.copytree(seed, work)
-            if reference_on:
-                for ref in sorted(reference.rglob("*")):
-                    if ref.is_file():
-                        rel = ref.relative_to(reference)
-                        (work / rel).parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copyfile(ref, work / rel)
-            result = hidden_suite_result(
-                work,
-                path / "hidden",
-                extra_hidden=(path / "change" / "hidden") if perturbed else None,
-                invalidated=fixture.invalidated if perturbed else None,
-                venv_python=venv_python,
-            )
+            result = _grade(work, perturbed=perturbed)
             total = result["passed"] + result["failed"] + result["errors"]
             ok = (result["pass_fraction"] == 1.0) == expect_pass and total > 0
             print(
@@ -920,41 +1098,134 @@ def verify_fixture(path: Path, venv_python: Path | None = None) -> int:
             )
             if not ok:
                 problems.append(label)
+            return result
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
     _case(
         "fail-as-shipped (seed, original suite)",
         reference_on=False,
+        patch_on=False,
         perturbed=False,
         expect_pass=False,
     )
     _case(
         "pass-when-solved (reference, original suite)",
         reference_on=True,
+        patch_on=False,
         perturbed=False,
         expect_pass=True,
     )
-    if fixture.perturbed:
-        _case(
-            "fail-as-shipped (seed, post-change suite)",
-            reference_on=False,
-            perturbed=True,
-            expect_pass=False,
-        )
-        _case(
-            "pass-when-solved (reference, post-change suite)",
-            reference_on=True,
-            perturbed=True,
-            expect_pass=True,
-        )
-    else:
+    if not fixture.perturbed:
         print(f"[{fixture.name}] no change/ pack: unperturbed-only fixture")
+        if problems:
+            print(f"FIXTURE INVALID: {problems}")
+            return 1
+        print(f"fixture {fixture.name} OK")
+        return 0
+    _case(
+        "fail-as-shipped (seed, post-change suite)",
+        reference_on=False,
+        patch_on=False,
+        perturbed=True,
+        expect_pass=False,
+    )
+    # 4. THE BITE — the unpatched reference fails the post-change suite, and
+    #    every non-guard change test has a failing parametrization.
+    bite = _case(
+        "the change BITES (reference, post-change suite)",
+        reference_on=True,
+        patch_on=False,
+        perturbed=True,
+        expect_pass=False,
+    )
+    change_ids = _test_ids(path / "change" / "hidden")
+    failing = {
+        cid
+        for cid in change_ids
+        if cid not in fixture.guards
+        and not any(_id_covers(cid, failed) for failed in bite["failed_ids"])
+    }
+    if failing:
+        problems.append(f"change tests that do not bite pre-patch: {sorted(failing)}")
+    print(
+        f"[{fixture.name}] bite detail: {len(change_ids) - len(failing)}/{len(change_ids)} "
+        f"change tests fail pre-patch; guards (expected to pass): {fixture.guards}"
+    )
+    _case(
+        "pass-when-solved (reference + change patch, post-change suite)",
+        reference_on=True,
+        patch_on=True,
+        perturbed=True,
+        expect_pass=True,
+    )
+    # 6. the reversal is EXACT: the original suite against the PATCHED
+    #    reference fails exactly the invalidated tests.
+    reversal = _case(
+        "the reversal is exact (reference + patch, ORIGINAL suite)",
+        reference_on=True,
+        patch_on=True,
+        perturbed=False,
+        expect_pass=False,
+    )
+    for failed_id in reversal["failed_ids"]:
+        if not any(_id_covers(entry, failed_id) for entry in fixture.invalidated):
+            problems.append(f"the reversal over-reaches: {failed_id} fails on the patch")
+    for entry in fixture.invalidated:
+        if not _invalidated_fails(path, entry, venv_python=venv_python, seed=seed):
+            problems.append(f"invalidated test still passes on the patch: {entry}")
     if problems:
         print(f"FIXTURE INVALID: {problems}")
         return 1
     print(f"fixture {fixture.name} OK")
     return 0
+
+
+def _invalidated_fails(
+    path: Path,
+    entry: str,
+    *,
+    venv_python: Path | None = None,
+    seed: Path | None = None,
+) -> bool:
+    """One invalidated original test, run ALONE against the patched reference:
+    file form -> every test in the file fails; node form -> the node fails.
+    (The full-suite run cannot tell a passed invalidated test from an
+    uncollected one — this closes the exactness proof.)"""
+    fresh = Path(tempfile.mkdtemp(prefix="xl-invalidated-"))
+    try:
+        shutil.copytree(path / "reference", fresh, dirs_exist_ok=True)
+        shutil.copytree(path / "workspace", fresh, dirs_exist_ok=True)
+        shutil.copytree(path / "change" / "patch", fresh, dirs_exist_ok=True)
+        strip_agent_tests(fresh, seed)
+        for test in sorted((path / "hidden").rglob("*.py")):
+            rel = test.relative_to(path / "hidden")
+            (fresh / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(test, fresh / rel)
+        proc = subprocess.run(
+            [
+                str(venv_python or sys.executable),
+                "-m",
+                "pytest",
+                "-q",
+                "--tb=no",
+                "-p",
+                "no:cacheprovider",
+                "-o",
+                "addopts=",
+                entry,
+            ],
+            cwd=fresh,
+            capture_output=True,
+            text=True,
+            timeout=900.0,
+            check=False,
+            env={**os.environ, "XL_WORKSPACE": str(fresh), "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        counts = parse_pytest_summary(proc.stdout + proc.stderr)
+        return counts["passed"] == 0 and counts["failed"] + counts["errors"] > 0
+    finally:
+        shutil.rmtree(fresh, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1176,6 +1447,7 @@ def run_one_cell(
         extra_hidden=(fixture.dir / "change" / "hidden") if perturbed else None,
         invalidated=fixture.invalidated if perturbed else None,
         venv_python=Path(ctx["venv_python"]),
+        seed_dir=fixture.dir / "workspace",
     )
     text = "\n".join(stream.read_text(errors="replace") for stream in streams)
     text = text.replace(str(root), "<RUN>")

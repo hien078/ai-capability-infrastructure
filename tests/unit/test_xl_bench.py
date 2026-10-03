@@ -620,16 +620,120 @@ def test_hidden_suite_result_runs_fresh_copy_outside(tmp_path: Path) -> None:
     (work / "mod.py").write_text("value = 0\n")
     grade = xb.hidden_suite_result(work, hidden)
     assert grade["pass_fraction"] == 0.0 and grade["failed"] == 1
-    # Invalidated originals are removed for perturbed grading.
+    assert grade["failed_ids"] == ["test_mod.py::test_v"]
+    # Invalidated originals are removed for perturbed grading (file form).
     (work / "mod.py").write_text("value = 1\n")
     grade = xb.hidden_suite_result(work, hidden, invalidated=["test_mod.py"])
     assert grade["pass_fraction"] == 0.0  # no tests ran -> fraction 0, exit != 0
+    # Node form deselects exactly one test of a collected file.
+    (work / "mod.py").write_text("value = 1\n")
+    (hidden / "test_mod2.py").write_text("def test_two():\n    assert True\n")
+    grade = xb.hidden_suite_result(work, hidden, invalidated=["test_mod.py::test_v"])
+    assert grade["passed"] == 1 and grade["failed"] == 0  # only test_two ran
+
+
+def test_hidden_suite_isolation_grades_only_the_hidden_suite(tmp_path: Path) -> None:
+    """FIX 1 (hidden-suite isolation): the score counts ONLY the hidden suite.
+    An agent-written always-pass test must not inflate the fraction, a
+    malicious agent conftest.py must not be able to monkeypatch the product
+    into passing, and an agent pytest config (addopts) must not be able to
+    silently deselect the hidden tests. Seed-shipped test files survive the
+    strip (trusted fixture content); everything else test-shaped goes."""
+    seed = tmp_path / "seed"
+    work = tmp_path / "work"
+    for d in (seed, work):
+        d.mkdir()
+        (d / "mod.py").write_text("value = 0\n")  # the bug is still there
+    # what the agent left behind in the final workspace:
+    (work / "test_agent_wins.py").write_text("def test_w():\n    assert True\n")
+    (work / "conftest.py").write_text("import mod\nmod.value = 1\n")  # the fake-green patch
+    (seed / "test_shipped.py").write_text("def test_s():\n    assert True\n")
+    (work / "test_shipped.py").write_text("def test_s():\n    assert True\n")  # byte-identical
+    (work / "test_shipped_tampered.py").write_text("def test_s():\n    assert True\n")
+    (work / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\naddopts = '--deselect test_mod.py::test_v'\n"
+    )
+    hidden = tmp_path / "hidden"
+    hidden.mkdir()
+    (hidden / "test_mod.py").write_text(
+        "from mod import value\n\n\ndef test_v():\n    assert value == 1\n"
+    )
+    grade = xb.hidden_suite_result(work, hidden, seed_dir=seed)
+    # ONLY the hidden test ran, and it FAILED (the bug is real): the agent's
+    # always-pass test did not inflate the score and the conftest did not
+    # patch the product into passing.
+    assert grade["passed"] == 0 and grade["failed"] == 1
+    assert grade["pass_fraction"] == 0.0
+    assert grade["failed_ids"] == ["test_mod.py::test_v"]
+    # the strip removed exactly the agent-written test-shaped files; the
+    # seed-identical shipped test survived (and is not a hidden path, so it
+    # is not collected either).
+    assert sorted(grade["stripped_agent_tests"]) == [
+        "conftest.py",
+        "test_agent_wins.py",
+        "test_shipped_tampered.py",
+    ]
+    # Real work still scores: fix the bug and the hidden suite goes green —
+    # the isolation hides only the agent's test files, never the product.
+    (work / "mod.py").write_text("value = 1\n")
+    grade = xb.hidden_suite_result(work, hidden, seed_dir=seed)
+    assert grade["pass_fraction"] == 1.0 and grade["passed"] == 1
+    # Without a seed_dir every test-shaped file is stripped (fail-closed).
+    (work / "mod.py").write_text("value = 0\n")
+    grade = xb.hidden_suite_result(work, hidden)
+    assert grade["failed"] == 1 and grade["passed"] == 0
+
+
+def test_strip_agent_tests_seed_identical_rule(tmp_path: Path) -> None:
+    """The byte-identity rule, pinned directly: identical to the seed -> kept;
+    different bytes or not in the seed -> removed; non-test files untouched."""
+    seed = tmp_path / "seed"
+    fresh = tmp_path / "fresh"
+    for d in (seed, fresh):
+        d.mkdir()
+    (seed / "conftest.py").write_text("# fixture harness\n")
+    (fresh / "conftest.py").write_text("# fixture harness\n")  # identical -> kept
+    (seed / "test_shipped.py").write_text("def test_a():\n    assert True\n")
+    (fresh / "test_shipped.py").write_text("def test_a():\n    assert True\n")  # kept
+    (fresh / "test_evil.py").write_text("def test_b():\n    assert True\n")  # stripped
+    (fresh / "pkg" / "conftest.py").parent.mkdir()
+    (fresh / "pkg" / "conftest.py").write_text("import mod\n")  # stripped (not in seed)
+    (fresh / "mod.py").write_text("value = 0\n")  # NOT test-shaped -> untouched
+    removed = xb.strip_agent_tests(fresh, seed)
+    assert sorted(removed) == ["pkg/conftest.py", "test_evil.py"]
+    assert (fresh / "conftest.py").is_file()
+    assert (fresh / "test_shipped.py").is_file()
+    assert (fresh / "mod.py").is_file()
+    assert not (fresh / "test_evil.py").exists()
+    assert not (fresh / "pkg" / "conftest.py").exists()
+
+
+def test_id_covers_forms() -> None:
+    """The declared-id matcher: directory prefixes, parametrizations, files."""
+    assert xb._id_covers("test_x.py::test_y", "test_x.py::test_y")
+    assert xb._id_covers("test_x.py::test_y", "sub/test_x.py::test_y")
+    assert xb._id_covers("test_x.py::test_y", "test_x.py::test_y[p1]")
+    assert xb._id_covers("test_x.py", "sub/test_x.py::test_y[q]")
+    assert not xb._id_covers("test_x.py::test_y", "test_x.py::test_other")
+    assert not xb._id_covers("test_x.py::test_y", "test_z.py::test_y")
 
 
 # -- fixture format + validator ---------------------------------------------
 
 
-def _make_fixture(root: Path, *, reference_fixes: bool = True) -> Path:
+def _make_fixture(
+    root: Path,
+    *,
+    reference_fixes: bool = True,
+    change_bites: bool = True,
+    patch_implements: bool = True,
+    guards: list[str] | None = None,
+) -> Path:
+    """A demo fixture in the UNIFIED change semantics: the change REVERSES
+    the original behavior (add() becomes product semantics), so the
+    invalidated original test fails on the patch, the change test bites on
+    the unpatched reference, and reference+patch passes the post-change
+    suite. Knobs break one property at a time for the rejection tests."""
     fixture = root / "xl-demo"
     (fixture / "workspace").mkdir(parents=True)
     (fixture / "workspace" / "calc.py").write_text(
@@ -647,33 +751,66 @@ def _make_fixture(root: Path, *, reference_fixes: bool = True) -> Path:
     )
     (fixture / "change").mkdir()
     (fixture / "change" / "CHANGE_NOTE.md").write_text(
-        "New requirement: add() must also work for three arguments."
+        "Requirement change: add() now MULTIPLIES its operands — "
+        "add(a, b, ...) returns their product (the old sum behavior is gone)."
     )
     (fixture / "change" / "hidden").mkdir()
-    (fixture / "change" / "hidden" / "test_three.py").write_text(
-        "from calc import add\n\n\ndef test_three():\n    assert add(1, 2) == 3\n"
+    if change_bites:
+        (fixture / "change" / "hidden" / "test_three.py").write_text(
+            "from calc import add\n\n\ndef test_three():\n    assert add(2, 3, 4) == 24\n"
+        )
+    else:  # a change test the unpatched reference already satisfies
+        (fixture / "change" / "hidden" / "test_three.py").write_text(
+            "from calc import add\n\n\ndef test_three():\n    assert add(2, 3) == 5\n"
+        )
+    (fixture / "change" / "invalidates.txt").write_text("test_calc.py::test_add\n")
+    (fixture / "change" / "patch").mkdir()
+    patch_code = (
+        "def add(*operands):\n"
+        "    product = 1\n"
+        "    for operand in operands:\n"
+        "        product *= operand\n"
+        "    return product\n"
     )
+    if patch_implements:
+        (fixture / "change" / "patch" / "calc.py").write_text(patch_code)
+    else:  # a patch that does not implement the change
+        (fixture / "change" / "patch" / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    if guards is not None:
+        (fixture / "change" / "guards.txt").write_text("\n".join(guards) + ("\n" if guards else ""))
     (fixture / "TASK.md").write_text("Make the test suite pass.")
     return fixture
 
 
 def test_load_fixture_reads_change_pack(tmp_path: Path) -> None:
-    fixture = xb.load_fixture(_make_fixture(tmp_path))
+    fixture = xb.load_fixture(_make_fixture(tmp_path, guards=["test_three.py::test_three"]))
     assert fixture.name == "xl-demo"
     assert fixture.perturbed
-    assert fixture.change_note and "three arguments" in fixture.change_note
+    assert fixture.change_note and "MULTIPLIES" in fixture.change_note
+    assert fixture.invalidated == ["test_calc.py::test_add"]
+    assert fixture.guards == ["test_three.py::test_three"]
     bare = tmp_path / "bare"
     bare.mkdir()
     (bare / "TASK.md").write_text("task")
     assert xb.load_fixture(bare).change_note is None
+    assert xb.load_fixture(bare).invalidated == []
+    assert xb.load_fixture(bare).guards == []
 
 
-def test_verify_fixture_accepts_honest_fixture(tmp_path: Path, capsys) -> None:
+def test_verify_fixture_accepts_the_unified_semantics(tmp_path: Path, capsys) -> None:
+    """All six cases green on an honest fixture: fail-as-shipped (both
+    suites), pass-when-solved (original), the BITE (the unpatched reference
+    fails the post-change suite, every non-guard change test failing),
+    pass-when-solved (reference + patch), and the EXACT reversal (the
+    original suite on the patch fails exactly the invalidated test)."""
     fixture = _make_fixture(tmp_path)
     assert xb.verify_fixture(fixture) == 0
     out = capsys.readouterr().out
     assert "fail-as-shipped (seed, original suite)" in out
-    assert "pass-when-solved (reference, post-change suite)" in out
+    assert "the change BITES (reference, post-change suite)" in out
+    assert "pass-when-solved (reference + change patch, post-change suite)" in out
+    assert "the reversal is exact (reference + patch, ORIGINAL suite)" in out
+    assert "bite detail: 1/1 change tests fail pre-patch" in out
 
 
 def test_verify_fixture_rejects_reference_that_does_not_solve(tmp_path: Path) -> None:
@@ -681,7 +818,85 @@ def test_verify_fixture_rejects_reference_that_does_not_solve(tmp_path: Path) ->
     assert xb.verify_fixture(fixture) == 1
 
 
+def test_verify_fixture_rejects_a_change_that_does_not_bite(tmp_path: Path, capsys) -> None:
+    """A change test the unpatched reference already passes measures nothing
+    about the change — the bite check must flag it (job item 3's class)."""
+    fixture = _make_fixture(tmp_path, change_bites=False)
+    assert xb.verify_fixture(fixture) == 1
+    assert "do not bite pre-patch" in capsys.readouterr().out
+
+
+def test_verify_fixture_rejects_a_patch_that_does_not_implement(tmp_path: Path) -> None:
+    fixture = _make_fixture(tmp_path, patch_implements=False)
+    assert xb.verify_fixture(fixture) == 1
+
+
+def test_verify_fixture_rejects_unknown_guard(tmp_path: Path, capsys) -> None:
+    fixture = _make_fixture(tmp_path, guards=["test_calc.py::test_add"])
+    assert xb.verify_fixture(fixture) == 1
+    assert "guard is not a change test" in capsys.readouterr().out
+
+
+def test_verify_fixture_rejects_invalidates_of_a_non_original_test(tmp_path: Path, capsys) -> None:
+    fixture = _make_fixture(tmp_path)
+    (fixture / "change" / "invalidates.txt").write_text("test_nope.py::test_missing\n")
+    assert xb.verify_fixture(fixture) == 1
+    assert "invalidates a non-original test" in capsys.readouterr().out
+
+
+def test_verify_fixture_rejects_a_patch_targeting_unknown_files(tmp_path: Path, capsys) -> None:
+    fixture = _make_fixture(tmp_path)
+    (fixture / "change" / "patch" / "unknown.py").write_text("x = 1\n")
+    assert xb.verify_fixture(fixture) == 1
+    assert "patch targets an unknown file" in capsys.readouterr().out
+
+
+def test_verify_fixture_reversal_overreach_is_a_violation(tmp_path: Path, capsys) -> None:
+    """If the patch breaks an original test that is NOT invalidated, the
+    reversal is not exact — a violation (the change must reverse only what
+    it claims)."""
+    fixture = _make_fixture(tmp_path)
+    # a patch that ALSO breaks the (non-invalidated) original behavior in a
+    # second file the original suite covers
+    (fixture / "workspace" / "other.py").write_text("def one():\n    return 1\n")
+    (fixture / "hidden" / "test_other.py").write_text(
+        "from other import one\n\n\ndef test_one():\n    assert one() == 1\n"
+    )
+    (fixture / "change" / "patch" / "other.py").write_text("def one():\n    return 2\n")
+    assert xb.verify_fixture(fixture) == 1
+    assert "over-reaches" in capsys.readouterr().out
+
+
 # -- the runner's guards -----------------------------------------------------
+
+
+def test_arm_endpoints_bridge_gateway_and_sidecar() -> None:
+    """The sandbox has NO network: A1 gets ONLY the gateway bridge; A2/A3
+    get gateway + sidecar (the delegate tool's bridge). Nothing else is
+    reachable — not the ACI server, not the DB, not sibling runs."""
+    gw = xb._arm_endpoints("A1", "http://localhost:20128/v1", "http://127.0.0.1:8770")
+    assert gw == [("localhost", 20128, "gateway")]
+    for arm in ("A2", "A3"):
+        assert xb._arm_endpoints(arm, "http://localhost:20128/v1", "http://127.0.0.1:8770") == [
+            ("localhost", 20128, "gateway"),
+            ("127.0.0.1", 8770, "sidecar"),
+        ]
+
+
+def test_url_endpoint_parses_host_and_port() -> None:
+    assert xb._url_endpoint("http://localhost:20128/v1") == ("localhost", 20128)
+    assert xb._url_endpoint("http://127.0.0.1:8770") == ("127.0.0.1", 8770)
+    assert xb._url_endpoint("http://no-port.example/") == ("no-port.example", 80)
+
+
+def test_opencode_runs_are_always_standalone() -> None:
+    """FIX 5: never a shared `opencode serve --service` (the macOS lesson: a
+    bench session resumed old runs and kept running after the bench). Both
+    benches always run `opencode run --standalone`."""
+    for source in ("xl_bench.py", "rc_bench.py"):
+        text = (SCRIPTS / source).read_text(encoding="utf-8")
+        assert '"run", "--standalone"' in text, source
+        assert '"serve"' not in text, source  # never a serve command
 
 
 def test_round_refused_off_linux(monkeypatch) -> None:
