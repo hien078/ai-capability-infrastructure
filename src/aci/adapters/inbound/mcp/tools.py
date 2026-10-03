@@ -19,10 +19,21 @@ from uuid import uuid4
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
+from aci.adapters.inbound.rest.agent_runs import (
+    MAX_COMMAND_ITEM_CHARS,
+    MAX_CONTEXT_CHARS,
+    MAX_ITEM_CHARS,
+    MAX_LIST_ITEMS,
+    AgentRunRequest,
+    AgentRunResponse,
+    agent_run_response,
+    start_run,
+)
 from aci.application.report_outcome import ReportOutcomeService, new_outcome_id
 from aci.application.route_capabilities import RouteCapabilitiesService
+from aci.application.run_agent_task import AgentRunService
 from aci.application.search_capabilities import SearchCapabilitiesService
-from aci.domain.capability.errors import DomainError
+from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.capability.models import (
     DEFAULT_MAX_CONTEXT_TOKENS,
     CapabilityKind,
@@ -191,3 +202,112 @@ def make_report_outcome_tool(service: ReportOutcomeService) -> Callable[..., Out
             raise _tool_error(exc) from exc
 
     return report_outcome
+
+
+# -- agent-run tools (ACI_MCP_AGENT_RUNS, default OFF) -------------------------
+#
+# Small and stable like the rest of the set (§29.2 — never one tool per
+# skill): start / read / cancel over the SAME AgentRunService the REST
+# routes use. The bounds below mirror AgentRunRequest (§11.3) so the SDK's
+# argument validation rejects bad input as a ToolError; the fn then
+# re-validates through the model itself — one validation path, no second
+# weaker copy. Gated behind ACI_MCP_AGENT_RUNS because this is a NEW
+# execution surface: a run executes workspace code on the server host.
+
+_OBJECTIVE = Annotated[str, Field(min_length=1, max_length=8000)]
+_RUN_TEXT = Annotated[str, Field(max_length=MAX_ITEM_CHARS)]
+_RUN_CONTEXT = Annotated[str, Field(max_length=MAX_CONTEXT_CHARS)]
+_RUN_COMMAND_ITEM = Annotated[str, Field(max_length=MAX_COMMAND_ITEM_CHARS)]
+_RUN_TOOL_ID = Annotated[str, Field(max_length=200)]
+_RUN_LIST = Annotated[list[_RUN_TEXT], Field(max_length=MAX_LIST_ITEMS)]
+_RUN_COMMAND = Annotated[list[_RUN_COMMAND_ITEM], Field(min_length=1, max_length=MAX_LIST_ITEMS)]
+_RUN_TURNS = Annotated[int, Field(ge=1, le=200)]
+
+
+def make_run_agent_task_tool(service: AgentRunService) -> Callable[..., AgentRunResponse]:
+    """``run_agent_task``: start a HarnessKernel run, return its terminal state."""
+
+    def run_agent_task(
+        objective: _OBJECTIVE,
+        global_context: _RUN_CONTEXT = "",
+        constraints: _RUN_LIST | None = None,
+        acceptance_criteria: _RUN_LIST | None = None,
+        requested_profile: str = "coder",
+        max_turns: _RUN_TURNS | None = None,
+        workspace: str | None = None,
+        verification_command: _RUN_COMMAND | None = None,
+        write_scopes: _RUN_LIST | None = None,
+        command_prefixes: _RUN_LIST | None = None,
+        approval_required_tools: Annotated[list[_RUN_TOOL_ID], Field(max_length=50)] | None = None,
+        preload_capabilities: bool | None = None,
+    ) -> AgentRunResponse:
+        """Run a delegated agent task to its terminal state and return the
+        compact result: status, stop reason, summary, evidence verdict,
+        checks, evidence refs, artifacts, turns/tool calls/wall time.
+
+        The run executes on the SERVER (sandboxed per its policy) — this is
+        delegation, not local tool use. `workspace` names a directory under
+        the server's workspace root the run works in a copy of;
+        `verification_command` is the acceptance test argv the verifier
+        gates completion on. The response is the same read model as
+        GET /v1/agent-runs/{run_id}.
+        """
+        request = AgentRunRequest(
+            objective=objective,
+            global_context=global_context,
+            constraints=list(constraints or []),
+            acceptance_criteria=list(acceptance_criteria or []),
+            requested_profile=requested_profile,
+            max_turns=max_turns,
+            workspace=workspace,
+            verification_command=list(verification_command) if verification_command else None,
+            write_scopes=list(write_scopes) if write_scopes is not None else None,
+            command_prefixes=list(command_prefixes) if command_prefixes is not None else None,
+            approval_required_tools=(
+                list(approval_required_tools) if approval_required_tools is not None else None
+            ),
+            preload_capabilities=preload_capabilities,
+        )
+        try:
+            return start_run(service, request)
+        except DomainError as exc:
+            raise _tool_error(exc) from exc
+
+    return run_agent_task
+
+
+def make_get_agent_run_tool(service: AgentRunService) -> Callable[..., AgentRunResponse]:
+    """``get_agent_run``: the shared run read model (RAM first, then the store)."""
+
+    def get_agent_run(run_id: str) -> AgentRunResponse:
+        """Read one agent run: status, stop reason, summary, evidence
+        verdict, checks, evidence refs, artifacts, usage. The same read
+        model as GET /v1/agent-runs/{run_id} — fields the server does not
+        provide (e.g. usage/changes on an older build) are absent, never
+        guessed."""
+        try:
+            result = service.get(run_id)
+        except DomainError as exc:
+            raise _tool_error(exc) from exc
+        if result is None:
+            raise _tool_error(
+                DomainError(ErrorCode.ROUTE_RUN_NOT_FOUND, f"unknown agent run: {run_id}")
+            )
+        return agent_run_response(result)
+
+    return get_agent_run
+
+
+def make_cancel_agent_run_tool(service: AgentRunService) -> Callable[..., dict[str, bool]]:
+    """``cancel_agent_run``: request cancellation; the run ends CANCELLED."""
+
+    def cancel_agent_run(run_id: str) -> dict[str, bool]:
+        """Ask the server to cancel an agent run. Returns
+        {"cancelled": true} when the cancellation was requested in time —
+        a run that already reached a terminal state answers false."""
+        try:
+            return {"cancelled": service.cancel(run_id)}
+        except DomainError as exc:
+            raise _tool_error(exc) from exc
+
+    return cancel_agent_run

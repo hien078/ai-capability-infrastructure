@@ -7,6 +7,7 @@ and a ``skill://`` resource template for file bytes. Stateless by contract
 registry under ``route_run_id``/``bundle_id``.
 """
 
+import logging
 from typing import Any
 
 from mcp.server.mcpserver.exceptions import ResourceError, ResourceNotFoundError
@@ -14,8 +15,11 @@ from mcp.server.mcpserver.server import MCPServer
 
 from aci.adapters.inbound.mcp.skills import SkillCatalog, SkillsExtension
 from aci.adapters.inbound.mcp.tools import (
+    make_cancel_agent_run_tool,
+    make_get_agent_run_tool,
     make_report_outcome_tool,
     make_route_tool,
+    make_run_agent_task_tool,
     make_search_tool,
 )
 from aci.adapters.inbound.rest.wiring import Container
@@ -68,6 +72,47 @@ def create_mcp_server(container: Container) -> MCPServer[Any]:
             "confidence) to a routed bundle by route_run_id/bundle_id."
         ),
     )
+
+    # Agent-run tools (HarnessKernel surface, ADR-014): gated behind
+    # ACI_MCP_AGENT_RUNS (default OFF) — a NEW execution surface. They call
+    # the SAME AgentRunService the REST routes use (rest/agent_runs.start_run
+    # — one translation, no second path). The /mcp transport itself is gated
+    # by ACI_API_TOKEN (http.py); ACI_AGENT_RUNS_TOKEN guards only the REST
+    # routes, so an unauthenticated /mcp deployment exposing these tools
+    # gets one loud warning, not silence.
+    if container.settings.mcp_agent_runs:
+        if not container.settings.api_token:
+            logging.getLogger("aci.mcp").warning(
+                "ACI_MCP_AGENT_RUNS is ON while ACI_API_TOKEN is unset — the "
+                "run_agent_task/get_agent_run/cancel_agent_run tools are exposed "
+                "over /mcp UNAUTHENTICATED; keep the port on localhost or set "
+                "ACI_API_TOKEN before exposing it"
+            )
+        server.add_tool(
+            make_run_agent_task_tool(container.agent_run_service),
+            name="run_agent_task",
+            description=(
+                "Run a delegated agent task on the server to its terminal state "
+                "(HarnessKernel): objective + optional constraints, workspace, "
+                "verification command, write scopes, turn budget. Returns the "
+                "compact result with evidence — the same read model as "
+                "GET /v1/agent-runs/{run_id}."
+            ),
+        )
+        server.add_tool(
+            make_get_agent_run_tool(container.agent_run_service),
+            name="get_agent_run",
+            description=(
+                "Read one agent run: status, stop reason, summary, evidence "
+                "verdict, checks, artifacts, usage. Unknown run → tool error "
+                "ROUTE_RUN_NOT_FOUND."
+            ),
+        )
+        server.add_tool(
+            make_cancel_agent_run_tool(container.agent_run_service),
+            name="cancel_agent_run",
+            description="Request cancellation of an agent run (a terminal run answers false).",
+        )
 
     # §29.1/§29.3: file bytes travel over resources/read on skill:// URIs —
     # the same URIs the Skills extension manifest advertises. The catalog
