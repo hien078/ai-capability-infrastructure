@@ -12,6 +12,7 @@ open, and then left in place untouched as the backup.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -32,17 +33,25 @@ def _ident(name: str) -> str:
 
 
 class Engine:
-    """All sql, no policy — the facades keep the public API."""
+    """All sql, no policy — the facades keep the public API.
+
+    The connection is created with ``check_same_thread=False`` and every
+    operation holds one reentrant lock: the app layer's stdlib HTTP
+    server answers each request on its own thread, and the engine must
+    survive that (the JSON engine always did).
+    """
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "flatvault.db"
-        self.conn = sqlite3.connect(str(self.path), isolation_level=None)
-        self.conn.execute(
-            f"CREATE TABLE IF NOT EXISTS {META_TABLE} (key TEXT PRIMARY KEY, value TEXT)"
-        )
-        self._migrate_legacy_files()
+        self._lock = threading.RLock()
+        self.conn = sqlite3.connect(str(self.path), isolation_level=None, check_same_thread=False)
+        with self._lock:
+            self.conn.execute(
+                f"CREATE TABLE IF NOT EXISTS {META_TABLE} (key TEXT PRIMARY KEY, value TEXT)"
+            )
+            self._migrate_legacy_files()
 
     # ---------------------------------------------------------------- schema
 
@@ -59,9 +68,10 @@ class Engine:
         return row is not None
 
     def table_names(self) -> list[str]:
-        rows = self.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 't_%'"
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 't_%'"
+            ).fetchall()
         names = {row[0][2:] for row in rows}  # strip the t_ prefix
         return sorted(names)
 
@@ -110,17 +120,18 @@ class Engine:
 
     @contextmanager
     def _atomic(self) -> Iterator[None]:
-        """One sqlite transaction unless an outer one is already open."""
-        if self.conn.in_transaction:
-            yield
-            return
-        self.conn.execute("BEGIN")
-        try:
-            yield
-        except BaseException:
-            self.conn.execute("ROLLBACK")
-            raise
-        self.conn.execute("COMMIT")
+        """One locked sqlite transaction unless an outer one is open."""
+        with self._lock:
+            if self.conn.in_transaction:
+                yield
+                return
+            self.conn.execute("BEGIN")
+            try:
+                yield
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+            self.conn.execute("COMMIT")
 
     def _allocate_id(self, name: str) -> int:
         """The next id: the counter, or above the current maximum."""
@@ -146,15 +157,17 @@ class Engine:
         return row_id
 
     def get(self, name: str, row_id: int) -> dict[str, Any] | None:
-        self._ensure_table(name)
-        row = self.conn.execute(
-            f"SELECT doc FROM {_ident(name)} WHERE id = ?", (row_id,)
-        ).fetchone()
+        with self._lock:
+            self._ensure_table(name)
+            row = self.conn.execute(
+                f"SELECT doc FROM {_ident(name)} WHERE id = ?", (row_id,)
+            ).fetchone()
         return serialize.load(row[0]) if row else None
 
     def iter_rows(self, name: str) -> list[dict[str, Any]]:
-        self._ensure_table(name)
-        rows = self.conn.execute(f"SELECT doc FROM {_ident(name)} ORDER BY id").fetchall()
+        with self._lock:
+            self._ensure_table(name)
+            rows = self.conn.execute(f"SELECT doc FROM {_ident(name)} ORDER BY id").fetchall()
         return [serialize.load(row[0]) for row in rows]
 
     def find(self, name: str, query: Query | None = None) -> list[dict[str, Any]]:
@@ -185,8 +198,9 @@ class Engine:
 
     def count(self, name: str, query: Query | None = None) -> int:
         if query is None:
-            self._ensure_table(name)
-            row = self.conn.execute(f"SELECT COUNT(*) FROM {_ident(name)}").fetchone()
+            with self._lock:
+                self._ensure_table(name)
+                row = self.conn.execute(f"SELECT COUNT(*) FROM {_ident(name)}").fetchone()
             return int(row[0])
         return len(self.find(name, query))
 
@@ -206,25 +220,31 @@ class Engine:
     # ----------------------------------------------------------- transactions
 
     def begin(self) -> None:
-        self.conn.execute("BEGIN")
+        with self._lock:
+            self.conn.execute("BEGIN")
 
     def commit(self) -> None:
-        self.conn.execute("COMMIT")
+        with self._lock:
+            self.conn.execute("COMMIT")
 
     def rollback(self) -> None:
-        self.conn.execute("ROLLBACK")
+        with self._lock:
+            self.conn.execute("ROLLBACK")
 
     def savepoint(self, name: str) -> None:
         """Open a savepoint inside the current transaction."""
-        self.conn.execute(f"SAVEPOINT {name}")
+        with self._lock:
+            self.conn.execute(f"SAVEPOINT {name}")
 
     def rollback_to(self, name: str) -> None:
         """Undo everything back to (and keep) a savepoint."""
-        self.conn.execute(f"ROLLBACK TO {name}")
+        with self._lock:
+            self.conn.execute(f"ROLLBACK TO {name}")
 
     def release(self, name: str) -> None:
         """Close a savepoint (its work joins the outer transaction)."""
-        self.conn.execute(f"RELEASE {name}")
+        with self._lock:
+            self.conn.execute(f"RELEASE {name}")
 
     def batch_insert(self, name: str, docs: list[dict[str, Any]]) -> list[int]:
         """Insert many rows in one transaction; returns their ids in order."""
@@ -235,4 +255,5 @@ class Engine:
         return ids
 
     def close(self) -> None:
-        self.conn.close()
+        with self._lock:
+            self.conn.close()

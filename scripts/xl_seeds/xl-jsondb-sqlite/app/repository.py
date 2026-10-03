@@ -83,6 +83,18 @@ class PostRepository:
                 tags[tag] = tags.get(tag, 0) + 1
         return tags
 
+    def by_tag(self, tag: str) -> list[Post]:
+        """Posts carrying one tag, newest first."""
+        posts = [post for post in self.all() if tag in post.tags]
+        posts.sort(key=lambda post: (-post.created_at.timestamp(), post.id or 0))
+        return posts
+
+    def recent(self, limit: int) -> list[Post]:
+        """The newest ``limit`` posts."""
+        posts = self.all()
+        posts.sort(key=lambda post: (-post.created_at.timestamp(), post.id or 0))
+        return posts[:limit]
+
 
 class CommentRepository:
     """Comments over the ``comments`` table."""
@@ -112,6 +124,9 @@ class CommentRepository:
 
     def count(self) -> int:
         return len(self._table().all())
+
+    def all_rows(self) -> list[Comment]:
+        return [Comment.from_row(row) for row in self._table().all()]
 
     def any_row(self) -> dict[str, Any] | None:
         rows = self._table().all()

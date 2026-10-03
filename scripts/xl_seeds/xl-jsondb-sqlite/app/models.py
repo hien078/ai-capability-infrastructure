@@ -36,6 +36,12 @@ class Post:
             "created_at": self.created_at,
         }
 
+    def to_json_row(self) -> dict:
+        """The row with JSON-safe values (timestamps as ISO strings)."""
+        row = self.to_row()
+        row["created_at"] = self.created_at.isoformat()
+        return row
+
     @classmethod
     def from_row(cls, row: dict) -> Post:
         return cls(
@@ -67,6 +73,12 @@ class Comment:
             "body": self.body,
             "created_at": self.created_at,
         }
+
+    def to_json_row(self) -> dict:
+        """The row with JSON-safe values (timestamps as ISO strings)."""
+        row = self.to_row()
+        row["created_at"] = self.created_at.isoformat()
+        return row
 
     @classmethod
     def from_row(cls, row: dict) -> Comment:

@@ -57,6 +57,17 @@ blog --root data stats
 
 Slugs are derived from the title and uniquified (``hello``, ``hello-2``).
 
+## The blog HTTP API
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/posts` | `{"posts": [post], "count": n}` — `?published=true&limit=` |
+| GET | `/posts/{slug}` | `{"post": post, "comments": [comment]}` or 404 |
+| POST | `/posts` | body `{"title", "body", "tags"}` → 201 post |
+| POST | `/posts/{slug}/comments` | body `{"author", "body"}` → 201 comment |
+
+Timestamps on the wire are ISO strings; in the store they are datetimes.
+
 ## Known limits (why a refactor is coming)
 
 The JSON engine rewrites a whole file per save, scans every row per

@@ -61,3 +61,18 @@ class BlogService:
             "comments": self.comments.count(),
             "tags": self.posts.count_by_tag(),
         }
+
+    def archive(self) -> dict[str, list[str]]:
+        """Published slugs grouped by year-month, newest month first."""
+        months: dict[str, list[str]] = {}
+        for post in self.posts.all(published=True):
+            key = f"{post.created_at.year:04d}-{post.created_at.month:02d}"
+            months.setdefault(key, []).append(post.slug)
+        return dict(sorted(months.items(), reverse=True))
+
+    def export(self) -> dict[str, Any]:
+        """The whole blog as plain data (backup/migration format)."""
+        return {
+            "posts": [post.to_row() for post in self.posts.all()],
+            "comments": [comment.to_row() for comment in self.comments.all_rows()],
+        }
