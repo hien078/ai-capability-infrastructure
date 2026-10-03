@@ -30,6 +30,7 @@ from aci.adapters.inbound.mcp.tools import (
     make_run_agent_task_tool,
 )
 from aci.adapters.inbound.rest.agent_runs import AgentRunResponse
+from aci.application.workspace_changes import FileChange, WorkspaceChanges
 from aci.domain.capability.errors import DomainError, ErrorCode
 from aci.domain.runtime.spec import RuntimeSpec
 from aci.domain.runtime.stop_reason import RunStatus, StopReason
@@ -69,6 +70,14 @@ class FakeService:
     def cancel(self, run_id: str) -> bool:
         self.cancelled.append(run_id)
         return run_id in self.stored
+
+    def changes(self, run_id: str) -> WorkspaceChanges | None:
+        if run_id != "run_known":
+            return None
+        return WorkspaceChanges(
+            files=[FileChange(path="calc.py", status="modified", size_after=12)],
+            diff="--- a/calc.py\n+++ b/calc.py\n",
+        )
 
 
 def test_run_agent_task_translates_like_rest() -> None:
@@ -145,6 +154,14 @@ def test_get_agent_run_returns_the_shared_read_model() -> None:
         "succeeded",
         "fixed the off-by-one and verified",
     )
+
+
+def test_get_agent_run_carries_the_workspace_changes() -> None:
+    """The MCP read model is the REST one: ``changes`` (p-agentrun-api)
+    rides along, so an MCP client sees which files a run touched."""
+    response = make_get_agent_run_tool(FakeService())("run_known")
+    assert response.changes is not None
+    assert [f.path for f in response.changes.files] == ["calc.py"]
 
 
 def test_get_agent_run_unknown_is_the_stable_not_found_code() -> None:

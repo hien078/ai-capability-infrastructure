@@ -35,11 +35,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The mounted MCP streamable-HTTP transport (stateless §29.4) needs its
     # session manager's task group for every request; a raw ASGI route has
     # no lifespan of its own, so the app's lifespan enters it here.
-    manager = getattr(app.state, "mcp_session_manager", None)
-    if manager is None:
+    mount = getattr(app.state, "mcp_mount", None)
+    if mount is None:
         log.info("startup complete")
         yield
         return
+    # A FRESH session manager per lifespan (the SDK allows run() once per
+    # instance; one app can see several lifespans).
+    manager = mount.start()
+    app.state.mcp_session_manager = manager
     async with manager.run():
         log.info("startup complete")
         yield
@@ -65,9 +69,9 @@ def create_app(container: Container | None = None) -> FastAPI:
     # with REST/catalog/A2A, stateless, gated by ACI_API_TOKEN exactly like
     # the REST routes. A raw ASGI route (not a Mount) so POST /mcp answers
     # directly — no trailing-slash redirect.
-    mcp_route, mcp_manager = mcp_streamable_http_route(container)
-    app.router.routes.append(mcp_route)
-    app.state.mcp_session_manager = mcp_manager
+    mcp_mount = mcp_streamable_http_route(container)
+    app.router.routes.append(mcp_mount.route)
+    app.state.mcp_mount = mcp_mount
     app.mount(
         "/ui/static",
         StaticFiles(directory=str(Path(rest_ui.__file__).parent / "static")),

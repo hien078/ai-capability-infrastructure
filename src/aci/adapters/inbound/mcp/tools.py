@@ -293,7 +293,7 @@ def make_get_agent_run_tool(service: AgentRunService) -> Callable[..., AgentRunR
             raise _tool_error(
                 DomainError(ErrorCode.ROUTE_RUN_NOT_FOUND, f"unknown agent run: {run_id}")
             )
-        return agent_run_response(result)
+        return agent_run_response(result, service.changes(run_id))
 
     return get_agent_run
 

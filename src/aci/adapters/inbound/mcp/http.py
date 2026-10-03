@@ -107,18 +107,44 @@ def _streamable_http_components(
     return gated, manager
 
 
-def mcp_streamable_http_route(
-    container: Container,
-) -> tuple[Route, "StreamableHTTPSessionManager"]:
-    """The ``/mcp`` Starlette route for ``create_app`` (one process with
-    REST/catalog/A2A) plus the session manager the host MUST enter in its
-    lifespan (``async with manager.run():`` — a raw ASGI route has no
-    lifespan of its own; ``aci.main.lifespan`` does it)."""
-    gated, manager = _streamable_http_components(
-        container, streamable_http_path=MCP_PATH, host=None
-    )
-    route = Route(MCP_PATH, endpoint=gated, name="mcp-streamable-http", include_in_schema=False)
-    return route, manager
+class MCPMount:
+    """The in-app ``/mcp`` endpoint, rebuildable per app lifespan.
+
+    The SDK's ``StreamableHTTPSessionManager.run()`` may be entered ONCE per
+    instance, but one app can see several lifespans (each TestClient /
+    ``lifespan_context``; a server restart in-process). ``start()`` builds a
+    FRESH gated SDK app + session manager and swaps it in; the route always
+    delegates to the current one. Requests before the first ``start()`` are
+    answered 503 (the session manager is not running yet)."""
+
+    def __init__(self, container: Container) -> None:
+        self._container = container
+        self._current: ASGIApp | None = None
+        self.route = Route(
+            MCP_PATH, endpoint=self, name="mcp-streamable-http", include_in_schema=False
+        )
+
+    def start(self) -> "StreamableHTTPSessionManager":
+        gated, manager = _streamable_http_components(
+            self._container, streamable_http_path=MCP_PATH, host=None
+        )
+        self._current = gated
+        return manager
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if self._current is None:
+            await send({"type": "http.response.start", "status": 503, "headers": []})
+            await send({"type": "http.response.body", "body": b"MCP transport not started"})
+            return
+        await self._current(scope, receive, send)
+
+
+def mcp_streamable_http_route(container: Container) -> MCPMount:
+    """The ``/mcp`` mount for ``create_app`` (one process with
+    REST/catalog/A2A). The host MUST call ``mount.start()`` in every lifespan
+    and enter the returned manager (``async with manager.run():`` — a raw
+    ASGI route has no lifespan of its own; ``aci.main.lifespan`` does it)."""
+    return MCPMount(container)
 
 
 def run_streamable_http(container: Container, *, host: str, port: int) -> None:
