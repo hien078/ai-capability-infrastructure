@@ -1,0 +1,22 @@
+[Unit]
+Description=ACI server (REST + OpenCode catalog + MCP) on the tailnet IP
+After=default.target
+
+[Service]
+WorkingDirectory=%h/aci
+Environment=PYTHONPATH=%h/aci/src
+Environment=ACI_DATABASE_URL=postgresql+psycopg://aci:aci@127.0.0.1:5432/aci_bench
+Environment=ACI_EMBEDDER=fastembed
+Environment=ACI_OBJECT_STORE_ROOT=%h/aci/data/objects
+Environment=FASTEMBED_CACHE_PATH=%h/.cache/fastembed
+Environment=OMP_NUM_THREADS=2
+EnvironmentFile=%h/.config/aci/server.env
+# Tailscale IP only (no LAN/public exposure). At boot tailscale0 may not have
+# the IP yet -> bind fails -> systemd retries every 10 s until it does.
+ExecStart=%h/aci/.venv/bin/uvicorn aci.main:app --host 100.67.201.25 --port 8000
+Restart=always
+RestartSec=10
+LimitNOFILE=4096
+
+[Install]
+WantedBy=default.target

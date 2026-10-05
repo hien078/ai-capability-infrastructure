@@ -1,0 +1,7 @@
+[Unit]
+Description=ACI daily DB backup (scripts/backup_dbs.sh, keep 14)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/aci
+ExecStart=%h/aci/scripts/backup_dbs.sh
