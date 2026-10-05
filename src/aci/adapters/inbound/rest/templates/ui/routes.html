@@ -1,25 +1,66 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon, badge, meter, empty %}
 {% block title %}routes · aci console{% endblock %}
 {% block main %}
-<h1>route runs</h1>
-<form method="get" action="/ui/routes">
-  <input name="principal" value="{{ principal }}" placeholder="filter by principal" size="24">
-  <button>filter</button>
-</form>
+<div class="page-head">
+  <div class="titles">
+    <div class="eyebrow">{{ icon('routes', 13) }} telemetry</div>
+    <h1>Route runs</h1>
+    <p class="sub">Every routing request, newest first — each one opens its full §14 stage trace.</p>
+  </div>
+  <div class="actions">
+    <a class="btn" href="/ui/try">{{ icon('try', 14) }} Try a route</a>
+  </div>
+</div>
 
-<table>
-  <tr><th>created (utc)</th><th>principal</th><th>task</th>
-      <th class="num">elig</th><th class="num">ms</th><th>embedder</th></tr>
-  {% for r in runs %}
-  <tr>
-    <td><a href="/ui/routes/{{ r.route_run_id }}">{{ r.created_at.strftime("%m-%d %H:%M:%S") }}</a></td>
-    <td>{{ r.principal_id }}</td>
-    <td class="dim">{{ r.task_text[:64] }}{% if r.task_text|length > 64 %}…{% endif %}</td>
-    <td class="num">{{ r.eligible_count }}</td>
-    <td class="num">{{ r.latency_ms if r.latency_ms is not none else '—' }}</td>
-    <td class="dim">{{ (r.embedder or '—').split(':')[0] }}</td>
-  </tr>
-  {% endfor %}
-</table>
-<span class="dim">{{ runs | length }} most recent runs{% if principal %} · principal={{ principal }}{% endif %}</span>
+<div class="toolbar">
+  <form class="search" method="get" action="/ui/routes" role="search">
+    {{ icon('search', 15) }}
+    <input name="principal" value="{{ principal }}" placeholder="Filter by principal…" aria-label="principal">
+    <button>Filter</button>
+  </form>
+  <div class="chips">
+    <a class="chip{% if not principal %} on{% endif %}" href="/ui/routes">all</a>
+    {% for p in principals %}
+    <a class="chip{% if principal == p.principal_id %} on{% endif %}" href="/ui/routes?principal={{ p.principal_id | urlencode }}">{{ p.principal_id }} <span class="n">{{ p.n }}</span></a>
+    {% endfor %}
+  </div>
+</div>
+
+<section class="card">
+  {% if runs %}
+  <table>
+    <thead>
+      <tr>
+        <th>created (utc)</th><th>principal</th><th>task</th>
+        <th>bundle</th><th class="num">eligible</th><th>latency</th><th>embedder</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in runs %}
+    <tr>
+      <td class="mono nowrap"><a href="/ui/routes/{{ r.route_run_id }}">{{ r.created_at.strftime("%m-%d %H:%M:%S") }}</a></td>
+      <td>{{ badge(r.principal_id, 'neutral') }}</td>
+      <td class="task"><a class="trunc" href="/ui/routes/{{ r.route_run_id }}" title="{{ r.task_text }}">{{ r.task_text }}</a></td>
+      <td class="nowrap">
+        {% if r.error_code %}{{ badge(r.error_code, 'fail') }}
+        {% elif r.item_count %}{{ badge(r.item_count ~ ' item' ~ ('s' if r.item_count != 1 else ''), 'accent') }}
+        {% else %}{{ badge('abstained', 'neutral') }}{% endif %}
+      </td>
+      <td class="num mono">{{ r.eligible_count }}</td>
+      <td style="min-width:150px">
+        {% if r.latency_ms is not none %}
+        <div class="scorecell"><span>{{ meter(r.latency_ms, max_latency or 1, 'dim') }}</span><span class="mono">{{ r.latency_ms }} ms</span></div>
+        {% else %}<span class="faint">—</span>{% endif %}
+      </td>
+      <td class="mono dim nowrap">{{ (r.embedder or '—').split(':')[0] }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="card-foot">{{ runs | length }} most recent runs{% if principal %} · principal = <span class="mono">{{ principal }}</span>{% endif %}</div>
+  {% else %}
+  {{ empty('No route runs' ~ (' for ' ~ principal if principal else ''), 'Clients that call /v1/routes show up here.') }}
+  {% endif %}
+</section>
 {% endblock %}

@@ -44,13 +44,15 @@ _LOGIN_PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sign in · aci console</title><link rel="stylesheet" href="/ui/static/ui.css">
-</head><body><main>
-<h1>aci console</h1><p class="dim">{message}</p>
+</head><body><main class="login"><div class="login-card">
+<div class="brand"><span class="brand-mark">◆</span>
+<span>aci <span class="dim">console</span></span></div>
+<h1>Sign in</h1><p class="dim">{message}</p>
 <form method="post" action="/ui/login">
-<label for="token">api token</label>
-<input type="password" name="token" id="token" autocomplete="current-password" required>
-<p><button>sign in</button></p>
-</form></main></body></html>"""
+<label for="token">API token</label>
+<input type="password" name="token" id="token" autocomplete="current-password" required autofocus>
+<button>Sign in</button>
+</form></div></main></body></html>"""
 
 
 def session_value(api_token: str) -> str:
@@ -205,7 +207,7 @@ def dashboard(
         container,
         "SELECT rr.route_run_id, rr.created_at, rr.principal_id, rr.task_text,"
         " rr.latency_ms, rr.error_code,"
-        " (SELECT count(*) FROM bundle_items bi WHERE bi.bundle_id = rr.bundle_id) AS items"
+        " (SELECT count(*) FROM bundle_items bi WHERE bi.bundle_id = rr.bundle_id) AS item_count"
         " FROM route_runs rr ORDER BY rr.created_at DESC LIMIT 8",
     )
     top_capabilities = _rows(
@@ -254,7 +256,7 @@ def routes(
         "SELECT rr.route_run_id, rr.created_at, rr.principal_id, rr.client_type, rr.task_text,"
         " rr.latency_ms, rr.eligible_count, rr.bundle_id, rr.error_code,"
         " rr.stages -> 'retrieval' ->> 'model_id' AS embedder,"
-        " (SELECT count(*) FROM bundle_items bi WHERE bi.bundle_id = rr.bundle_id) AS items"
+        " (SELECT count(*) FROM bundle_items bi WHERE bi.bundle_id = rr.bundle_id) AS item_count"
         " FROM route_runs rr"
         " WHERE (CAST(:principal AS text) = '' OR rr.principal_id = :principal)"
         " ORDER BY rr.created_at DESC LIMIT 60",
@@ -302,6 +304,16 @@ def route_detail(
     retrieved = stages["retrieved"]
     reranked = stages["reranked"]
     retrieval_rank = {c["capability_id"]: i + 1 for i, c in enumerate(retrieved)}
+    # A real corpus excludes hundreds of candidates for a handful of reasons:
+    # show one row per (reason, detail), largest first, with a few examples.
+    groups: dict[tuple[str, str], list[str]] = {}
+    for e in stages["eligibility"]["excluded"]:
+        key = (str(e.get("reason", "")), str(e.get("detail", "")))
+        groups.setdefault(key, []).append(str(e.get("capability_id", "")))
+    exclusion_groups = [
+        {"reason": r, "detail": d, "count": len(ids), "examples": ids[:3]}
+        for (r, d), ids in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    ]
     return _render(
         request,
         "route_detail.html",
@@ -311,6 +323,7 @@ def route_detail(
         verdicts=verdicts,
         stages=stages,
         retrieval_rank=retrieval_rank,
+        exclusion_groups=exclusion_groups,
         max_retrieved=max((float(c["score"]) for c in retrieved), default=1.0) or 1.0,
         max_reranked=max((float(c["score"]) for c in reranked), default=1.0) or 1.0,
     )

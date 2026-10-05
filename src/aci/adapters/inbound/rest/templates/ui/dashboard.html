@@ -1,43 +1,198 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon, badge, meter, empty %}
 {% block title %}overview · aci console{% endblock %}
 {% block main %}
-<h1>overview</h1>
-
-<div class="grid">
-  {% for row in corpus %}
-  <div class="stat"><div class="k">{{ row.kind }}</div><div class="v">{{ row.n }}</div></div>
-  {% endfor %}
-  <div class="stat"><div class="k">route runs</div><div class="v">{{ routing.runs }}</div></div>
-  <div class="stat"><div class="k">mean latency ms</div><div class="v">{{ routing.mean_latency }}</div></div>
-  <div class="stat"><div class="k">mean eligible</div><div class="v">{{ routing.mean_eligible }}</div></div>
-  <div class="stat"><div class="k">bundles</div>
-    <div class="v">{{ bundles.total }} <span class="dim">({{ bundles.empty }} empty — valid abstention, ADR-008)</span></div></div>
+<div class="page-head">
+  <div class="titles">
+    <div class="eyebrow">{{ icon('overview', 13) }} overview</div>
+    <h1>Registry &amp; routing at a glance</h1>
+    <p class="sub">Corpus, release pointers, routing telemetry and benchmark eras — read live from <span class="mono">{{ env.db }}</span>.</p>
+  </div>
+  <div class="actions">
+    <a class="btn ghost" href="/ui/routes">{{ icon('routes', 14) }} All routes</a>
+    <a class="btn" href="/ui/try">{{ icon('try', 14) }} Try a route</a>
+  </div>
 </div>
 
-<h2>releases</h2>
-<table>
-  <tr><th>channel</th><th>status</th><th class="num">n</th></tr>
-  {% for r in releases %}
-  <tr><td>{{ r.channel }}</td><td>{{ r.status }}</td><td class="num">{{ r.n }}</td></tr>
-  {% endfor %}
-</table>
+{% set success_pct = (100 * verdict_success / verdict_total) | round | int if verdict_total else 0 %}
+{% set empty_pct = (100 * bundles.empty / bundles.total) | round | int if bundles.total else 0 %}
+<div class="kpis">
+  <div class="kpi hero">
+    <div class="kpi-k">{{ icon('corpus', 14) }} Capabilities</div>
+    <div class="kpi-v">{{ corpus_total }}</div>
+    <div class="kpi-s">
+      {{ production_active }} active in production
+      {%- for row in corpus %} · {{ row.n }} {{ row.kind }}{% endfor %}
+    </div>
+    {{ meter(production_active, corpus_total or 1) }}
+  </div>
+  <div class="kpi">
+    <div class="kpi-k">{{ icon('routes', 14) }} Route runs</div>
+    <div class="kpi-v">{{ routing.runs }}</div>
+    <div class="kpi-s">
+      {% if routing.errors %}<span class="badge fail">{{ routing.errors }} errored</span>{% else %}no errors recorded{% endif %}
+    </div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-k">{{ icon('clock', 14) }} Mean latency</div>
+    <div class="kpi-v">{{ routing.mean_latency | int }}<small>ms</small></div>
+    <div class="kpi-s">mean eligible set: {{ routing.mean_eligible | int }}</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-k">{{ icon('tag', 14) }} Bundles</div>
+    <div class="kpi-v">{{ bundles.total }}</div>
+    <div class="kpi-s">{{ bundles.empty }} empty ({{ empty_pct }}%) — valid abstention, ADR-008</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-k">{{ icon('check', 14) }} Verdict success</div>
+    <div class="kpi-v">{{ success_pct }}<small>%</small></div>
+    <div class="kpi-s">{{ verdict_success }} of {{ verdict_total }} verdicts (§33)</div>
+    {{ meter(verdict_success, verdict_total or 1, 'ok') }}
+  </div>
+</div>
 
-<h2>verdicts by source</h2>
-<table>
-  <tr><th>source</th><th>status</th><th class="num">n</th></tr>
-  {% for v in verdicts %}
-  <tr><td>{{ v.source }}</td>
-      <td class="{{ 'ok' if v.status == 'success' else ('fail' if v.status == 'failure' else 'unknown') }}">{{ v.status }}</td>
-      <td class="num">{{ v.n }}</td></tr>
-  {% endfor %}
-</table>
+<div class="grid-3-1">
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('routes', 15) }} Recent route runs</h2>
+      <a class="meta" href="/ui/routes">view all →</a>
+    </div>
+    {% if recent %}
+    <ul class="feed">
+      {% for r in recent %}
+      <li><a href="/ui/routes/{{ r.route_run_id }}">
+        <span class="t trunc">{{ r.task_text }}</span>
+        <span class="m">
+          <span>{{ icon('user', 12) }} {{ r.principal_id }}</span>
+          <span>{{ icon('clock', 12) }} {{ r.created_at.strftime("%m-%d %H:%M") }}</span>
+          <span class="mono">{{ r.latency_ms if r.latency_ms is not none else '—' }} ms</span>
+        </span>
+        <span class="r">
+          {% if r.error_code %}{{ badge(r.error_code, 'fail') }}
+          {% elif r.item_count %}{{ badge(r.item_count ~ ' item' ~ ('s' if r.item_count != 1 else ''), 'accent') }}
+          {% else %}{{ badge('abstained', 'neutral') }}{% endif %}
+        </span>
+      </a></li>
+      {% endfor %}
+    </ul>
+    {% else %}{{ empty('No route runs yet', 'Run one from the Try page — it is recorded like any client call.') }}{% endif %}
+  </section>
 
-<h2>benchmark — full_pipeline mean recall per era</h2>
-<table>
-  <tr><th>label</th><th class="num">results</th><th class="num">mean recall</th></tr>
-  {% for b in benchmarks %}
-  <tr><td>{{ b.label }}</td><td class="num">{{ b.results }}</td>
-      <td class="num">{{ b.mean_recall if b.mean_recall is not none else '—' }}</td></tr>
-  {% endfor %}
-</table>
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('user', 15) }} Clients</h2>
+      <span class="meta">runs per principal</span>
+    </div>
+    <div class="card-body">
+      {% if principals %}
+      <ul class="bars">
+        {% for p in principals %}
+        <li>
+          <span class="label trunc"><a href="/ui/routes?principal={{ p.principal_id | urlencode }}">{{ p.principal_id }}</a>
+            <span class="cell-sub">{{ p.client_type }} · {{ p.mean_latency | int }} ms</span></span>
+          {{ meter(p.n, principal_max, 'info') }}
+          <span class="value">{{ p.n }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}{{ empty('No clients yet') }}{% endif %}
+    </div>
+  </section>
+</div>
+
+<div class="grid-2 mt">
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('check', 15) }} Verdicts by source</h2>
+      <span class="legend meta"><span><i class="ok"></i>success</span><span><i class="fail"></i>failure</span><span><i class="neutral"></i>unknown</span></span>
+    </div>
+    <div class="card-body">
+      {% if verdicts %}
+      <div class="source-rows">
+        {% for source, rows in verdicts | groupby('source') %}
+        {% set ns = namespace(total=0, s=0, f=0) %}
+        {% for v in rows %}
+          {% set ns.total = ns.total + v.n %}
+          {% if v.status == 'success' %}{% set ns.s = ns.s + v.n %}{% elif v.status == 'failure' %}{% set ns.f = ns.f + v.n %}{% endif %}
+        {% endfor %}
+        <div class="source-row">
+          <div class="row">
+            <span class="mono bright">{{ source }}</span>
+            <span class="dim mono">{{ ns.s }}✓ · {{ ns.f }}✗ · {{ ns.total - ns.s - ns.f }}? <span class="faint">/ {{ ns.total }}</span></span>
+          </div>
+          <div class="stackbar">
+            {% if ns.s %}<i class="ok" style="width:{{ 100 * ns.s / ns.total }}%"></i>{% endif %}
+            {% if ns.f %}<i class="fail" style="width:{{ 100 * ns.f / ns.total }}%"></i>{% endif %}
+            {% if ns.total - ns.s - ns.f %}<i class="neutral" style="width:{{ 100 * (ns.total - ns.s - ns.f) / ns.total }}%"></i>{% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}{{ empty('No outcome verdicts yet', 'Clients report them via POST /v1/outcomes.') }}{% endif %}
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('tag', 15) }} Most-bundled capabilities</h2>
+      <span class="meta">bundle appearances</span>
+    </div>
+    <div class="card-body">
+      {% if top_capabilities %}
+      <ul class="bars">
+        {% for c in top_capabilities %}
+        <li>
+          <span class="label trunc mono"><a href="/ui/corpus/{{ c.capability_id }}">{{ c.capability_id }}</a></span>
+          {{ meter(c.n, top_max) }}
+          <span class="value">{{ c.n }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}{{ empty('Nothing bundled yet') }}{% endif %}
+    </div>
+  </section>
+</div>
+
+<div class="grid-2 mt">
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('flask', 15) }} Benchmark eras</h2>
+      <span class="meta">full_pipeline · mean recall</span>
+    </div>
+    <div class="card-body">
+      {% if benchmarks %}
+      <ul class="bars">
+        {% for b in benchmarks %}
+        <li>
+          <span class="label trunc mono">{{ b.label }}<span class="cell-sub">{{ b.results }} cases</span></span>
+          {{ meter((b.mean_recall or 0) | float, 1, 'violet') }}
+          <span class="value">{{ b.mean_recall if b.mean_recall is not none else '—' }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}{{ empty('No benchmark runs', 'scripts/run_benchmark.py --cases dev') }}{% endif %}
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('git', 15) }} Release pointers</h2>
+      <span class="meta">promotion moves these, never versions</span>
+    </div>
+    {% if releases %}
+    <table>
+      <thead><tr><th>channel</th><th>status</th><th class="num">count</th></tr></thead>
+      <tbody>
+      {% for r in releases %}
+      <tr>
+        <td>{{ badge(r.channel, 'ok' if r.channel == 'production' else ('violet' if r.channel == 'staging' else 'neutral'), dot=True) }}</td>
+        <td>{{ badge(r.status) }}</td>
+        <td class="num mono bright">{{ r.n }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<div class="card-body">{{ empty('No releases') }}</div>{% endif %}
+  </section>
+</div>
 {% endblock %}

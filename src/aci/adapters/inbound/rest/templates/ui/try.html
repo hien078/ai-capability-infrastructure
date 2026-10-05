@@ -1,18 +1,71 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon %}
 {% block title %}try · aci console{% endblock %}
 {% block main %}
-<h1>try a route</h1>
-<p class="dim">runs the real §14 pipeline as principal <code>console</code> — telemetry is recorded like any other client's. the run lands on its own detail page.</p>
-<form method="post" action="/ui/try">
-  <label for="task">task</label>
-  <textarea name="task" id="task" required
-    placeholder="debug a flaky python test in the payment retry module"></textarea>
-  <label for="language">language</label>
-  <input name="language" id="language" placeholder="python">
-  <label for="frameworks">frameworks (comma-separated)</label>
-  <input name="frameworks" id="frameworks" placeholder="pytest, sqlalchemy">
-  <label for="phase">phase</label>
-  <input name="phase" id="phase" placeholder="debugging">
-  <p><button>route</button></p>
-</form>
+<div class="page-head">
+  <div class="titles">
+    <div class="eyebrow">{{ icon('try', 13) }} route inspector</div>
+    <h1>Try a route</h1>
+    <p class="sub">Runs the real §14 pipeline as principal <span class="mono">console</span>. Telemetry is recorded like any other client's — then you land on the run's trace.</p>
+  </div>
+</div>
+
+<div class="grid-3-1 top">
+  <section class="card">
+    <div class="card-head"><h2>{{ icon('routes', 15) }} Task</h2></div>
+    <div class="card-body">
+      <form method="post" action="/ui/try">
+        <div class="field">
+          <label for="task">What should the agent do?</label>
+          <textarea name="task" id="task" required autofocus
+            placeholder="debug a flaky python test in the payment retry module">{{ task }}</textarea>
+          <p class="hint">Only this text and the context below are routed — never file contents (§25.4).</p>
+        </div>
+        <div class="fields-3">
+          <div>
+            <label for="language">language <span class="dim">· optional</span></label>
+            <input name="language" id="language" placeholder="python">
+          </div>
+          <div>
+            <label for="frameworks">frameworks <span class="dim">· comma-separated</span></label>
+            <input name="frameworks" id="frameworks" placeholder="pytest, sqlalchemy">
+          </div>
+          <div>
+            <label for="phase">phase <span class="dim">· optional</span></label>
+            <input name="phase" id="phase" placeholder="debugging">
+          </div>
+        </div>
+        <div class="row mt">
+          <button>{{ icon('try', 14) }} Route it</button>
+          <span class="hint" style="margin:0">eligibility → retrieval → rerank → resolve → compose</span>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <div class="stack">
+    <section class="card">
+      <div class="card-head"><h2>{{ icon('sparkle', 15) }} Examples</h2><span class="meta">click to prefill</span></div>
+      <div class="card-body">
+        <ul class="examples">
+          {% for example in examples %}
+          <li><a href="/ui/try?task={{ example | urlencode }}">{{ example }}{{ icon('arrow', 14) }}</a></li>
+          {% endfor %}
+        </ul>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>{{ icon('info', 15) }} What happens</h2></div>
+      <div class="card-body">
+        <ol class="steps">
+          <li><strong>Eligibility</strong>status, channel, license, scope — before any retrieval.</li>
+          <li><strong>Retrieval</strong>trusted summaries only, via <span class="mono">{{ env.embedder }}</span>.</li>
+          <li><strong>Rerank &amp; resolve</strong>can reorder or drop, never rescue.</li>
+          <li><strong>Bundle</strong>possibly empty — abstention is a valid answer.</li>
+        </ol>
+      </div>
+    </section>
+  </div>
+</div>
 {% endblock %}

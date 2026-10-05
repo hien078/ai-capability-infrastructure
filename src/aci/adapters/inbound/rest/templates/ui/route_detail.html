@@ -1,94 +1,213 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon, badge, meter, empty %}
 {% block title %}route · aci console{% endblock %}
 {% block main %}
-<h1>route run</h1>
-<p>
-  <code>{{ run.route_run_id }}</code> ·
-  <span class="dim">{{ run.created_at.strftime("%Y-%m-%d %H:%M:%S") }} utc</span> ·
-  principal <code>{{ run.principal_id }}</code> ·
-  client <span class="dim">{{ run.client_type }}</span> ·
-  latency <span class="num">{{ run.latency_ms }} ms</span> ·
-  <a href="/v1/routes/{{ run.route_run_id }}">raw json</a>
-</p>
+{% set items = bundle.items if bundle else [] %}
+{% set selected = items | map(attribute='capability_id') | list %}
+{% set elig = stages.eligibility %}
+{% set ret = stages.retrieval %}
+{% set rr = stages.rerank %}
+{% set res = stages.resolution %}
 
-<h2>task</h2>
-<pre>{{ run.task_text }}</pre>
+<a class="crumb" href="/ui/routes">{{ icon('back', 13) }} Route runs</a>
+<div class="page-head">
+  <div class="titles">
+    <div class="eyebrow">{{ icon('routes', 13) }} route run
+      {% if run.error_code %}{{ badge(run.error_code, 'fail') }}{% endif %}
+    </div>
+    <h1 class="mono">{{ run.route_run_id }}</h1>
+  </div>
+  <div class="actions">
+    <a class="btn ghost sm" href="/v1/routes/{{ run.route_run_id }}">{{ icon('json', 13) }} Raw JSON</a>
+    <a class="btn ghost sm" href="/ui/try?task={{ run.task_text | urlencode }}">{{ icon('try', 13) }} Re-run</a>
+  </div>
+</div>
 
-<h2>bundle — {{ bundle.items | length }} item{{ 's' if bundle.items | length != 1 }}{% if bundle.items | length == 0 %} (valid abstention, ADR-008){% endif %}</h2>
-{% if bundle %}
-<table>
-  <tr><th>#</th><th>capability</th><th>version</th><th>kind</th><th>role</th><th>digest</th></tr>
-  {% for item in bundle.items %}
-  <tr>
-    <td class="num">{{ loop.index }}</td>
-    <td><a href="/ui/corpus/{{ item.capability_id }}">{{ item.capability_id }}</a></td>
-    <td>{{ item.version }}</td>
-    <td>{{ item.kind }}</td>
-    <td>{{ item.role }}</td>
-    <td class="dim">{{ item.digest[:19] }}…</td>
-  </tr>
-  {% endfor %}
-</table>
-{% else %}
-<p class="dim">no bundle recorded (error_code={{ run.error_code or 'none' }})</p>
-{% endif %}
+<section class="card">
+  <blockquote class="task-quote">{{ run.task_text }}</blockquote>
+  <div class="meta-grid">
+    <div><div class="meta-k">principal</div><div class="meta-v mono">{{ run.principal_id }}</div></div>
+    <div><div class="meta-k">client</div><div class="meta-v">{{ run.client_type }}{% if run.client_version %} <span class="dim mono">{{ run.client_version }}</span>{% endif %}</div></div>
+    <div><div class="meta-k">created (utc)</div><div class="meta-v mono">{{ run.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</div></div>
+    <div><div class="meta-k">latency</div><div class="meta-v mono">{{ run.latency_ms if run.latency_ms is not none else '—' }} ms</div></div>
+    <div><div class="meta-k">embedder</div><div class="meta-v mono">{{ ret.model_id }}</div></div>
+  </div>
+</section>
 
-{% if verdicts %}
-<h2>outcome trail (§33)</h2>
-<table>
-  <tr><th>pos</th><th>source</th><th>status</th><th>confidence</th></tr>
-  {% for v in verdicts %}
-  <tr>
-    <td class="num">{{ v.position }}</td>
-    <td>{{ v.source }}</td>
-    <td class="{{ 'ok' if v.status == 'success' else ('fail' if v.status == 'failure' else 'unknown') }}">{{ v.status }}</td>
-    <td>{{ v.confidence }}</td>
-  </tr>
-  {% endfor %}
-</table>
-{% endif %}
+<h2 class="faint" style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;margin:26px 0 10px">stage traces · §14 pipeline</h2>
+<div class="pipeline">
+  <div class="stage">
+    <div class="stage-n">01</div><div class="stage-name">eligibility</div>
+    <div class="stage-v">{{ elig.kept }}</div>
+    <div class="stage-s">kept{% if elig.excluded %} · <span class="fail">{{ elig.excluded | length }} excluded</span>{% endif %}</div>
+  </div>
+  <div class="stage">
+    <div class="stage-n">02</div><div class="stage-name">retrieval</div>
+    <div class="stage-v">{{ ret.returned_count }}<small> / {{ ret.searched_count }}</small></div>
+    <div class="stage-s">returned · limit {{ ret.limit }}</div>
+  </div>
+  <div class="stage">
+    <div class="stage-n">03</div><div class="stage-name">rerank</div>
+    <div class="stage-v">{{ rr.output_count }}</div>
+    <div class="stage-s mono">{{ rr.implementation }}{% if rr.version %} v{{ rr.version }}{% endif %}</div>
+  </div>
+  <div class="stage">
+    <div class="stage-n">04</div><div class="stage-name">resolution</div>
+    <div class="stage-v">{{ res.trace.selected_count }}</div>
+    <div class="stage-s">selected{% if res.trace.dropped_count %} · <span class="fail">{{ res.trace.dropped_count }} dropped</span>{% endif %}</div>
+  </div>
+  <div class="stage final">
+    <div class="stage-n">05</div><div class="stage-name">bundle</div>
+    <div class="stage-v">{{ items | length }}</div>
+    <div class="stage-s">{% if not bundle %}no bundle recorded{% elif not items %}valid abstention (ADR-008){% else %}item{{ 's' if items | length != 1 }} delivered{% endif %}</div>
+  </div>
+</div>
 
-<h2>stage traces (§14)</h2>
+<div class="grid-3-1">
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('tag', 15) }} Bundle</h2>
+      {% if bundle %}<span class="meta mono">{{ bundle.bundle_id }}</span>{% endif %}
+    </div>
+    {% if items %}
+    <table>
+      <thead><tr><th>#</th><th>capability</th><th>version</th><th>role</th><th>reason</th><th>digest</th></tr></thead>
+      <tbody>
+      {% for item in items %}
+      <tr>
+        <td><span class="rank{% if loop.first %} top{% endif %}">{{ loop.index }}</span></td>
+        <td class="id mono"><a href="/ui/corpus/{{ item.capability_id }}">{{ item.capability_id }}</a></td>
+        <td class="mono">{{ item.version }}</td>
+        <td>{{ badge(item.role) }}</td>
+        <td class="mono dim">{{ item.reason_code or '—' }}</td>
+        <td class="mono faint" title="{{ item.digest }}">{{ item.digest[7:19] }}…</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% elif bundle %}
+    {{ empty('Empty bundle — the router abstained', 'A valid outcome (ADR-008): no candidate cleared the confidence bar.') }}
+    {% else %}
+    {{ empty('No bundle recorded', 'error_code = ' ~ (run.error_code or 'none')) }}
+    {% endif %}
+  </section>
 
-<h2>eligibility — kept {{ stages.eligibility.kept }}, excluded {{ stages.eligibility.excluded | length }}</h2>
-{% if stages.eligibility.excluded %}
-<table>
-  <tr><th>capability</th><th>version</th><th>reason</th><th>detail</th></tr>
-  {% for e in stages.eligibility.excluded %}
-  <tr><td>{{ e.capability_id }}</td><td>{{ e.version }}</td>
-      <td class="fail">{{ e.reason }}</td><td class="dim">{{ e.detail }}</td></tr>
-  {% endfor %}
-</table>
-{% endif %}
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('check', 15) }} Outcome trail</h2>
+      <span class="meta">§33</span>
+    </div>
+    {% if verdicts %}
+    <table>
+      <thead><tr><th>source</th><th>status</th><th>conf.</th></tr></thead>
+      <tbody>
+      {% for v in verdicts %}
+      <tr>
+        <td class="mono">{{ v.source }}</td>
+        <td>{{ badge(v.status, 'ok' if v.status == 'success' else ('fail' if v.status == 'failure' else 'neutral'), dot=True) }}</td>
+        <td class="dim">{{ v.confidence }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    {{ empty('No verdicts reported', 'Clients post them to /v1/outcomes.') }}
+    {% endif %}
+  </section>
+</div>
 
-<h2>retrieval — {{ stages.retrieval.model_id }}</h2>
-<p class="dim">eligible {{ stages.retrieval.eligible_count }} · searched {{ stages.retrieval.searched_count }} · returned {{ stages.retrieval.returned_count }} · limit {{ stages.retrieval.limit }}</p>
-<table>
-  <tr><th>rank</th><th>capability</th><th class="num">score</th></tr>
-  {% for c in stages.retrieved[:10] %}
-  <tr><td class="num">{{ loop.index }}</td>
-      <td><a href="/ui/corpus/{{ c.capability_id }}">{{ c.capability_id }}</a></td>
-      <td class="num">{{ "%.4f" | format(c.score) }}</td></tr>
-  {% endfor %}
-</table>
+<div class="grid-2 mt">
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('search', 15) }} retrieval · top 10</h2>
+      <span class="meta">eligible {{ ret.eligible_count }} · searched {{ ret.searched_count }}</span>
+    </div>
+    {% if stages.retrieved %}
+    <table>
+      <thead><tr><th>rank</th><th>capability</th><th>similarity</th></tr></thead>
+      <tbody>
+      {% for c in stages.retrieved[:10] %}
+      <tr{% if c.capability_id in selected %} class="selected"{% endif %}>
+        <td><span class="rank">{{ loop.index }}</span></td>
+        <td class="id mono"><a href="/ui/corpus/{{ c.capability_id }}">{{ c.capability_id }}</a></td>
+        <td><div class="scorecell">{{ meter(c.score, max_retrieved, 'info') }}<span class="mono">{{ "%.4f" | format(c.score) }}</span></div></td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}{{ empty('Nothing retrieved') }}{% endif %}
+  </section>
 
-<h2>rerank — {{ stages.rerank.implementation }} v{{ stages.rerank.version }} (in {{ stages.rerank.input_count }}, out {{ stages.rerank.output_count }})</h2>
-<table>
-  <tr><th>rank</th><th>capability</th><th class="num">score</th></tr>
-  {% for c in stages.reranked[:10] %}
-  <tr><td class="num">{{ c.rank }}</td>
-      <td><a href="/ui/corpus/{{ c.capability_id }}">{{ c.capability_id }}</a></td>
-      <td class="num">{{ "%.4f" | format(c.score) }}</td></tr>
-  {% endfor %}
-</table>
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('sparkle', 15) }} rerank · top 10</h2>
+      <span class="meta">in {{ rr.input_count }} · out {{ rr.output_count }}</span>
+    </div>
+    {% if stages.reranked %}
+    <table>
+      <thead><tr><th>rank</th><th>capability</th><th>Δ</th><th>score</th></tr></thead>
+      <tbody>
+      {% for c in stages.reranked[:10] %}
+      {% set before = retrieval_rank.get(c.capability_id) %}
+      <tr{% if c.capability_id in selected %} class="selected"{% endif %}>
+        <td><span class="rank{% if c.capability_id in selected %} top{% endif %}">{{ c.rank }}</span></td>
+        <td class="id mono"><a href="/ui/corpus/{{ c.capability_id }}">{{ c.capability_id }}</a></td>
+        <td>
+          {% if before is none %}<span class="delta same">new</span>
+          {% elif before > c.rank %}<span class="delta up">▲{{ before - c.rank }}</span>
+          {% elif before < c.rank %}<span class="delta down">▼{{ c.rank - before }}</span>
+          {% else %}<span class="delta same">—</span>{% endif %}
+        </td>
+        <td><div class="scorecell">{{ meter(c.score, max_reranked) }}<span class="mono">{{ "%.4f" | format(c.score) }}</span></div></td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}{{ empty('Nothing reranked') }}{% endif %}
+    <div class="card-foot">highlighted rows made it into the bundle · Δ = movement vs retrieval rank</div>
+  </section>
+</div>
 
-<h2>resolution — selected {{ stages.resolution.trace.selected_count }}, dropped {{ stages.resolution.trace.dropped_count }}</h2>
-{% if stages.resolution.dropped %}
-<table>
-  <tr><th>capability</th><th>reason</th></tr>
-  {% for d in stages.resolution.dropped %}
-  <tr><td>{{ d.capability_id }}</td><td class="fail">{{ d.reason }}</td></tr>
-  {% endfor %}
-</table>
+{% if elig.excluded or res.dropped %}
+<div class="grid-3-1 mt">
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('filter', 15) }} eligibility exclusions</h2>
+      <span class="meta">{{ elig.excluded | length }} · grouped by detail · ran before retrieval</span>
+    </div>
+    {% if elig.excluded %}
+    <table>
+      <thead><tr><th>reason</th><th>detail</th><th class="num">count</th><th>examples</th></tr></thead>
+      <tbody>
+      {% for g in exclusion_groups %}
+      <tr>
+        <td>{{ badge(g.reason, 'fail') }}</td>
+        <td class="dim">{{ g.detail or '—' }}</td>
+        <td class="num mono bright">{{ g.count }}</td>
+        <td class="mono dim">{{ g.examples | join(', ') }}{% if g.count > 3 %} …{% endif %}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}{{ empty('Nothing excluded') }}{% endif %}
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('x', 15) }} resolution drops</h2>
+      <span class="meta">{{ res.dropped | length }}</span>
+    </div>
+    {% if res.dropped %}
+    <table>
+      <thead><tr><th>capability</th><th>reason</th></tr></thead>
+      <tbody>
+      {% for d in res.dropped %}
+      <tr><td class="mono">{{ d.capability_id }}</td><td>{{ badge(d.reason, 'fail') }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}{{ empty('Nothing dropped') }}{% endif %}
+  </section>
+</div>
 {% endif %}
 {% endblock %}

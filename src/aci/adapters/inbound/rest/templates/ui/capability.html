@@ -1,63 +1,156 @@
 {% extends "base.html" %}
-{% block title %}{{ cap.capability_id }} · aci console{% endblock %}
+{% from "_macros.html" import icon, badge, empty, gate %}
+{% block title %}{{ capability_id }} · aci console{% endblock %}
 {% block main %}
-<h1>{{ cap.capability_id }}</h1>
-<p>
-  kind <code>{{ cap.kind }}</code> ·
-  <a href="/v1/capabilities/{{ cap.capability_id }}">raw json</a>
-</p>
+<a class="crumb" href="/ui/corpus">{{ icon('back', 13) }} Corpus</a>
+<div class="page-head">
+  <div class="titles">
+    <div class="eyebrow">{{ icon('corpus', 13) }} capability
+      {{ badge(cap.kind, 'neutral') }}
+      {% if production %}{{ badge('production ' ~ production.version, 'ok', dot=True) }}{% else %}{{ badge('not in production', 'warn', dot=True) }}{% endif %}
+    </div>
+    <h1 class="mono">{{ capability_id }}</h1>
+    {% if head and head.description %}<p class="sub">{{ head.description }}</p>{% endif %}
+  </div>
+  <div class="actions">
+    <a class="btn ghost sm" href="/v1/capabilities/{{ capability_id }}">{{ icon('json', 13) }} Raw JSON</a>
+  </div>
+</div>
 
-<h2>versions (immutable)</h2>
-<table>
-  <tr><th>version</th><th>digest</th><th>created (utc)</th></tr>
-  {% for v in versions %}
-  <tr><td>{{ v.version }}</td><td class="dim">{{ v.content_digest[:19] }}…</td>
-      <td class="dim">{{ v.created_at.strftime("%Y-%m-%d") }}</td></tr>
-  {% endfor %}
-</table>
+{% set all_pass = gates.provenance and gates.license and gates.scan %}
+<div class="grid-3-1">
+  <div class="stack">
+    <section class="card">
+      <div class="card-head">
+        <h2>{{ icon('git', 15) }} Release pointers</h2>
+        <span class="meta">promotion moves these — never versions</span>
+      </div>
+      {% if releases %}
+      <table>
+        <thead><tr><th>channel</th><th>status</th><th>version</th><th>promoted (utc)</th><th>approved by</th></tr></thead>
+        <tbody>
+        {% for r in releases %}
+        <tr>
+          <td>{{ badge(r.channel, 'ok' if r.channel == 'production' else ('violet' if r.channel == 'staging' else 'neutral'), dot=True) }}</td>
+          <td>{{ badge(r.status) }}</td>
+          <td class="mono bright">{{ r.version }}</td>
+          <td class="mono dim">{{ r.promoted_at.strftime("%Y-%m-%d %H:%M") if r.promoted_at else '—' }}</td>
+          <td class="dim">{{ r.approved_by or '—' }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}{{ empty('No release pointers', 'Still quarantined, or never promoted.') }}{% endif %}
+    </section>
 
-<h2>releases (pointers — promotion changes these, never versions)</h2>
-<table>
-  <tr><th>channel</th><th>status</th><th>version</th><th>promoted (utc)</th><th>by</th></tr>
-  {% for r in releases %}
-  <tr><td>{{ r.channel }}</td>
-      <td class="{{ 'ok' if r.status == 'active' else 'accent' }}">{{ r.status }}</td>
-      <td>{{ r.version }}</td>
-      <td class="dim">{{ r.promoted_at.strftime("%Y-%m-%d %H:%M") if r.promoted_at else '—' }}</td>
-      <td class="dim">{{ r.approved_by or '—' }}</td></tr>
-  {% endfor %}
-</table>
+    <section class="card">
+      <div class="card-head">
+        <h2>{{ icon('tag', 15) }} Versions</h2>
+        <span class="meta">immutable · identity = id + version</span>
+      </div>
+      {% if versions %}
+      <table>
+        <thead><tr><th>version</th><th>name</th><th>digest</th><th>created (utc)</th></tr></thead>
+        <tbody>
+        {% for v in versions %}
+        <tr>
+          <td class="mono bright nowrap">{{ v.version }}{% if v.version == focus_version %} <span class="badge accent">current</span>{% endif %}</td>
+          <td>{{ v.display_name or '—' }}</td>
+          <td class="mono faint" title="{{ v.content_digest }}">{{ v.content_digest[7:23] }}…</td>
+          <td class="mono dim">{{ v.created_at.strftime("%Y-%m-%d") }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}{{ empty('No versions') }}{% endif %}
+    </section>
+  </div>
 
-<h2>provenance</h2>
-<table>
-  <tr><th>source</th><th>commit</th><th>ingestion</th><th>fetched (utc)</th></tr>
-  {% for p in provenance %}
-  <tr><td>{{ p.source_repository }}</td>
-      <td class="dim">{{ (p.commit_sha or '')[:10] }}</td>
-      <td class="{{ 'ok' if p.ingestion_status == 'accepted' else 'accent' }}">{{ p.ingestion_status }}</td>
-      <td class="dim">{{ p.ingested_at.strftime("%Y-%m-%d") if p.ingested_at else '—' }}</td></tr>
-  {% endfor %}
-</table>
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('shield', 15) }} Promotion gates</h2>
+      <span class="meta">ADR-012 · v{{ focus_version or '—' }}</span>
+    </div>
+    <div class="card-body">
+      <ul class="gates">
+        {{ gate(gates.provenance, 'Provenance chain', 'an accepted source record exists') }}
+        {{ gate(gates.license, 'Redistributable license', 'latest assessment permits redistribution') }}
+        {{ gate(gates.scan, 'Security scan passed', 'latest pattern-scanner verdict') }}
+      </ul>
+      <div class="verdict {{ 'ok' if all_pass else 'fail' }} mt">
+        {{ icon('check' if all_pass else 'x', 15) }}
+        {{ 'All gates pass — eligible for human promotion' if all_pass else 'Blocked — fails at least one gate' }}
+      </div>
+      <p class="hint">Promotion itself stays a human CLI action (<span class="mono">capctl</span>) — never a button.</p>
+    </div>
+  </section>
+</div>
 
-<h2>license assessments (append-only, latest wins)</h2>
-<table>
-  <tr><th>version</th><th>license</th><th>redistributable</th><th>assessed by</th><th>notes</th></tr>
-  {% for l in licenses %}
-  <tr><td>{{ l.version }}</td><td>{{ l.license_identifier }}</td>
-      <td class="{{ 'ok' if l.redistributable == 'true' else 'fail' }}">{{ l.redistributable }}</td>
-      <td class="dim">{{ l.assessed_by }}</td>
-      <td class="dim">{{ (l.notes or '')[:60] }}</td></tr>
-  {% endfor %}
-</table>
+<section class="card mt">
+  <div class="card-head">
+    <h2>{{ icon('git', 15) }} Provenance</h2>
+    <span class="meta">source records</span>
+  </div>
+  {% if provenance %}
+  <table>
+    <thead><tr><th>source</th><th>commit</th><th>ingestion</th><th>ingested (utc)</th></tr></thead>
+    <tbody>
+    {% for p in provenance %}
+    <tr>
+      <td class="mono">{{ p.source_repository or '—' }}</td>
+      <td class="mono dim">{{ (p.commit_sha or '—')[:10] }}</td>
+      <td>{{ badge(p.ingestion_status, dot=True) }}</td>
+      <td class="mono dim">{{ p.ingested_at.strftime("%Y-%m-%d") if p.ingested_at else '—' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}{{ empty('No source records') }}{% endif %}
+</section>
 
-<h2>security scans</h2>
-<table>
-  <tr><th>version</th><th>status</th><th>scanner</th><th>scanned (utc)</th></tr>
-  {% for s in scans %}
-  <tr><td>{{ s.version }}</td>
-      <td class="{{ 'ok' if s.scan_status == 'passed' else 'fail' }}">{{ s.scan_status }}</td>
-      <td class="dim">{{ s.scanner_version }}</td>
-      <td class="dim">{{ s.scanned_at.strftime("%Y-%m-%d") }}</td></tr>
-  {% endfor %}
-</table>
+<div class="grid-2 mt">
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('scale', 15) }} License assessments</h2>
+      <span class="meta">append-only · latest wins</span>
+    </div>
+    {% if licenses %}
+    <table>
+      <thead><tr><th>version</th><th>license</th><th>redistributable</th><th>assessed by</th></tr></thead>
+      <tbody>
+      {% for l in licenses %}
+      <tr>
+        <td class="mono">{{ l.version }}</td>
+        <td class="mono bright">{{ l.license_identifier }}</td>
+        <td>{{ badge('yes' if l.redistributable == 'true' else 'no', 'ok' if l.redistributable == 'true' else 'fail', dot=True) }}</td>
+        <td class="dim">{{ l.assessed_by }}{% if l.notes %}<span class="cell-sub trunc" title="{{ l.notes }}">{{ l.notes }}</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}{{ empty('No license assessment', 'Unknown license blocks production redistribution (§24).') }}{% endif %}
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ icon('shield', 15) }} Security scans</h2>
+      <span class="meta">latest per version</span>
+    </div>
+    {% if scans %}
+    <table>
+      <thead><tr><th>version</th><th>status</th><th>scanner</th><th>scanned (utc)</th></tr></thead>
+      <tbody>
+      {% for s in scans %}
+      <tr>
+        <td class="mono">{{ s.version }}</td>
+        <td>{{ badge(s.scan_status, dot=True) }}</td>
+        <td class="mono dim">{{ s.scanner_version }}</td>
+        <td class="mono dim">{{ s.scanned_at.strftime("%Y-%m-%d") }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}{{ empty('Never scanned') }}{% endif %}
+  </section>
+</div>
 {% endblock %}
