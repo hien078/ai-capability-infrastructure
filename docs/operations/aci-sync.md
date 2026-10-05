@@ -22,6 +22,12 @@ ACI_API_TOKEN=<bearer> .venv/bin/python scripts/aci_sync.py --client opencode
 # Claude Code (tự động dùng ~/.claude/skills/, hoặc DIR/.claude/skills/):
 .venv/bin/python scripts/aci_sync.py --client claude-code
 
+# Goose (~/.agents/skills/, hoặc DIR/.agents/skills/ với --project):
+.venv/bin/python scripts/aci_sync.py --client goose --server http://aci.internal:8000
+
+# Antigravity (~/.gemini/config/skills/, hoặc DIR/.agents/skills/ với --project):
+.venv/bin/python scripts/aci_sync.py --client antigravity --server http://aci.internal:8000
+
 # một thư mục bất kỳ (custom agent, pipeline):
 .venv/bin/python scripts/aci_sync.py --client dir --target /srv/agent/skills
 ```
@@ -40,6 +46,28 @@ ACI_API_TOKEN=<bearer> .venv/bin/python scripts/aci_sync.py --client opencode
 - `--force`: prune kể cả khi nội dung local đã drift khỏi lockfile.
 - Exit code: `0` sạch (kể cả no-op), `1` có lỗi (skill bị reject, HTTP
   fail, lockfile hỏng — phần còn lại của plan vẫn chạy), `2` sai usage.
+
+## Thư mục đích theo client
+
+| `--client`    | Mặc định (global)            | `--project DIR`          |
+|---------------|------------------------------|--------------------------|
+| `opencode`    | `~/.config/opencode/skills/` | `DIR/.opencode/skills/`  |
+| `claude-code` | `~/.claude/skills/`          | `DIR/.claude/skills/`    |
+| `goose`       | `~/.agents/skills/`          | `DIR/.agents/skills/`    |
+| `antigravity` | `~/.gemini/config/skills/`   | `DIR/.agents/skills/`    |
+| `dir`         | bắt buộc `--target DIR`      | (không hỗ trợ)           |
+
+- **Goose 1.52** đọc skill ở `~/.agents/skills/` và `~/.claude/skills/`
+  (global) và `.agents/skills/` (project — theo help text đi kèm binary).
+  Tool chọn `~/.agents/skills/` để **không dùng chung thư mục/lockfile với
+  Claude Code** (`~/.claude/skills/`). Nếu đã sync cả `claude-code` thì Goose
+  sẽ thấy skill ở cả hai nơi — trùng tên là bình thường, nội dung như nhau.
+- **Antigravity**: customization root global là `~/.gemini/config/`, root
+  workspace là `.agents/` ở gốc repo; skill nằm ở `<root>/skills/<name>/SKILL.md`
+  (theo tài liệu `agy-customizations` đi kèm Antigravity, kiểm tra 2026-10-05).
+- Lưu ý: với `--project`, `goose` và `antigravity` trỏ vào **cùng một thư
+  mục** `DIR/.agents/skills/` → cùng một lockfile, cùng một tập skill được
+  quản lý; sync một lần là cả hai client đều thấy.
 
 ## Bố cục trên đĩa
 
@@ -143,6 +171,8 @@ dùng tự quyết định có cài hay không; tool không bao giờ tự cài.
 - **OpenCode cache catalog**: sau khi sync vào `~/.config/opencode/skills/`
   hay `.opencode/skills/`, cần **restart opencode service** để nó quét lại
   skill mới (bài học 2026-09-28 trong AGENTS.md).
+- Goose/Antigravity có thể cache danh sách skill trong session đang chạy —
+  mở session mới sau khi sync.
 - Tên skill phải khớp rule của client (`^[a-z0-9]+(-[a-z0-9]+)*$`, trùng tên
   dir) thì mới được client phát hiện; tên vi phạm vẫn được sync nhưng có
   cảnh báo.

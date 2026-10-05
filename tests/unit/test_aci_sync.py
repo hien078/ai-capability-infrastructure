@@ -453,6 +453,108 @@ def test_client_target_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         )
 
 
+def test_goose_and_antigravity_target_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """goose -> ~/.agents/skills (NOT ~/.claude/skills: no collision with
+    claude-code); antigravity -> ~/.gemini/config/skills (its global
+    customization root). Both use the `.agents/skills` workspace dir."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    proj = tmp_path / "proj"
+
+    goose = sync._resolve_target(sync.SyncOptions(client="goose"))
+    agy = sync._resolve_target(sync.SyncOptions(client="antigravity"))
+    claude = sync._resolve_target(sync.SyncOptions(client="claude-code"))
+    assert goose == tmp_path / ".agents" / "skills"
+    assert agy == tmp_path / ".gemini" / "config" / "skills"
+    assert len({goose, agy, claude}) == 3  # three distinct global dirs/lockfiles
+    for client in ("goose", "antigravity"):
+        assert (
+            sync._resolve_target(sync.SyncOptions(client=client, project=str(proj)))
+            == proj / ".agents" / "skills"
+        )
+        assert sync._resolve_target(
+            sync.SyncOptions(client=client, target=str(tmp_path / "x"))
+        ) == (tmp_path / "x")
+        with pytest.raises(sync.SyncError):
+            sync._resolve_target(
+                sync.SyncOptions(client=client, project=str(proj), target=str(tmp_path))
+            )
+
+
+@pytest.mark.parametrize(
+    ("client", "rel"),
+    [("goose", (".agents", "skills")), ("antigravity", (".gemini", "config", "skills"))],
+)
+def test_new_client_default_target_sync_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client: str, rel: tuple[str, ...]
+) -> None:
+    """Full cycle on the client's DEFAULT dir under a fake HOME: fresh sync,
+    byte-idempotent rerun, update, prune — the same lockfile semantics as
+    every other target, and the user's own skill dir is never touched."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    target = tmp_path.joinpath(*rel)
+    own = target / "my-own-skill"
+    own.mkdir(parents=True)
+    (own / "SKILL.md").write_bytes(b"# mine\n")
+    catalog = FakeCatalog()
+    catalog.add("debugging", "1.0.0", {"debugging.md": "# d\n", "refs/n.md": "n\n"})
+    catalog.add("tdd", "1.0.0", {"tdd.md": "# t\n"})
+    o = sync.SyncOptions(client=client, server="http://aci.test:8000")
+
+    assert sync.run_sync(o, transport=catalog.transport()) == 0
+    assert (target / "debugging" / "SKILL.md").read_bytes() == b"# d\n"
+    assert (target / "debugging" / "refs" / "n.md").read_bytes() == b"n\n"
+    assert set(lock_of(target)["skills"]) == {"debugging", "tdd"}
+
+    before = snapshot(target)
+    assert sync.run_sync(o, transport=catalog.transport()) == 0
+    assert snapshot(target) == before  # no-op rerun
+
+    catalog.add("debugging", "1.1.0", {"debugging.md": "new"})
+    catalog.remove("tdd")
+    assert sync.run_sync(o, transport=catalog.transport()) == 0
+    assert (target / "debugging" / "SKILL.md").read_bytes() == b"new"
+    assert not (target / "debugging" / "refs").exists()
+    assert not (target / "tdd").exists()
+    assert set(lock_of(target)["skills"]) == {"debugging"}
+    assert (own / "SKILL.md").read_bytes() == b"# mine\n"  # never touched
+
+
+@pytest.mark.parametrize("client", ["goose", "antigravity"])
+def test_new_client_project_target_and_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client: str
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    catalog = FakeCatalog()
+    catalog.add("debugging", "1.0.0", {"debugging.md": "# d\n"})
+    proj = tmp_path / "proj"
+
+    code = sync.main(
+        ["--client", client, "--project", str(proj), "--server", "http://aci.test:8000"],
+        transport=catalog.transport(),
+    )
+
+    assert code == 0
+    assert (proj / ".agents" / "skills" / "debugging" / "SKILL.md").read_bytes() == b"# d\n"
+    assert not (tmp_path / "home").exists()  # the global dir was not touched
+
+
+@pytest.mark.parametrize("client", ["goose", "antigravity"])
+def test_new_client_name_rule_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], client: str
+) -> None:
+    catalog = FakeCatalog()
+    catalog.add("Bad_Name", "1.0.0", {"Bad_Name.md": "# x\n"})
+    target = tmp_path / "skills"
+
+    code = sync.run_sync(opts(target, client=client), transport=catalog.transport())
+
+    assert code == 0
+    assert (target / "Bad_Name" / "SKILL.md").exists()
+    assert "will not discover it" in capsys.readouterr().out
+
+
 def test_catalog_wire_contract_paths(tmp_path: Path) -> None:
     """Pin the exact catalog surface aci_sync consumes (ADR-005): the index
     at `<base>/index.json` and files at `<base>/<name>/<file>`, GET only."""

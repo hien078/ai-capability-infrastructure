@@ -18,7 +18,18 @@ contract, ADR-005); local dirs are source ROOTS, where the entry must be
 Targets (`--client`):
     opencode      ~/.config/opencode/skills/   (--project DIR -> DIR/.opencode/skills/)
     claude-code   ~/.claude/skills/           (--project DIR -> DIR/.claude/skills/)
+    goose         ~/.agents/skills/           (--project DIR -> DIR/.agents/skills/)
+    antigravity   ~/.gemini/config/skills/    (--project DIR -> DIR/.agents/skills/)
     dir           any --target DIR
+
+Goose 1.52 reads `~/.agents/skills/` and `~/.claude/skills/` (global) and
+`.agents/skills/` (project; per its bundled help text) — `~/.agents/skills`
+is used so a goose sync never shares a dir/lockfile with claude-code.
+Antigravity's global customization root is `~/.gemini/config/`, its
+workspace root `.agents/` (bundled agy-customizations docs, 2026-10-05);
+skills live at `<root>/skills/<name>/SKILL.md`. NOTE: `--project` for goose
+and antigravity resolves to the SAME dir (`DIR/.agents/skills/`) — one
+lockfile, one set of managed skills, visible to both clients.
 
 Safety contract (tests/security/test_aci_sync_safety.py pins it):
 
@@ -105,6 +116,8 @@ CLIENT_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 CLIENTS: dict[str, tuple[str, str]] = {
     "opencode": ("~/.config/opencode/skills", ".opencode/skills"),
     "claude-code": ("~/.claude/skills", ".claude/skills"),
+    "goose": ("~/.agents/skills", ".agents/skills"),
+    "antigravity": ("~/.gemini/config/skills", ".agents/skills"),
 }
 
 _ACTION_SYMBOL = {
@@ -692,16 +705,29 @@ def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = 
             "examples:\n"
             "  ACI_API_TOKEN=<bearer> python scripts/aci_sync.py --client opencode --dry-run\n"
             "  python scripts/aci_sync.py --client claude-code --project ~/myproj\n"
+            "  python scripts/aci_sync.py --client goose --server http://aci.internal:8000\n"
+            "  python scripts/aci_sync.py --client antigravity --server http://aci.internal:8000\n"
             "  python scripts/aci_sync.py --client dir --target /srv/agent/skills \\\n"
             "      --only-ids debugging\n"
         ),
     )
     parser.add_argument("--server", default=DEFAULT_SERVER, help="ACI base URL")
     parser.add_argument(
-        "--client", default="opencode", choices=[*CLIENTS, "dir"], help="native target layout"
+        "--client",
+        default="opencode",
+        choices=[*CLIENTS, "dir"],
+        help=(
+            "native target layout: opencode (~/.config/opencode/skills), claude-code "
+            "(~/.claude/skills), goose (~/.agents/skills), antigravity "
+            "(~/.gemini/config/skills), dir (--target)"
+        ),
     )
     parser.add_argument(
-        "--project", help="sync into PROJECT/.opencode|/.claude/skills/ instead of the global dir"
+        "--project",
+        help=(
+            "sync into the project dir (PROJECT/.opencode/skills, .claude/skills, or "
+            ".agents/skills for goose/antigravity) instead of the global dir"
+        ),
     )
     parser.add_argument("--target", help="explicit target dir (overrides --project/default)")
     parser.add_argument(

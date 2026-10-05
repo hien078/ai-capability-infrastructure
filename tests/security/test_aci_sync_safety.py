@@ -278,3 +278,84 @@ def test_nothing_is_ever_written_outside_the_target(tmp_path: Path) -> None:
     # And every written path is inside the target.
     for path in target.rglob("*"):
         assert target in path.parents
+
+
+# -- goose / antigravity targets ----------------------------------------------------
+
+_NEW_CLIENTS = [
+    ("goose", (".agents", "skills")),
+    ("antigravity", (".gemini", "config", "skills")),
+]
+
+
+@pytest.mark.parametrize(("client", "rel"), _NEW_CLIENTS)
+def test_new_client_writes_stay_inside_its_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client: str, rel: tuple[str, ...]
+) -> None:
+    """A hostile index (traversal + absolute paths) next to a good skill:
+    under a fake HOME, nothing lands outside the client's skill root — in
+    particular NOT in ~/.claude/skills (Claude Code's dir) for goose."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    claude_own = tmp_path / ".claude" / "skills" / "debugging"
+    claude_own.mkdir(parents=True)
+    (claude_own / "SKILL.md").write_text("# claude's own\n", encoding="utf-8")
+    index = _index(
+        _skill("debugging", "1.0.0", ["debugging.md", "refs/notes.md"]),
+        _skill("evil", "1.0.0", ["evil.md", "../../escape.md"]),
+        _skill("evil-abs", "1.0.0", ["evil-abs.md", "/etc/passwd"]),
+    )
+    root = tmp_path.joinpath(*rel)
+    before = {p for p in tmp_path.rglob("*")}
+
+    code = sync.run_sync(
+        sync.SyncOptions(client=client, server="http://aci.test:8000"),
+        transport=_transport(index),
+    )
+
+    assert code == 1  # the unsafe skills are rejected
+    assert not (root / "evil").exists() and not (root / "evil-abs").exists()
+    new_paths = {p for p in tmp_path.rglob("*")} - before
+    for path in new_paths:
+        assert path == root or root in path.parents or path in root.parents
+    assert (claude_own / "SKILL.md").read_text(encoding="utf-8") == "# claude's own\n"
+
+
+@pytest.mark.parametrize(("client", "rel"), _NEW_CLIENTS)
+def test_new_client_never_clobbers_unowned_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client: str, rel: tuple[str, ...]
+) -> None:
+    """A served skill colliding with a dir the lockfile does not own is
+    refused; and an unowned dir is never pruned, even with --force."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path.joinpath(*rel)
+    own = root / "my-own"
+    own.mkdir(parents=True)
+    (own / "SKILL.md").write_text("# mine\n", encoding="utf-8")
+    o = sync.SyncOptions(client=client, server="http://aci.test:8000")
+
+    code = sync.run_sync(o, transport=_transport(_index(_skill("my-own", "1.0.0", ["my-own.md"]))))
+
+    assert code == 1
+    assert (own / "SKILL.md").read_text(encoding="utf-8") == "# mine\n"
+    lock = json.loads((root / sync.LOCK_NAME).read_text(encoding="utf-8"))
+    assert "my-own" not in lock["skills"]
+
+    forced = sync.SyncOptions(client=client, server="http://aci.test:8000", force=True)
+    assert sync.run_sync(forced, transport=_transport(_index())) == 0
+    assert (own / "SKILL.md").read_text(encoding="utf-8") == "# mine\n"
+
+
+@pytest.mark.parametrize(("client", "rel"), _NEW_CLIENTS)
+def test_new_client_dry_run_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client: str, rel: tuple[str, ...]
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    index = _index(_skill("debugging", "1.0.0", ["debugging.md"]))
+
+    code = sync.run_sync(
+        sync.SyncOptions(client=client, server="http://aci.test:8000", dry_run=True),
+        transport=_transport(index),
+    )
+
+    assert code == 0
+    assert list(tmp_path.iterdir()) == []  # not even the root dir
