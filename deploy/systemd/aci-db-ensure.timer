@@ -1,0 +1,10 @@
+[Unit]
+Description=ACI Postgres: run aci-db-ensure at boot and every 10 minutes
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=10min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

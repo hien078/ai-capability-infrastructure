@@ -1,0 +1,7 @@
+[Unit]
+Description=ACI Postgres: ensure aci-db-1 is up with its Tailscale port (scripts/ensure_db.sh)
+
+[Service]
+Type=oneshot
+ExecStart=%h/Data/Projects/ACI/scripts/ensure_db.sh
+TimeoutStartSec=420
