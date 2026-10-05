@@ -1,8 +1,8 @@
 [Unit]
-Description=ACI weekly telemetry reports, Mondays 08:00
+Description=ACI weekly telemetry reports, Mondays 08:00 Vietnam time
 
 [Timer]
-OnCalendar=Mon *-*-* 08:00:00
+OnCalendar=Mon *-*-* 08:00:00 Asia/Ho_Chi_Minh
 Persistent=true
 
 [Install]

@@ -1,8 +1,8 @@
 [Unit]
-Description=ACI daily DB backup at 03:15
+Description=ACI daily DB backup at 02:30 Vietnam time (before the Arch 03:15 / Mac 04:00 pulls)
 
 [Timer]
-OnCalendar=*-*-* 03:15:00
+OnCalendar=*-*-* 02:30:00 Asia/Ho_Chi_Minh
 Persistent=true
 
 [Install]
