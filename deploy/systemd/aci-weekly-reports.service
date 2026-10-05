@@ -1,0 +1,7 @@
+[Unit]
+Description=ACI weekly read-only telemetry reports (scripts/weekly_reports.sh)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/aci
+ExecStart=%h/aci/scripts/weekly_reports.sh
