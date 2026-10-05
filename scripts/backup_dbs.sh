@@ -9,6 +9,7 @@
 # Layout:  data/backups/<YYYYMMDD-HHMMSS>/{aci.dump,aci_bench.dump,manifest.txt}
 # Env:     ACI_BACKUP_KEEP   retention count of timestamped dirs (default 14)
 #          ACI_BACKUP_ROOT   override backup root (default <repo>/data/backups)
+#          ACI_BACKUP_DBS    space-separated DBs to dump (default "aci aci_bench")
 #
 # Failure behavior: if any dump fails, the partial timestamped dir of that
 # attempt is DELETED (pg_restore on a truncated custom-format dump fails
@@ -28,7 +29,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKUP_ROOT="${ACI_BACKUP_ROOT:-$REPO_ROOT/data/backups}"
 KEEP="${ACI_BACKUP_KEEP:-14}"
-DBS=(aci aci_bench)
+# ACI_BACKUP_DBS: space-separated DB list (default "aci aci_bench"). A host
+# without the operational DB (Arch after the 2026-10-05 move of aci_bench to
+# home-sever) sets ACI_BACKUP_DBS=aci — a missing DB fails the whole run.
+read -r -a DBS <<< "${ACI_BACKUP_DBS:-aci aci_bench}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 DEST="$BACKUP_ROOT/$STAMP"
 LOCKFILE="$BACKUP_ROOT/.backup.lock"
