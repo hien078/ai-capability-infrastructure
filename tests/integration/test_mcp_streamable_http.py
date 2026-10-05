@@ -27,6 +27,7 @@ from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from mcp_types import INVALID_PARAMS, PaginatedRequestParams, Request
+from sqlalchemy import create_engine, text
 
 from aci.adapters.inbound.mcp.skills import (
     EXTENSION_ID,
@@ -184,6 +185,51 @@ def test_streamable_http_stateless_second_session(
     assert first["bundle"]["items"][0]["capability_id"] == cap
     assert second["bundle"]["items"][0]["capability_id"] == cap
     assert first["route_run_id"] != second["route_run_id"]
+
+
+def test_streamable_http_client_identity_reaches_telemetry(tmp_path: Path) -> None:
+    """``X-ACI-Client`` / ``?client=`` become the route_run principal (the id
+    crosses the SDK's stateless transport tasks); no id → ``anonymous``."""
+    app = mcp_app(tmp_path)
+    goose, agy = uid("goose"), uid("agy")
+
+    async def route_once(http: httpx2.AsyncClient, url: str) -> str:
+        async with streamable_http_client(url, http_client=http) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                routed = await session.call_tool(
+                    "route_capabilities", {"task_text": "identity attribution probe"}
+                )
+                assert not routed.is_error, routed.content
+                return str(routed.structured_content["route_run_id"])
+
+    async def scenario() -> tuple[str, str, str]:
+        async with app.router.lifespan_context(app):
+            async with httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=app),
+                base_url=BASE,
+                headers={"X-ACI-Client": goose},
+            ) as http:
+                by_header = await route_once(http, f"{BASE}/mcp")
+            async with _http_client(app) as http:
+                by_query = await route_once(http, f"{BASE}/mcp?client={agy}")
+                anonymous = await route_once(http, f"{BASE}/mcp")
+        return by_header, by_query, anonymous
+
+    by_header, by_query, anonymous = asyncio.run(scenario())
+    engine = create_engine(DB_URL)
+    with engine.connect() as conn:
+        rows = dict(
+            conn.execute(
+                text(
+                    "SELECT route_run_id, principal_id FROM route_runs"
+                    " WHERE route_run_id = ANY(:ids)"
+                ),
+                {"ids": [by_header, by_query, anonymous]},
+            ).all()
+        )
+    engine.dispose()
+    assert rows == {by_header: goose, by_query: agy, anonymous: "anonymous"}
 
 
 def test_streamable_http_gate_rejects_unauthenticated_mcp(

@@ -17,6 +17,8 @@ Auth: the same ``ACI_API_TOKEN`` gate as the REST routes (``rest/auth.py`` —
 constant-time compare, empty token = unauthenticated localhost mode). The
 gate wraps the whole ASGI app, so it covers the Skills extension, the
 ``skill://`` resources and every tool including the agent-run tools.
+Inside the gate, ``ClientIdentityASGI`` (identity.py) lets a client name
+itself (``X-ACI-Client`` / ``?client=``) for telemetry attribution.
 
 DNS-rebinding protection: the standalone server binds a known ``--host`` and
 keeps the SDK default (protection ON for localhost binds). The in-app mount
@@ -35,6 +37,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from aci.adapters.inbound.mcp.identity import ClientIdentityASGI
 from aci.adapters.inbound.mcp.server import create_mcp_server
 from aci.adapters.inbound.rest.auth import verify_bearer
 from aci.adapters.inbound.rest.wiring import Container
@@ -103,7 +106,7 @@ def _streamable_http_components(
         host=host or "127.0.0.1",
     )
     manager = server.session_manager  # created by streamable_http_app()
-    gated = BearerGateASGI(app, container.settings.api_token)
+    gated = BearerGateASGI(ClientIdentityASGI(app), container.settings.api_token)
     return gated, manager
 
 

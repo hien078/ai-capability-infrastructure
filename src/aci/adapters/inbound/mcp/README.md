@@ -99,6 +99,13 @@ Streamable HTTP (remote clients, or one ACI process serving everything):
 }
 ```
 
+**Client attribution (HTTP):** send `X-ACI-Client: <id>` (or append
+`?client=<id>` to the URL when the client config has no header field) and the
+id becomes the `route_runs.principal_id` instead of `anonymous` — e.g.
+`goose-arch`, `antigravity-arch`. Lowercase slug `[a-z0-9][a-z0-9-]{0,63}`;
+anything else is ignored. Self-asserted like REST `principal_id` —
+attribution, not authentication (`identity.py`).
+
 ### Goose (stdio extension)
 
 `~/.config/goose/config.yaml` — goose drives the tools + `skill://` resources

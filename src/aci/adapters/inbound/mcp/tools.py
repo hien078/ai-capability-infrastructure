@@ -19,6 +19,7 @@ from uuid import uuid4
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
+from aci.adapters.inbound.mcp.identity import current_client_id
 from aci.adapters.inbound.rest.agent_runs import (
     MAX_COMMAND_ITEM_CHARS,
     MAX_CONTEXT_CHARS,
@@ -72,7 +73,9 @@ def _envelope() -> RequestContext:
     return RequestContext(
         request_id=f"req_{uuid4().hex}",
         trace_id=f"trc_{uuid4().hex}",
-        principal_id="anonymous",  # V1 MCP is local/unauthenticated (§29.4)
+        # V1 MCP is unauthenticated (§29.4): an HTTP client may self-identify
+        # for telemetry attribution (identity.py), else "anonymous".
+        principal_id=current_client_id() or "anonymous",
         client=ClientDescriptor(type="mcp-client"),
         protocol=ProtocolDescriptor(type="mcp", version="1"),
     )
