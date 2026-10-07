@@ -1,0 +1,3 @@
+{"case_id": "organic-sample-lint", "task_text": "Configure linting for the flugel widget build so CI fails on style drift", "acceptable": ["fake-lint-helper"], "notes": "SYNTHETIC eval fixture - fake skills, fake task; not real product text"}
+{"case_id": "organic-sample-abstain", "task_text": "Water the office plants every Friday and log it in the calendar", "acceptable": [], "notes": "SYNTHETIC - the correct answer is abstention: no skill in the corpus fits"}
+{"case_id": "organic-sample-confuser", "task_text": "Audit the token budget of the CI review job", "acceptable": ["fake-ci-auditor"], "notes": "SYNTHETIC - a word-matching judge attaches the security confuser (the section-1 failure mode)"}
