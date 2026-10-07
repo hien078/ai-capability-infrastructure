@@ -6,6 +6,8 @@ produced WITHOUT a judge (the heuristic) must serialize exactly as before
 JEV existed — unset judge fields are dropped, never emitted as nulls.
 """
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -143,6 +145,110 @@ def test_rerank_trace_carries_necessity_dropped_ids_when_set() -> None:
         necessity_dropped_ids=[],
     )
     assert empty.model_dump(mode="json")["necessity_dropped_ids"] == []
+
+
+# ---------- P4: the drop runs on EVERY serialization path (review 2026-10-07) ----------
+#
+# The old ``model_dump`` OVERRIDE was bypassed by NESTED dumps
+# (``RerankResult.model_dump`` serializes the trace through the core
+# serializer, never calling the child's method) and by ``model_dump_json``
+# — both emitted the unset judge fields as nulls. A ``model_serializer``
+# wrap runs on every path.
+
+
+def test_nested_rerank_result_dump_drops_unset_judge_fields() -> None:
+    """The heuristic trace inside RerankResult stays key-identical to main
+    (no judge nulls) on the NESTED path."""
+    trace = RerankTrace(
+        implementation="heuristic-reranker", version="3", input_count=2, output_count=2
+    )
+    result = RerankResult(ranked=[], trace=trace)
+    assert result.model_dump(mode="json")["trace"] == {
+        "implementation": "heuristic-reranker",
+        "version": "3",
+        "input_count": 2,
+        "output_count": 2,
+    }
+
+
+def test_nested_rerank_result_dump_keeps_set_judge_fields() -> None:
+    trace = RerankTrace(
+        implementation="jev",
+        version="1.0.0",
+        input_count=5,
+        output_count=0,
+        judge_status="ok",
+        selected_ids=[],
+    )
+    result = RerankResult(ranked=[], trace=trace)
+    dumped = result.model_dump(mode="json")["trace"]
+    assert dumped["judge_status"] == "ok"
+    assert dumped["selected_ids"] == []
+    assert "judge_reason" not in dumped
+    assert "invalid_ids" not in dumped
+
+
+def test_model_dump_json_drops_unset_judge_fields() -> None:
+    """``model_dump_json`` bypassed the old override entirely — the unset
+    judge fields serialized as nulls. The wrap serializer covers it."""
+    trace = RerankTrace(
+        implementation="heuristic-reranker", version="3", input_count=2, output_count=2
+    )
+    payload = json.loads(trace.model_dump_json())
+    assert payload == {
+        "implementation": "heuristic-reranker",
+        "version": "3",
+        "input_count": 2,
+        "output_count": 2,
+    }
+
+
+def test_model_dump_json_keeps_set_judge_fields() -> None:
+    trace = RerankTrace(
+        implementation="jev",
+        version="1.0.0",
+        input_count=5,
+        output_count=0,
+        judge_status="timeout",
+        judge_reason="slow",
+        selected_ids=[],
+        invalid_ids=1,
+    )
+    payload = json.loads(trace.model_dump_json())
+    assert payload["judge_status"] == "timeout"
+    assert payload["judge_reason"] == "slow"
+    assert payload["selected_ids"] == []
+    assert payload["invalid_ids"] == 1
+
+
+def test_nested_dump_via_model_dump_json_drops_unset_judge_fields() -> None:
+    """The double bypass: a nested trace inside RerankResult, serialized
+    through model_dump_json."""
+    trace = RerankTrace(
+        implementation="heuristic-reranker", version="3", input_count=1, output_count=1
+    )
+    result = RerankResult(ranked=[], trace=trace)
+    payload = json.loads(result.model_dump_json())
+    assert payload["trace"] == {
+        "implementation": "heuristic-reranker",
+        "version": "3",
+        "input_count": 1,
+        "output_count": 1,
+    }
+
+
+def test_judge_reason_is_bounded_on_the_trace() -> None:
+    """P4: judge_reason carries the same 500-char bound as JudgeVerdict.reason
+    (telemetry lands the reason verbatim)."""
+    base = {
+        "implementation": "jev",
+        "version": "1.0.0",
+        "input_count": 0,
+        "output_count": 0,
+    }
+    assert RerankTrace.model_validate({**base, "judge_reason": "r" * 500}).judge_reason == "r" * 500
+    with pytest.raises(ValidationError):
+        RerankTrace.model_validate({**base, "judge_reason": "r" * 501})
 
 
 def test_rerank_result_default_ranked_is_empty() -> None:

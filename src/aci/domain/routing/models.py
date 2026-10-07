@@ -8,7 +8,7 @@ skill bodies (§16.1 prompt-injection boundary).
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 
 from aci.domain.capability.models import (
     CapabilityArtifact,
@@ -310,9 +310,13 @@ class JudgeVerdict(BaseModel):
     necessities: list[PickNecessity] | None = None
 
 
-#: RerankTrace judge fields (below): dropped from ``model_dump`` while UNSET
-#: so a trace produced without a judge serializes exactly as before JEV
-#: existed (byte-compatible telemetry — the heuristic never emits nulls).
+#: RerankTrace judge fields (below): dropped from serialization while
+#: UNSET/None so a trace produced without a judge serializes exactly as
+#: before JEV existed (byte-compatible telemetry — the heuristic never
+#: emits nulls). P4: the drop runs via a ``model_serializer`` WRAP so it
+#: applies on EVERY path — the old ``model_dump`` override was bypassed by
+#: nested dumps (``RerankResult.model_dump`` serializes the trace through
+#: the core serializer) and by ``model_dump_json``.
 _JUDGE_TRACE_FIELDS = (
     "judge_status",
     "judge_model_id",
@@ -328,8 +332,8 @@ class RerankTrace(BaseModel):
     """Trace data for the rerank stage (§14; §52: version recorded in trace).
 
     The optional judge fields (docs/plans/jev-reranker.md §2.3) are set only
-    by the JEV reranker; ``model_dump`` drops them while unset so the
-    heuristic trace stays byte-compatible.
+    by the JEV reranker; the wrap serializer below drops them while unset so
+    the heuristic trace stays byte-compatible on every dump path.
     """
 
     model_config = {"frozen": True}
@@ -341,7 +345,9 @@ class RerankTrace(BaseModel):
     judge_status: JudgeStatus | None = None
     judge_model_id: str | None = None
     judge_latency_ms: int | None = None
-    judge_reason: str | None = None
+    #: The judge's bounded reason (≤500 chars, same bound as
+    #: ``JudgeVerdict.reason``) — telemetry lands it verbatim.
+    judge_reason: str | None = Field(default=None, max_length=500)
     #: Ids the judge selected that survived subset validation, in judge
     #: order (rank = position). An honest abstention records ``[]``.
     selected_ids: list[str] | None = None
@@ -352,9 +358,18 @@ class RerankTrace(BaseModel):
     #: gate did not run (``necessity_gate="none"`` or no necessities).
     necessity_dropped_ids: list[str] | None = None
 
-    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
-        """Serialize, dropping UNSET judge fields (byte-compatibility)."""
-        dump = super().model_dump(**kwargs)
+    @model_serializer(mode="wrap")
+    def _drop_unset_judge_fields(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        """Serialize, dropping UNSET/None judge fields (byte-compatibility).
+
+        P4: a WRAP serializer (not a ``model_dump`` override) so the drop
+        runs on every path — direct dumps, NESTED dumps
+        (``RerankResult.model_dump``), and ``model_dump_json``.
+        """
+        dump: dict[str, Any] = handler(self)
         for field in _JUDGE_TRACE_FIELDS:
             if dump.get(field) is None:
                 dump.pop(field, None)
