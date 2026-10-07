@@ -1,0 +1,274 @@
+"""OpenAI-compatible skill judge — the ``SkillJudge`` plug-in (JEV §2.3).
+
+docs/plans/jev-reranker.md. ONE ``POST {base}/chat/completions`` per
+``judge()`` call: the §2.4 system prompt (versioned as
+``JEV_PROMPT_VERSION``) + a user message of TASK + one CANDIDATES line per
+id. The judge sees ONLY trusted routing document text (§17.1) — the
+reranker built ``JudgeCandidate`` from sanitized metadata, so raw
+``SKILL.md`` bodies and artifact contents are structurally unreachable
+here (pinned by tests/security/test_jev_boundaries.py).
+
+Every failure maps to a ``JudgeVerdict`` status instead of raising, so the
+reranker can abstain (ADR-008) rather than crash a route:
+
+- ``httpx.TimeoutException`` → ``timeout``;
+- transport errors / non-200 → ``error`` (the STATUS CODE only is logged —
+  never the response body, which can echo request headers);
+- non-JSON / wrong-shape output → ``invalid_output``.
+
+The API key never appears in any log line or verdict text, and the full
+prompt is never logged (§2.3; pinned by test).
+"""
+
+import json
+import logging
+import time
+from typing import Any
+
+import httpx
+
+from aci.domain.routing.models import JudgeCandidate, JudgeStatus, JudgeVerdict
+
+#: Version of the judge prompt (§2.4). Bump when the system message changes
+#: — telemetry can then separate prompt eras.
+JEV_PROMPT_VERSION = "1"
+
+#: Task text bound for the wire (§2.4): head 3000 + tail 1000 chars.
+_TASK_HEAD = 3000
+_TASK_TAIL = 1000
+#: One CANDIDATES line bound (§2.4): ``- <id>: <document_text ≤ 400 chars>``.
+_LINE_MAX = 400
+#: JudgeVerdict.reason bound (domain model enforces ≤500; truncate before).
+_REASON_MAX = 500
+
+_SYSTEM_TEMPLATE = (
+    "You select skills for a coding agent. You get a TASK and CANDIDATE skills (id: description).\n"
+    'Return ONLY JSON: {"selected": [<ids>], "reason": "<one sentence>"}.\n'
+    "Select at most {max_select} ids, and only skills that DIRECTLY help "
+    "with this task as written.\n"
+    "A skill is NOT relevant just because it shares words "
+    "(security, token, audit, CI, review, rate limit).\n"
+    "Prefer [] when none clearly apply — an empty selection is a correct answer.\n"
+    "Never output an id that is not in the candidate list."
+)
+
+log = logging.getLogger(__name__)
+
+
+def _task_for_wire(task_text: str) -> str:
+    """Head + tail bound: the middle of a long prompt never reaches the wire."""
+    if len(task_text) <= _TASK_HEAD + _TASK_TAIL:
+        return task_text
+    return task_text[:_TASK_HEAD] + "\n[…truncated…]\n" + task_text[-_TASK_TAIL:]
+
+
+def _candidate_line(candidate: JudgeCandidate) -> str:
+    """One wire line per candidate: id + whitespace-collapsed trusted text."""
+    text = " ".join(candidate.document_text.split())
+    return f"- {candidate.capability_id}: {text[:_LINE_MAX]}"
+
+
+def _user_message(task_text: str, candidates: list[JudgeCandidate]) -> str:
+    lines = "\n".join(_candidate_line(c) for c in candidates)
+    return f"TASK:\n{_task_for_wire(task_text)}\n\nCANDIDATES:\n{lines}"
+
+
+def _strip_fences(text: str) -> str:
+    """Drop ``` / ```json fences around a JSON payload."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    body = "\n".join(lines[1:])
+    if body.rstrip().endswith("```"):
+        body = body.rstrip()[:-3]
+    return body.strip()
+
+
+def _decode_payload(content: str) -> dict[str, Any] | None:
+    """Best-effort JSON object extraction: bare, fenced, prose-prefixed."""
+    for attempt in (_strip_fences(content), content):
+        try:
+            data = json.loads(attempt)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    # Prose prefix ("Here is the JSON: {...}"): decode from the first brace.
+    start = content.find("{")
+    if start >= 0:
+        try:
+            data, _ = json.JSONDecoder().raw_decode(content[start:])
+        except json.JSONDecodeError:
+            return None
+        return data if isinstance(data, dict) else None
+    return None
+
+
+class OpenAICompatSkillJudge:
+    """``SkillJudge`` over an OpenAI-compatible ``/chat/completions`` endpoint.
+
+    The endpoint is deployment infrastructure (the user's gateway, a local
+    inference server); the platform gains no model authority from it (§76).
+    ``client`` is injectable so tests drive a ``httpx.MockTransport`` —
+    without it a fresh client is created per call and closed after (the
+    executor.py pattern).
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        reasoning_effort: str = "low",
+        timeout_s: float = 8.0,
+        client: httpx.Client | None = None,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
+        self._model = model
+        self._reasoning_effort = reasoning_effort
+        self._timeout_s = timeout_s
+        self._client = client
+
+    def judge(
+        self, task_text: str, candidates: list[JudgeCandidate], max_select: int
+    ) -> JudgeVerdict:
+        """One selection call; every failure is a status, never an exception."""
+        if not candidates:
+            # Nothing to select from: skip the call entirely (the reranker
+            # already short-circuits empty input; this guards direct use).
+            return JudgeVerdict(status="ok", reason="no candidates", model_id=self._model)
+
+        request_body = {
+            "model": self._model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": _SYSTEM_TEMPLATE.replace("{max_select}", str(max_select)),
+                },
+                {"role": "user", "content": _user_message(task_text, candidates)},
+            ],
+            "temperature": 0,
+            "stream": False,
+            "reasoning_effort": self._reasoning_effort,
+        }
+        headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
+
+        started = time.perf_counter()
+        client = self._client or httpx.Client()
+        try:
+            response = client.post(
+                f"{self._base_url}/chat/completions",
+                json=request_body,
+                headers=headers,
+                timeout=self._timeout_s,
+            )
+        except httpx.TimeoutException:
+            # Type name only: the exception text can carry the URL, and the
+            # verdict must stay free of anything request-shaped.
+            return self._verdict("timeout", "judge request timed out", started)
+        except httpx.HTTPError:
+            return self._verdict("error", "judge endpoint unreachable", started)
+        finally:
+            if self._client is None:
+                client.close()
+        latency_ms = self._latency_ms(started)
+
+        if response.status_code != 200:
+            # Status code ONLY: a server error body can echo request headers
+            # (incl. Authorization) — it never reaches logs or the verdict.
+            log.warning("judge endpoint returned %s", response.status_code)
+            return self._verdict(
+                "error", f"judge endpoint returned {response.status_code}", started
+            )
+
+        try:
+            content = self._completion_content(response)
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            log.warning("malformed judge response: %s", type(exc).__name__)
+            return self._verdict("invalid_output", "judge response had no content", started)
+
+        data = _decode_payload(content)
+        if data is None:
+            return self._verdict("invalid_output", "judge output was not JSON", started)
+        selected = data.get("selected")
+        if not isinstance(selected, list):
+            return self._verdict("invalid_output", 'judge JSON has no "selected" list', started)
+        ids: list[str] = []
+        invalid = 0
+        for entry in selected:
+            if isinstance(entry, str) and entry:
+                ids.append(entry)
+            else:
+                invalid += 1  # dropped at parse level; the reranker counts it
+        reason = data.get("reason")
+        reason_text = reason[:_REASON_MAX] if isinstance(reason, str) else ""
+        return JudgeVerdict(
+            status="ok",
+            selected=ids,
+            reason=reason_text,
+            model_id=self._model,
+            latency_ms=latency_ms,
+            invalid_ids=invalid,
+        )
+
+    # -- internals ---------------------------------------------------------
+
+    @staticmethod
+    def _latency_ms(started: float) -> int:
+        return int((time.perf_counter() - started) * 1000)
+
+    def _verdict(self, status: JudgeStatus, reason: str, started: float) -> JudgeVerdict:
+        """A failure verdict: nothing selected, honest reason, no secrets."""
+        return JudgeVerdict(
+            status=status,
+            reason=reason[:_REASON_MAX],
+            model_id=self._model,
+            latency_ms=self._latency_ms(started),
+        )
+
+    def _completion_content(self, response: httpx.Response) -> str:
+        """Extract the completion text from a JSON or SSE-shaped body.
+
+        Some OpenAI-compatible gateways stream unconditionally (§77: verify
+        wire shapes at implementation time — verified live 2026-09-28 in
+        executor.py): the body arrives as ``text/event-stream`` with either
+        the whole ``chat.completion`` as one event or chunk deltas. Both are
+        handled; plain JSON is the fast path. (Duplicated from
+        executor.py rather than refactored: that file is outside this
+        change's allowed surface.)
+        """
+        raw = response.text
+        try:
+            data, _ = json.JSONDecoder().raw_decode(raw.lstrip())
+        except json.JSONDecodeError:
+            return self._content_from_sse(raw)
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ValueError(f"completion object has no message content: {exc}") from exc
+        return content if isinstance(content, str) else ""
+
+    @staticmethod
+    def _content_from_sse(raw: str) -> str:
+        chunks: list[str] = []
+        for line in raw.splitlines():
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:") :].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if event.get("object") == "chat.completion":
+                content = event["choices"][0]["message"]["content"]
+                return content if isinstance(content, str) else ""
+            if event.get("object") == "chat.completion.chunk":
+                delta = event["choices"][0]["delta"].get("content")
+                if delta:
+                    chunks.append(str(delta))
+        return "".join(chunks)
