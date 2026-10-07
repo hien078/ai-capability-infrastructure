@@ -73,11 +73,20 @@ from aci.domain.routing.models import JudgeCandidate, JudgeStatus, JudgeVerdict
 #: the abstract definition alone cannot separate dev complementary
 #: seconds (keep — dev recall floor) from organic pair fillers (drop —
 #: precision floor): v4 kept both (dev 0.546 / organic 10.5%), v5 dropped
-#: both (dev 0.417 / organic 7.4%). A low-effort judge follows explicit
+#: both (dev 0.417 / organic 7.4%). A low-effor judge follows explicit
 #: EXAMPLES far better than abstract clauses, so v6 keeps v4's
 #: same-activity clause (dev seconds stay required) and adds the three
 #: measured organic pair shapes as ALWAYS-optional examples.
-JEV_PROMPT_VERSION = "6"
+#: v7 (tuning exp 5f, LAST iteration): v4 + a classification-conditional
+#: cap. v6's examples did not hold (the judge kept marking code-review
+#: seconds required next to plan writing — 7 cases in e5e). The one shape
+#: the judge DOES follow is a numeric cap, so v7 states it as one: a plan
+#: or docs deliverable takes ONE planning/writing skill, and a second pick
+#: on a plan/docs task is ALWAYS optional (the necessity gate then drops
+#: it). Generic and classification-conditional — no skill ids, no
+#: task-text wording. Dev cost measured zero (no DEV case keeps two
+#: planning skills: dev-plan-feature picks [writing-plans] alone).
+JEV_PROMPT_VERSION = "7"
 
 #: Task text bound for the wire (§2.4): head 3000 + tail 1000 chars.
 _TASK_HEAD = 3000
@@ -106,6 +115,8 @@ _SYSTEM_TEMPLATE = (
     "(test discipline, completion verification, code review, git workflow, branch finishing) "
     "do not apply to a document, even if the task mentions review, feedback, "
     "tests, or verification.\n"
+    "- A plan or docs deliverable needs ONE planning/writing skill: a second pick "
+    "on a plan or docs task is ALWAYS optional.\n"
     "- A code change takes the skills matching the kind of change "
     "(debugging, testing, refactoring, security hardening, ...).\n"
     "- A review task takes the skill for reviewing or verifying work, "
@@ -120,9 +131,7 @@ _SYSTEM_TEMPLATE = (
     "\"required\" = this skill's specific activity matches the task's "
     "classification, or covers the SAME activity as another selected skill "
     "(deepening or complementing it); "
-    '"optional" = anything merely related — ALWAYS optional: '
-    "completion-verification next to a security review, a code-review "
-    "skill next to plan writing, a database skill next to a testing task.\n"
+    '"optional" = a skill from an unrelated activity that would merely help.\n'
     "Never add a skill from an unrelated activity as a filler second pick.\n"
     "A skill is NOT relevant just because it shares words "
     "(security, token, audit, CI, review, rate limit).\n"
