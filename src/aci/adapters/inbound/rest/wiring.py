@@ -104,6 +104,10 @@ def _build_reranker(settings: Settings) -> HeuristicReranker | JevReranker:
         raise ValueError(
             f"unknown ACI_JEV_ON_FAILURE {settings.jev_on_failure!r} (abstain|heuristic)"
         )
+    if settings.jev_necessity_gate not in ("none", "second", "all"):
+        raise ValueError(
+            f"unknown ACI_JEV_NECESSITY_GATE {settings.jev_necessity_gate!r} (none|second|all)"
+        )
     if settings.jev_backend == "jevos":
         if not settings.jevos_url:
             raise ValueError(
@@ -145,6 +149,7 @@ def _build_reranker(settings: Settings) -> HeuristicReranker | JevReranker:
         max_select=settings.jev_max_select,
         on_failure=settings.jev_on_failure,  # type: ignore[arg-type]
         fallback=HeuristicReranker() if settings.jev_on_failure == "heuristic" else None,
+        necessity_gate=settings.jev_necessity_gate,  # type: ignore[arg-type]
     )
 
 

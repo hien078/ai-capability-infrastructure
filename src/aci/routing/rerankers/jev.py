@@ -28,6 +28,10 @@ Invariants (§2.2, review-blocking — pinned by tests/unit/test_jev_reranker.py
 6. DETERMINISTIC CONTRACT AROUND A NON-DETERMINISTIC JUDGE: temperature 0 and
    bounded output are the ADAPTER's job; here, order = judge order and ties
    are impossible (rank = position).
+7. NECESSITY GATE (exp 3) ONLY DROPS: it removes picks the judge itself
+   marked "optional" (per ``necessity_gate``); it can never add, rescue or
+   reorder — a dropped pick is exactly a pick the judge never made. A judge
+   that reports no usable necessities leaves the gate a no-op (v1 stands).
 
 Pure logic, no HTTP — the ``SkillJudge`` protocol is plugged in by wiring
 (``adapters/inbound/rest/wiring.py``); unit tests use a fake judge.
@@ -40,6 +44,7 @@ from aci.domain.policy.models import RoutingRequestContext
 from aci.domain.routing.models import (
     JudgeCandidate,
     JudgeVerdict,
+    PickNecessity,
     RankedCandidate,
     RerankResult,
     RerankTrace,
@@ -48,9 +53,14 @@ from aci.domain.routing.models import (
 )
 
 IMPLEMENTATION = "jev"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 OnFailure = Literal["abstain", "heuristic"]
+#: Selection policy (tuning exp 3): what the per-pick necessity gate does.
+#: "none" = v1 behavior (every validated pick is attached, up to max_select);
+#: "second" = the first pick is always attached, a SECOND pick only when the
+#: judge marked it "required"; "all" = every pick must be "required".
+NecessityGate = Literal["none", "second", "all"]
 
 
 class JevReranker:
@@ -59,6 +69,13 @@ class JevReranker:
     Takes the top ``candidate_limit`` candidates by retrieval score, asks
     the judge which (if any) directly help with the task as written, and
     returns ONLY the validated selection in judge order.
+
+    The necessity gate (exp 3) drops judge picks the judge itself marked
+    "optional" — dropping is subset-safe (§2.2.1): a dropped pick is simply
+    not returned, exactly like a pick the judge never made. A judge that
+    reports no necessities (``None`` — the pre-exp-3 shape, the jevos
+    backend, a fake) or a length-mismatched list leaves the gate a no-op:
+    a malformed report never drops picks silently.
     """
 
     def __init__(
@@ -69,6 +86,7 @@ class JevReranker:
         max_select: int = 2,
         on_failure: OnFailure = "abstain",
         fallback: CapabilityReranker | None = None,
+        necessity_gate: NecessityGate = "none",
     ) -> None:
         if candidate_limit < 1:
             raise ValueError(f"candidate_limit must be >= 1, got {candidate_limit}")
@@ -78,11 +96,14 @@ class JevReranker:
             raise ValueError(f"unknown on_failure {on_failure!r} (abstain|heuristic)")
         if on_failure == "heuristic" and fallback is None:
             raise ValueError("on_failure='heuristic' requires a fallback reranker")
+        if necessity_gate not in ("none", "second", "all"):
+            raise ValueError(f"unknown necessity_gate {necessity_gate!r} (none|second|all)")
         self._judge = judge
         self._candidate_limit = candidate_limit
         self._max_select = max_select
         self._on_failure = on_failure
         self._fallback = fallback
+        self._necessity_gate = necessity_gate
 
     def rerank(
         self,
@@ -131,7 +152,7 @@ class JevReranker:
         if verdict.status != "ok":
             return self._on_judge_failure(task, candidates, context, verdict)
 
-        selected = self._validate_subset(verdict, top)
+        kept, dropped = self._picks(verdict, top)
         ranked = [
             RankedCandidate(
                 candidate=s.candidate,
@@ -143,11 +164,17 @@ class JevReranker:
                 reasons=["judge-selected"],
                 document_text=s.document_text,
             )
-            for position, s in enumerate(selected, start=1)
+            for position, s in enumerate(kept, start=1)
         ]
         return RerankResult(
             ranked=ranked,
-            trace=self._trace(verdict, input_count=len(candidates), selected=selected, top=top),
+            trace=self._trace(
+                verdict,
+                input_count=len(candidates),
+                selected=kept,
+                top=top,
+                dropped=dropped,
+            ),
         )
 
     # -- internals ---------------------------------------------------------
@@ -160,29 +187,63 @@ class JevReranker:
         )
         return ordered[: self._candidate_limit]
 
-    def _validate_subset(
+    def _picks(
         self, verdict: JudgeVerdict, top: list[ScoredCandidate]
-    ) -> list[ScoredCandidate]:
-        """Keep the judge's ids that exist in the candidate set, in order.
+    ) -> tuple[list[ScoredCandidate], list[ScoredCandidate] | None]:
+        """Validated judge picks → ``(kept, dropped_by_gate)``, judge order.
 
-        Unknown ids are dropped and counted; duplicates collapse to their
-        first occurrence; the result is capped at ``max_select`` (bounded
-        output even when the judge ignores the instruction).
+        Subset validation never drops for the gate: unknown ids are
+        counted invalid (§2.2.1), duplicates collapse. The necessity gate
+        (exp 3) then drops picks the judge itself marked "optional";
+        ``max_select`` caps LAST so a required pick is never crowded out
+        by an optional one in front of it. Over-cap picks are truncated
+        (not invalid, not gate-dropped) — the v1 semantics.
         """
         by_id = {s.candidate.capability_id: s for s in top}
-        selected: list[ScoredCandidate] = []
+        necessities = self._aligned_necessities(verdict)
+        picks: list[tuple[ScoredCandidate, PickNecessity]] = []
         seen: set[str] = set()
-        for capability_id in verdict.selected:
+        for position, capability_id in enumerate(verdict.selected):
             scored = by_id.get(capability_id)
             if scored is None:
                 continue  # counted below via invalid_ids
             if capability_id in seen:
                 continue
             seen.add(capability_id)
-            selected.append(scored)
-            if len(selected) >= self._max_select:
-                break
-        return selected
+            necessity: PickNecessity = (
+                necessities[position] if necessities is not None else "required"
+            )
+            picks.append((scored, necessity))
+        kept: list[ScoredCandidate] = []
+        dropped: list[ScoredCandidate] = []
+        for position, (scored, necessity) in enumerate(picks):
+            if self._gate_keeps(position, necessity):
+                kept.append(scored)
+            else:
+                dropped.append(scored)
+        # gate="none" → the field stays UNSET (byte-compatible v1 trace);
+        # a gate that ran records [] when it dropped nothing.
+        return kept[: self._max_select], (dropped if self._necessity_gate != "none" else None)
+
+    @staticmethod
+    def _aligned_necessities(verdict: JudgeVerdict) -> list[PickNecessity] | None:
+        """The judge's per-pick necessity, or ``None`` when unusable.
+
+        No report (``None`` — pre-exp-3 shape, jevos, fakes) or a length
+        mismatch → the gate is a NO-OP: a malformed report never drops
+        picks silently (v1 semantics stand).
+        """
+        if verdict.necessities is None or len(verdict.necessities) != len(verdict.selected):
+            return None
+        return verdict.necessities
+
+    def _gate_keeps(self, position: int, necessity: PickNecessity) -> bool:
+        """Does the necessity gate keep this validated pick?"""
+        if self._necessity_gate == "none":
+            return True
+        if self._necessity_gate == "second" and position == 0:
+            return True  # the first (best) pick is always attached
+        return necessity == "required"
 
     def _invalid_count(self, verdict: JudgeVerdict, top: list[ScoredCandidate]) -> int:
         """Parse-level drops (verdict) + judge-selected unknown ids.
@@ -202,6 +263,7 @@ class JevReranker:
         input_count: int,
         selected: list[ScoredCandidate],
         top: list[ScoredCandidate],
+        dropped: list[ScoredCandidate] | None = None,
     ) -> RerankTrace:
         return RerankTrace(
             implementation=IMPLEMENTATION,
@@ -214,6 +276,9 @@ class JevReranker:
             judge_reason=verdict.reason or None,
             selected_ids=[s.candidate.capability_id for s in selected],
             invalid_ids=self._invalid_count(verdict, top),
+            necessity_dropped_ids=(
+                [s.candidate.capability_id for s in dropped] if dropped is not None else None
+            ),
         )
 
     def _on_judge_failure(

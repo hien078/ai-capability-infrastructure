@@ -48,7 +48,10 @@ from aci.domain.routing.models import JudgeCandidate, JudgeStatus, JudgeVerdict
 
 #: Version of the judge prompt (§2.4). Bump when the system message changes
 #: — telemetry can then separate prompt eras.
-JEV_PROMPT_VERSION = "1"
+#: v2 (tuning exp 3, selection policy): the judge returns per-pick necessity
+#: ({"id": ..., "necessity": "required"|"optional"}) so the reranker can
+#: attach a second skill only when the task actually requires it.
+JEV_PROMPT_VERSION = "2"
 
 #: Task text bound for the wire (§2.4): head 3000 + tail 1000 chars.
 _TASK_HEAD = 3000
@@ -60,9 +63,12 @@ _REASON_MAX = 500
 
 _SYSTEM_TEMPLATE = (
     "You select skills for a coding agent. You get a TASK and CANDIDATE skills (id: description).\n"
-    'Return ONLY JSON: {"selected": [<ids>], "reason": "<one sentence>"}.\n'
-    "Select at most {max_select} ids, and only skills that DIRECTLY help "
+    'Return ONLY JSON: {"selected": [{"id": "<id>", "necessity": "required"|"optional"}],'
+    ' "reason": "<one sentence>"}.\n'
+    "Select at most {max_select} entries, and only skills that DIRECTLY help "
     "with this task as written.\n"
+    '"required" = the task as written calls for that skill\'s specific activity;'
+    ' "optional" = it would merely help.\n'
     "A skill is NOT relevant just because it shares words "
     "(security, token, audit, CI, review, rate limit).\n"
     "Prefer [] when none clearly apply — an empty selection is a correct answer.\n"
@@ -240,10 +246,29 @@ class OpenAICompatSkillJudge:
         if not isinstance(selected, list):
             return self._verdict("invalid_output", 'judge JSON has no "selected" list', started)
         ids: list[str] = []
+        necessities: list[str] = []
         invalid = 0
         for entry in selected:
+            # v2 shape: {"id": ..., "necessity": "required"|"optional"}.
+            # "required" only when EXPLICITLY said (case-insensitive) — a
+            # missing/garbage necessity is "optional" (not endorsed as
+            # required). v1-shape strings carry no necessity concept:
+            # treat them as "required" so old-shape output keeps v1
+            # semantics instead of being silently dropped by the gate.
             if isinstance(entry, str) and entry:
                 ids.append(entry)
+                necessities.append("required")
+            elif isinstance(entry, dict):
+                entry_id = entry.get("id")
+                if isinstance(entry_id, str) and entry_id:
+                    necessity = entry.get("necessity")
+                    required = (
+                        isinstance(necessity, str) and necessity.strip().lower() == "required"
+                    )
+                    ids.append(entry_id)
+                    necessities.append("required" if required else "optional")
+                else:
+                    invalid += 1  # dropped at parse level; the reranker counts it
             else:
                 invalid += 1  # dropped at parse level; the reranker counts it
         reason = data.get("reason")
@@ -251,6 +276,7 @@ class OpenAICompatSkillJudge:
         return JudgeVerdict(
             status="ok",
             selected=ids,
+            necessities=necessities,  # type: ignore[arg-type]
             reason=reason_text,
             model_id=self._model,
             latency_ms=latency_ms,

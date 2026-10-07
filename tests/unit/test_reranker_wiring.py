@@ -67,6 +67,43 @@ def test_jev_unknown_on_failure_is_rejected() -> None:
         )
 
 
+def test_jev_unknown_necessity_gate_is_rejected() -> None:
+    """exp 3: a bogus ACI_JEV_NECESSITY_GATE fails closed at startup."""
+    with pytest.raises(ValueError, match="ACI_JEV_NECESSITY_GATE"):
+        _build_reranker(
+            Settings(
+                reranker="jev",
+                jev_base_url="http://judge.local/v1",
+                jev_api_key="sk-x",
+                jev_necessity_gate="bogus",
+            )
+        )
+
+
+def test_jev_necessity_gate_wires_through() -> None:
+    """exp 3: ACI_JEV_NECESSITY_GATE=second reaches the reranker; the
+    default stays "none" (v1 behavior — nothing is enabled by the code)."""
+    reranker = _build_reranker(
+        Settings(
+            reranker="jev",
+            jev_base_url="http://judge.local/v1",
+            jev_api_key="sk-x",
+            jev_necessity_gate="second",
+        )
+    )
+    assert isinstance(reranker, JevReranker)
+    assert reranker._necessity_gate == "second"
+    default = _build_reranker(
+        Settings(
+            reranker="jev",
+            jev_base_url="http://judge.local/v1",
+            jev_api_key="sk-x",
+        )
+    )
+    assert isinstance(default, JevReranker)
+    assert default._necessity_gate == "none"
+
+
 def test_jev_base_url_scheme_is_validated_fail_closed() -> None:
     """P1: a malformed ACI_JEV_BASE_URL fails closed at startup — the judge
     adapter refuses construction on a non-http(s) endpoint."""

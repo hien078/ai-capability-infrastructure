@@ -96,6 +96,18 @@ def ok_verdict(*selected: str, reason: str = "relevant to the task") -> JudgeVer
     )
 
 
+def pick_verdict(*picks: tuple[str, str], reason: str = "per-pick necessity") -> JudgeVerdict:
+    """A v2-shape verdict: (capability_id, necessity) pairs, position-aligned."""
+    return JudgeVerdict(
+        status="ok",
+        selected=[cid for cid, _ in picks],
+        necessities=[n for _, n in picks],  # type: ignore[arg-type]
+        reason=reason,
+        model_id="fake-model",
+        latency_ms=42,
+    )
+
+
 def many(n: int, *, prefix: str = "c") -> list[ScoredCandidate]:
     """n candidates with DESCENDING retrieval scores (c-1 highest)."""
     return [
@@ -113,7 +125,7 @@ def test_selected_subset_kept_in_judge_order_with_ranks() -> None:
     assert [r.retrieval_score for r in result.ranked] == [0.97, 0.99]
     trace = result.trace
     assert trace.implementation == "jev"
-    assert trace.version == "1.0.0"
+    assert trace.version == "1.1.0"
     assert trace.input_count == 5
     assert trace.output_count == 2
     assert trace.judge_status == "ok"
@@ -254,7 +266,7 @@ def test_empty_candidates_skips_the_judge() -> None:
     # No judge ran: no judge fields in the trace (byte-compatible shape).
     assert result.trace.model_dump(mode="json") == {
         "implementation": "jev",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "input_count": 0,
         "output_count": 0,
     }
@@ -332,3 +344,162 @@ def test_reranker_raising_judge_honors_the_heuristic_opt_in() -> None:
     ]
     assert result.trace.implementation == "heuristic-reranker"
     assert result.trace.judge_status == "error"
+
+
+# ---------- exp 3: the per-pick necessity gate (selection policy) ----------
+#
+# "second" = the first pick is ALWAYS attached, a second pick only when the
+# judge marked it "required"; "all" = every pick must be "required"; "none"
+# (default) = v1 behavior. The gate ONLY DROPS (§2.2.1): a dropped pick is
+# exactly a pick the judge never made — never added, rescued or reordered.
+
+
+def test_gate_second_drops_optional_second_pick() -> None:
+    judge = FakeJudge(pick_verdict(("c-1", "required"), ("c-2", "optional")))
+    result = JevReranker(judge, necessity_gate="second").rerank(task(), many(3), context())
+    assert [r.candidate.capability_id for r in result.ranked] == ["c-1"]
+    assert result.trace.selected_ids == ["c-1"]
+    assert result.trace.necessity_dropped_ids == ["c-2"]
+    assert result.trace.output_count == 1
+
+
+def test_gate_second_keeps_required_second_pick() -> None:
+    judge = FakeJudge(pick_verdict(("c-1", "required"), ("c-2", "required")))
+    result = JevReranker(judge, necessity_gate="second").rerank(task(), many(3), context())
+    assert [r.candidate.capability_id for r in result.ranked] == ["c-1", "c-2"]
+    assert result.trace.necessity_dropped_ids == []
+    assert result.trace.output_count == 2
+
+
+def test_gate_second_keeps_the_first_pick_even_when_optional() -> None:
+    """The first (best) pick is always attached — the policy is "attach a
+    SECOND skill only when required", not "drop everything unrequired"."""
+    judge = FakeJudge(pick_verdict(("c-1", "optional"), ("c-2", "required")))
+    result = JevReranker(judge, necessity_gate="second").rerank(task(), many(3), context())
+    assert [r.candidate.capability_id for r in result.ranked] == ["c-1", "c-2"]
+
+
+def test_gate_all_drops_optional_first_pick() -> None:
+    judge = FakeJudge(pick_verdict(("c-1", "optional"), ("c-2", "required")))
+    result = JevReranker(judge, necessity_gate="all").rerank(task(), many(3), context())
+    assert [r.candidate.capability_id for r in result.ranked] == ["c-2"]
+    assert result.trace.necessity_dropped_ids == ["c-1"]
+    assert result.trace.selected_ids == ["c-2"]
+
+
+def test_gate_all_can_abstain_when_every_pick_is_optional() -> None:
+    """All-optional + gate=all → empty selection: abstention is success."""
+    judge = FakeJudge(pick_verdict(("c-1", "optional"), ("c-2", "optional")))
+    result = JevReranker(judge, necessity_gate="all").rerank(task(), many(3), context())
+    assert result.ranked == []
+    assert result.trace.judge_status == "ok"
+    assert result.trace.selected_ids == []
+    assert result.trace.necessity_dropped_ids == ["c-1", "c-2"]
+
+
+def test_gate_none_is_v1_behavior() -> None:
+    """Default: every validated pick is attached, optional or not."""
+    judge = FakeJudge(pick_verdict(("c-1", "optional"), ("c-2", "optional")))
+    result = JevReranker(judge).rerank(task(), many(3), context())
+    assert [r.candidate.capability_id for r in result.ranked] == ["c-1", "c-2"]
+    # The gate did not run: the field stays unset (dropped from the dump).
+    assert result.trace.necessity_dropped_ids is None
+    assert "necessity_dropped_ids" not in result.trace.model_dump(mode="json")
+
+
+def test_gate_is_noop_without_reported_necessities() -> None:
+    """A judge that reports no necessities (v1 shape, jevos, fakes) keeps
+    v1 semantics — the gate never drops picks it cannot see a necessity for."""
+    judge = FakeJudge(ok_verdict("c-1", "c-2"))
+    result = JevReranker(judge, necessity_gate="second").rerank(task(), many(3), context())
+    assert [r.candidate.capability_id for r in result.ranked] == ["c-1", "c-2"]
+    assert result.trace.necessity_dropped_ids == []
+
+
+def test_gate_is_noop_on_length_mismatch() -> None:
+    """A malformed necessity report (length != selected) is a NO-OP — a
+    malformed report never drops picks silently."""
+    verdict = JudgeVerdict(
+        status="ok",
+        selected=["c-1", "c-2"],
+        necessities=["required"],  # type: ignore[arg-type]
+        reason="malformed",
+        model_id="fake-model",
+        latency_ms=42,
+    )
+    result = JevReranker(FakeJudge(verdict), necessity_gate="all").rerank(
+        task(), many(3), context()
+    )
+    assert [r.candidate.capability_id for r in result.ranked] == ["c-1", "c-2"]
+
+
+def test_gate_applies_before_the_max_select_cap() -> None:
+    """A required pick is never crowded out by an optional one in front of
+    it: gate first, cap last."""
+    judge = FakeJudge(pick_verdict(("c-1", "required"), ("c-2", "optional"), ("c-3", "required")))
+    result = JevReranker(judge, max_select=2, necessity_gate="second").rerank(
+        task(), many(4), context()
+    )
+    assert [r.candidate.capability_id for r in result.ranked] == ["c-1", "c-3"]
+    assert result.trace.necessity_dropped_ids == ["c-2"]
+
+
+def test_gate_drops_are_counted_not_invalid() -> None:
+    """A gate-dropped pick is NOT invalid (the judge was given it and chose
+    it) — it is recorded in necessity_dropped_ids, never in invalid_ids."""
+    judge = FakeJudge(pick_verdict(("c-1", "required"), ("c-2", "optional")))
+    result = JevReranker(judge, necessity_gate="second").rerank(task(), many(3), context())
+    assert result.trace.invalid_ids == 0
+
+
+def test_gate_unknown_ids_still_counted_invalid() -> None:
+    """The gate composes with subset validation: an unknown id stays invalid
+    whether or not a necessity was reported for it."""
+    verdict = JudgeVerdict(
+        status="ok",
+        selected=["evil-skill", "c-1"],
+        necessities=["required", "required"],
+        reason="mixed",
+        model_id="fake-model",
+        latency_ms=42,
+    )
+    result = JevReranker(FakeJudge(verdict), necessity_gate="second").rerank(
+        task(), many(3), context()
+    )
+    assert [r.candidate.capability_id for r in result.ranked] == ["c-1"]
+    assert result.trace.invalid_ids == 1
+
+
+def test_unknown_necessity_gate_is_rejected() -> None:
+    with pytest.raises(ValueError, match="necessity_gate"):
+        JevReranker(FakeJudge(ok_verdict()), necessity_gate="bogus")  # type: ignore[arg-type]
+
+
+def test_gate_dropped_ids_never_reach_the_bundle() -> None:
+    """§2.2.4 end-to-end: a gate-dropped pick is absent from the composer's
+    input — the composer cannot fill the budget with dropped picks."""
+    from datetime import UTC, datetime
+
+    from aci.domain.capability.models import RouteCapabilitiesCommand
+    from aci.routing.composer import MinimalBundleComposer
+    from aci.routing.dependencies import DefaultDependencyResolver
+
+    class _NoRelations:
+        def list_relations(self, source_capability_id: str) -> list:  # type: ignore[type-arg]
+            return []
+
+    class _NoReleases:
+        def get_release(self, capability_id: str, channel: str) -> None:  # noqa: ARG002
+            return None
+
+    judge = FakeJudge(pick_verdict(("c-1", "required"), ("c-2", "optional")))
+    candidates = many(2)
+    result = JevReranker(judge, necessity_gate="second").rerank(task(), candidates, context())
+    resolution = DefaultDependencyResolver(_NoRelations(), _NoReleases()).resolve(result.ranked)
+    composition = MinimalBundleComposer().compose(
+        resolution,
+        RouteCapabilitiesCommand(task_text="fix a failing python test"),
+        route_run_id="route_gate",
+        now=datetime.now(UTC),
+    )
+    assert [i.capability_id for i in composition.bundle.items] == ["c-1"]

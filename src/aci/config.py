@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     #: the heuristic is the measured source of harm, never a silent
     #: fallback) or "heuristic" (explicit opt-in delegation).
     jev_on_failure: str = "abstain"
+    #: Per-pick necessity gate (tuning exp 3, selection policy): "none"
+    #: (default — every validated judge pick is attached, v1 behavior),
+    #: "second" (the first pick is always attached; a SECOND pick only
+    #: when the judge marked it "required"), "all" (every pick must be
+    #: "required"). Only drops — never adds or rescues (§2.2.1).
+    jev_necessity_gate: str = "none"
     #: JEV judge backend (docs/plans/jev-reranker.md §6): "llm" (default —
     #: the OpenAI-compatible chat judge above) or "jevos" (the local Jev
     #: typed-decision API, one POST {jevos_url}/v1/systemone). The backend

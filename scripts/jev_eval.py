@@ -261,6 +261,7 @@ def build_row(
         "judge_latency_ms": trace.judge_latency_ms,
         "invalid_ids": trace.invalid_ids,
         "selected_ids": trace.selected_ids or [],
+        "necessity_dropped_ids": trace.necessity_dropped_ids or [],
         "retrieval_model": retrieval.trace.model_id,
     }
     if isinstance(case, BenchmarkCase):
@@ -369,6 +370,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             else None
         ),
         "judge_status_counts": dict(Counter(r["judge_status"] or "none" for r in rows)),
+        "necessity_dropped": sum(len(r.get("necessity_dropped_ids") or []) for r in rows),
         "route_latency_p50_ms": percentile(route_latencies, 50),
         "route_latency_p95_ms": percentile(route_latencies, 95),
         "judge_latency_p50_ms": percentile(judge_latencies, 50),
@@ -387,6 +389,7 @@ def build_report(
     embedder_model: str,
     database: str,
     organic_source: str | None,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The full eval report — deterministic (no timestamps, no generated ids)."""
     sets: dict[str, Any] = {}
@@ -400,6 +403,7 @@ def build_report(
         "database": database,
         "organic_source": organic_source,
         "read_only": True,
+        "config": config or {},
         "n_cases": len(rows),
         "gate": list(GATE),
         "sets": sets,
@@ -513,6 +517,7 @@ def reranker_from_config(
     candidate_limit: int = 12,
     max_select: int = 2,
     on_failure: str = "abstain",
+    necessity_gate: str = "none",
 ) -> CapabilityReranker:
     """Pick the eval arm: heuristic baseline or the JEV judge."""
     if name == "heuristic":
@@ -527,6 +532,7 @@ def reranker_from_config(
         max_select=max_select,
         on_failure=on_failure,  # type: ignore[arg-type]
         fallback=HeuristicReranker() if on_failure == "heuristic" else None,
+        necessity_gate=necessity_gate,  # type: ignore[arg-type]
     )
 
 
@@ -544,6 +550,7 @@ def build_router(
     candidate_limit: int = 12,
     max_select: int = 2,
     on_failure: str = "abstain",
+    necessity_gate: str = "none",
 ) -> tuple[EvalRouter, Engine]:
     """Wire the REAL §14 stages over a read-only engine — the same
     composition as the REST Container (adapters/inbound/rest/wiring.py)."""
@@ -580,6 +587,7 @@ def build_router(
             candidate_limit=candidate_limit,
             max_select=max_select,
             on_failure=on_failure,
+            necessity_gate=necessity_gate,
         ),
         # _MemoRelations: same rows, same resolver answers, thousands fewer
         # roundtrips per run against a remote registry (see routing_replay).
@@ -637,6 +645,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--jev-candidates", type=int, default=12)
     parser.add_argument("--jev-max-select", type=int, default=2)
     parser.add_argument("--jev-on-failure", default="abstain", choices=["abstain", "heuristic"])
+    parser.add_argument(
+        "--jev-necessity-gate",
+        default="none",
+        choices=["none", "second", "all"],
+        help="per-pick necessity gate (exp 3): none = v1 behavior; second = a "
+        "second pick only when the judge marked it required; all = every pick "
+        "must be required (default: none)",
+    )
     args = parser.parse_args(argv)
 
     if not args.database_url:
@@ -672,6 +688,7 @@ def main(argv: list[str] | None = None) -> int:
         candidate_limit=args.jev_candidates,
         max_select=args.jev_max_select,
         on_failure=args.jev_on_failure,
+        necessity_gate=args.jev_necessity_gate,
     )
     rows: list[dict[str, Any]] = []
     try:
@@ -680,12 +697,23 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         engine.dispose()
 
+    from aci.adapters.outbound.model_provider.judge import JEV_PROMPT_VERSION
+
     report = build_report(
         rows,
         reranker=args.reranker,
         embedder_model=router.retriever.model_id,
         database=make_url(args.database_url).database or "?",
         organic_source=args.organic,
+        config={
+            "prompt_version": JEV_PROMPT_VERSION if args.reranker == "jev" else None,
+            "reasoning_effort": args.jev_reasoning_effort if args.reranker == "jev" else None,
+            "max_select": args.jev_max_select,
+            "candidate_limit": args.jev_candidates,
+            "necessity_gate": args.jev_necessity_gate,
+            "timeout_s": args.jev_timeout,
+            "on_failure": args.jev_on_failure,
+        },
     )
     print(render_summary(report))
     print()

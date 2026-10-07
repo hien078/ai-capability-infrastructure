@@ -45,6 +45,14 @@ def test_judge_verdict_defaults() -> None:
     assert verdict.model_id == ""
     assert verdict.latency_ms is None
     assert verdict.invalid_ids == 0
+    assert verdict.necessities is None  # exp 3: no report = gate no-op
+
+
+def test_judge_verdict_necessities_are_closed() -> None:
+    verdict = JudgeVerdict(status="ok", selected=["a", "b"], necessities=["required", "optional"])
+    assert verdict.necessities == ["required", "optional"]
+    with pytest.raises(ValidationError):
+        JudgeVerdict.model_validate({"status": "ok", "selected": ["a"], "necessities": ["bogus"]})
 
 
 def test_judge_verdict_reason_is_bounded() -> None:
@@ -108,6 +116,33 @@ def test_rerank_trace_keeps_empty_selected_ids_but_drops_unset() -> None:
     assert dump["selected_ids"] == []
     assert "invalid_ids" not in dump
     assert "judge_reason" not in dump
+    assert "necessity_dropped_ids" not in dump  # exp 3: unset = absent
+
+
+def test_rerank_trace_carries_necessity_dropped_ids_when_set() -> None:
+    """exp 3: the gate's drops are telemetry — ids only, present when the
+    gate ran (even when it dropped nothing)."""
+    trace = RerankTrace(
+        implementation="jev",
+        version="1.1.0",
+        input_count=12,
+        output_count=1,
+        judge_status="ok",
+        selected_ids=["debugging"],
+        necessity_dropped_ids=["verification-before-completion"],
+    )
+    dump = trace.model_dump(mode="json")
+    assert dump["necessity_dropped_ids"] == ["verification-before-completion"]
+    empty = RerankTrace(
+        implementation="jev",
+        version="1.1.0",
+        input_count=1,
+        output_count=1,
+        judge_status="ok",
+        selected_ids=["debugging"],
+        necessity_dropped_ids=[],
+    )
+    assert empty.model_dump(mode="json")["necessity_dropped_ids"] == []
 
 
 def test_rerank_result_default_ranked_is_empty() -> None:

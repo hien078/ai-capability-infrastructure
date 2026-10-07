@@ -820,3 +820,52 @@ def test_reranker_from_config_rejects_unknown() -> None:
         je.reranker_from_config("bogus")  # type: ignore[arg-type]
     heuristic = je.reranker_from_config("heuristic")
     assert isinstance(heuristic, HeuristicReranker)
+
+
+def test_reranker_from_config_wires_the_necessity_gate() -> None:
+    """exp 3: --jev-necessity-gate reaches the JEV reranker (default none)."""
+    judge = ScriptedJudge([])
+    gated = je.reranker_from_config("jev", judge=judge, necessity_gate="second")
+    assert isinstance(gated, JevReranker)
+    assert gated._necessity_gate == "second"
+    default = je.reranker_from_config("jev", judge=judge)
+    assert isinstance(default, JevReranker)
+    assert default._necessity_gate == "none"
+
+
+def test_build_row_carries_necessity_dropped_ids() -> None:
+    """exp 3: the per-row record surfaces the gate's drops (ids only)."""
+    case = je.OrganicCase(case_id="o-1", task_text="t", acceptable=("debugging",))
+    row = je.build_row(
+        case=case,
+        set_name="organic",
+        retrieval=_retrieval(),
+        rerank=_rerank(
+            [_ranked("debugging", 0.9, 1)],
+            judge_status="ok",
+            selected_ids=["debugging"],
+            necessity_dropped_ids=["verification-before-completion"],
+        ),
+        composition=_composition(["debugging"]),
+        route_latency_ms=100,
+    )
+    assert row["necessity_dropped_ids"] == ["verification-before-completion"]
+    # Unset (gate="none" / heuristic) → [] in the row, never None.
+    plain = je.build_row(
+        case=case,
+        set_name="organic",
+        retrieval=_retrieval(),
+        rerank=_rerank([_ranked("debugging", 0.9, 1)], judge_status="ok"),
+        composition=_composition(["debugging"]),
+        route_latency_ms=100,
+    )
+    assert plain["necessity_dropped_ids"] == []
+
+
+def test_summarize_counts_necessity_drops() -> None:
+    rows = [
+        _organic_row("o-1", necessity_dropped_ids=["filler-skill"]),
+        _organic_row("o-2", necessity_dropped_ids=[]),
+    ]
+    s = je.summarize(rows)
+    assert s["necessity_dropped"] == 1

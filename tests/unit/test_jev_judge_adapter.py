@@ -81,9 +81,11 @@ def test_request_shape_is_the_spec_contract() -> None:
     assert [m["role"] for m in body["messages"]] == ["system", "user"]
     system = body["messages"][0]["content"]
     user = body["messages"][1]["content"]
-    # The spec §2.4 system prompt, verbatim shape.
+    # The §2.4 system prompt, verbatim shape (v2: per-pick necessity).
     assert "Return ONLY JSON" in system
-    assert "Select at most 2 ids" in system
+    assert "Select at most 2 entries" in system
+    assert '"necessity": "required"|"optional"' in system
+    assert '"required" = the task as written calls for that skill' in system
     assert "Prefer [] when none clearly apply" in system
     assert "Never output an id that is not in the candidate list." in system
     # The user message carries TASK + one CANDIDATES line per id.
@@ -91,6 +93,7 @@ def test_request_shape_is_the_spec_contract() -> None:
     assert "- debugging: a skill description" in user
     assert "- tdd: a skill description" in user
     assert isinstance(JEV_PROMPT_VERSION, str)
+    assert JEV_PROMPT_VERSION == "2"
 
 
 def test_bare_json_parse() -> None:
@@ -471,3 +474,106 @@ def test_fast_endpoint_is_unaffected_by_the_deadline() -> None:
     assert verdict.status == "ok"
     assert verdict.selected == ["debugging"]
     assert len(captured) == 1
+
+
+# ---------- exp 3: per-pick necessity parse (prompt v2 output shape) ----------
+#
+# v2 asks for {"selected": [{"id": ..., "necessity": "required"|"optional"}]}.
+# "required" only when EXPLICITLY said (case-insensitive); a missing or
+# garbage necessity is "optional" (not endorsed as required). v1-shape
+# strings carry no necessity concept → "required" (old-shape output keeps
+# v1 semantics instead of being silently dropped by the gate).
+
+
+def test_v2_shape_parses_ids_and_necessities() -> None:
+    payload = json.dumps(
+        {
+            "selected": [
+                {"id": "debugging", "necessity": "required"},
+                {"id": "tdd", "necessity": "optional"},
+            ],
+            "reason": "one clear pick",
+        }
+    )
+    judge, _ = make_judge(lambda request: completion(payload))
+    verdict = judge.judge("fix a bug", candidates("debugging", "tdd"), 2)
+    assert verdict.status == "ok"
+    assert verdict.selected == ["debugging", "tdd"]
+    assert verdict.necessities == ["required", "optional"]
+
+
+def test_necessity_required_is_case_insensitive() -> None:
+    payload = json.dumps({"selected": [{"id": "debugging", "necessity": " Required "}]})
+    judge, _ = make_judge(lambda request: completion(payload))
+    verdict = judge.judge("fix a bug", candidates("debugging"), 2)
+    assert verdict.necessities == ["required"]
+
+
+def test_necessity_garbage_maps_to_optional() -> None:
+    """A synonym or garbage value is NOT "required" — only the exact word
+    (case-insensitive) endorses a pick as required."""
+    payload = json.dumps(
+        {
+            "selected": [
+                {"id": "debugging", "necessity": "necessary"},
+                {"id": "tdd", "necessity": 7},
+            ]
+        }
+    )
+    judge, _ = make_judge(lambda request: completion(payload))
+    verdict = judge.judge("fix a bug", candidates("debugging", "tdd"), 2)
+    assert verdict.selected == ["debugging", "tdd"]
+    assert verdict.necessities == ["optional", "optional"]
+
+
+def test_v2_object_without_necessity_is_optional() -> None:
+    payload = json.dumps({"selected": [{"id": "debugging"}]})
+    judge, _ = make_judge(lambda request: completion(payload))
+    verdict = judge.judge("fix a bug", candidates("debugging"), 2)
+    assert verdict.selected == ["debugging"]
+    assert verdict.necessities == ["optional"]
+
+
+def test_v1_string_entries_are_required() -> None:
+    """Old-shape strings keep v1 semantics: the gate must not drop them."""
+    payload = json.dumps({"selected": ["debugging", "tdd"], "reason": "v1 shape"})
+    judge, _ = make_judge(lambda request: completion(payload))
+    verdict = judge.judge("fix a bug", candidates("debugging", "tdd"), 2)
+    assert verdict.selected == ["debugging", "tdd"]
+    assert verdict.necessities == ["required", "required"]
+
+
+def test_mixed_shape_strings_required_objects_by_their_value() -> None:
+    payload = json.dumps({"selected": ["debugging", {"id": "tdd", "necessity": "optional"}]})
+    judge, _ = make_judge(lambda request: completion(payload))
+    verdict = judge.judge("fix a bug", candidates("debugging", "tdd"), 2)
+    assert verdict.selected == ["debugging", "tdd"]
+    assert verdict.necessities == ["required", "optional"]
+
+
+def test_v2_object_without_id_is_invalid() -> None:
+    payload = json.dumps({"selected": [{"necessity": "required"}, {"id": "debugging"}]})
+    judge, _ = make_judge(lambda request: completion(payload))
+    verdict = judge.judge("fix a bug", candidates("debugging"), 2)
+    assert verdict.status == "ok"
+    assert verdict.selected == ["debugging"]
+    assert verdict.invalid_ids == 1
+
+
+def test_necessities_align_with_selected_after_parse_drops() -> None:
+    """Position alignment survives parse-level drops: the surviving id's
+    necessity is the one reported FOR THAT id."""
+    payload = json.dumps(
+        {
+            "selected": [
+                {"id": "debugging", "necessity": "optional"},
+                {"necessity": "required"},  # no id → parse-level drop
+                {"id": "tdd", "necessity": "required"},
+            ]
+        }
+    )
+    judge, _ = make_judge(lambda request: completion(payload))
+    verdict = judge.judge("fix a bug", candidates("debugging", "tdd"), 2)
+    assert verdict.selected == ["debugging", "tdd"]
+    assert verdict.necessities == ["optional", "required"]
+    assert verdict.invalid_ids == 1

@@ -261,6 +261,14 @@ class ResolvedVersion(BaseModel):
 #: abstain, ADR-008 — never a silent fallback to the heuristic).
 JudgeStatus = Literal["ok", "timeout", "error", "invalid_output"]
 
+#: Per-pick necessity as reported by the judge (tuning exp 3, selection
+#: policy): "required" = the task as written calls for that skill's
+#: activity; "optional" = it would merely help. The reranker's necessity
+#: gate (``JevReranker(necessity_gate=...)``) may drop optional picks —
+#: dropping is subset-safe (§2.2.1); a judge that reports no necessities
+#: (``None``, the pre-exp-3 shape) leaves the gate a no-op.
+PickNecessity = Literal["required", "optional"]
+
 
 class JudgeCandidate(BaseModel):
     """One candidate as the judge sees it (§17.1: trusted text only).
@@ -283,7 +291,11 @@ class JudgeVerdict(BaseModel):
     reranker drops ids outside the candidate set and counts them in
     ``invalid_ids`` (which also accumulates parse-level drops from the
     adapter). ``reason`` is bounded (≤500 chars) so it can land in telemetry
-    verbatim.
+    verbatim. ``necessities`` (exp 3) is per-pick necessity ALIGNED with
+    ``selected`` by position; ``None`` = the judge did not report any (the
+    pre-exp-3 output shape) and the reranker's necessity gate is a no-op.
+    A length mismatch is likewise a no-op (a malformed report never drops
+    picks silently).
     """
 
     model_config = {"frozen": True}
@@ -294,6 +306,8 @@ class JudgeVerdict(BaseModel):
     model_id: str = ""
     latency_ms: int | None = None
     invalid_ids: int = Field(default=0, ge=0)
+    #: Per-pick necessity, position-aligned with ``selected`` (exp 3).
+    necessities: list[PickNecessity] | None = None
 
 
 #: RerankTrace judge fields (below): dropped from ``model_dump`` while UNSET
@@ -306,6 +320,7 @@ _JUDGE_TRACE_FIELDS = (
     "judge_reason",
     "selected_ids",
     "invalid_ids",
+    "necessity_dropped_ids",
 )
 
 
@@ -332,6 +347,10 @@ class RerankTrace(BaseModel):
     selected_ids: list[str] | None = None
     #: Judge-selected ids dropped as unknown + parse-level drops.
     invalid_ids: int | None = None
+    #: Validated judge picks dropped by the necessity gate (exp 3), in
+    #: judge order — telemetry for the selection policy; ``None`` = the
+    #: gate did not run (``necessity_gate="none"`` or no necessities).
+    necessity_dropped_ids: list[str] | None = None
 
     def model_dump(self, **kwargs: Any) -> dict[str, Any]:
         """Serialize, dropping UNSET judge fields (byte-compatibility)."""
