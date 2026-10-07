@@ -87,7 +87,7 @@ def test_request_shape_is_the_spec_contract() -> None:
     assert "First classify the task by the artifact it produces or changes" in system
     assert '"type": "<code|plan|review|schema|docs>"' in system
     assert '"necessity": "required"|"optional"' in system
-    assert '"required" = the task involves this skill' in system
+    assert '"required" = this skill' in system
     assert "Never add a skill from an unrelated activity as a filler second pick." in system
     assert "Prefer [] when none clearly apply" in system
     assert "Never output an id that is not in the candidate list." in system
@@ -96,7 +96,7 @@ def test_request_shape_is_the_spec_contract() -> None:
     assert "- debugging: a skill description" in user
     assert "- tdd: a skill description" in user
     assert isinstance(JEV_PROMPT_VERSION, str)
-    assert JEV_PROMPT_VERSION == "4"
+    assert JEV_PROMPT_VERSION == "5"
 
 
 def test_bare_json_parse() -> None:
