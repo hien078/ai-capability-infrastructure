@@ -508,17 +508,81 @@ def test_summarize_produces_the_gate_table_fields() -> None:
     ]
     s = je.summarize(rows)
     assert s["n_cases"] == 3
-    assert s["irrelevant_attach"] == 1
-    assert s["irrelevant_attach_rate"] == 0.333  # rounded to 3 decimals
+    # P2: o-3's judge FAILED — its irrelevant_attach=True is excluded from
+    # the numerator AND the denominator (an empty/failed bundle is not a
+    # measurement of attach quality).
+    assert s["irrelevant_attach"] == 0
+    assert s["irrelevant_attach_rate"] == 0.0
+    # o-1 (acceptable skill attached) + o-2 (ok abstention — an empty bundle
+    # attaches nothing irrelevant) — both judge-ok rows.
+    assert s["clean_attach"] == 2
     assert s["abstention_expected"] == 1
     assert s["abstention_correct"] == 1
     assert s["correct_abstain_rate"] == pytest.approx(1.0)
+    # Reported separately, never inside the attach rates:
+    assert s["judge_failed"] == 1
+    assert s["judge_ok_rate"] == pytest.approx(0.667)
     assert s["judge_status_counts"] == {"ok": 2, "error": 1}
     assert s["route_latency_p50_ms"] == 1600
     assert s["route_latency_p95_ms"] == 2000
     assert s["judge_latency_p50_ms"] == 800  # nearest-rank over [800, 1500]
     assert s["judge_latency_p95_ms"] == 1500
     assert s["total_judge_tokens"] is None  # the adapter does not report usage
+
+
+def test_summarize_excludes_judge_failed_rows_from_attach_metrics() -> None:
+    """P2: a judge failure produces an empty bundle — that must NOT count
+    as a clean attach, NOT as a correct abstention (the empty-acceptable
+    trap), and must leave every rate denominator."""
+    rows = [
+        _organic_row("o-ok-clean"),
+        _organic_row(
+            "o-failed-irrelevant",
+            irrelevant_attach=True,
+            clean_attach=False,
+            judge_status="timeout",
+            judge_latency_ms=None,
+        ),
+        _organic_row(
+            "o-failed-empty-acceptable",
+            bundle_items=[],
+            empty_bundle=True,
+            # The P2 trap: an empty bundle from a FAILED judge would read
+            # as a correct abstention under the row-level semantics.
+            abstain_correct=True,
+            acceptable=[],
+            judge_status="error",
+            judge_latency_ms=None,
+            selected_ids=[],
+            spent_tokens=0,
+        ),
+    ]
+    s = je.summarize(rows)
+    # Excluded from numerators AND denominators:
+    assert s["irrelevant_attach"] == 0  # the timeout row's True does not count
+    assert s["irrelevant_attach_rate"] == 0.0  # 0/1, not 1/3
+    assert s["clean_attach"] == 1  # only the ok row
+    assert s["abstention_expected"] == 0  # the empty-acceptable row is judge-failed
+    assert s["abstention_correct"] == 0
+    assert s["correct_abstain_rate"] is None  # no measured abstention case remains
+    # Reported separately:
+    assert s["judge_failed"] == 2
+    assert s["judge_ok_rate"] == pytest.approx(0.333)  # 1 ok of 3 judged
+    # The rows themselves stay in the report (honest record, n unchanged):
+    assert s["n_cases"] == 3
+    assert s["judge_status_counts"] == {"ok": 1, "timeout": 1, "error": 1}
+
+
+def test_summarize_heuristic_arm_has_no_judge_rate() -> None:
+    """The heuristic arm never runs a judge: judge_ok_rate is None (no
+    judged rows) — not a fake 100% — and judge_failed is 0."""
+    rows = [_organic_row("o-1", judge_status=None, judge_latency_ms=None)]
+    s = je.summarize(rows)
+    assert s["judge_ok_rate"] is None
+    assert s["judge_failed"] == 0
+    # Heuristic rows are all measured rows (no judge to fail):
+    assert s["irrelevant_attach_rate"] == 0.0
+    assert s["clean_attach"] == 1
 
 
 def test_summarize_dev_set_measures_recall() -> None:
@@ -593,6 +657,43 @@ def test_render_summary_is_the_gate_table() -> None:
     table = je.render_table(rows)
     assert "o-1" in table and "o-2" in table
     assert "timeout" in table
+
+
+def test_render_table_marks_judge_failed_rows() -> None:
+    """P2: the attach column prints ``judge-failed`` — a failed judge's
+    empty bundle is neither a clean attach nor an abstention verdict."""
+    rows = [
+        _organic_row("o-ok"),
+        _organic_row("o-failed", judge_status="timeout", judge_latency_ms=None),
+    ]
+    table = je.render_table(rows)
+    failed_line = [line for line in table.splitlines() if line.startswith("| o-failed")]
+    assert failed_line == [
+        "| o-failed | organic | fake-ci-auditor | timeout | None | 1600 | judge-failed |"
+    ]
+    ok_line = [line for line in table.splitlines() if line.startswith("| o-ok")]
+    assert ok_line[0].endswith("| clean |")
+
+
+def test_render_table_judge_failed_overrides_abstain_ok() -> None:
+    """The empty-acceptable trap in the TABLE: a judge-failed abstention is
+    ``judge-failed``, never ``abstain-ok``."""
+    rows = [
+        _organic_row(
+            "o-failed-abstain",
+            bundle_items=[],
+            empty_bundle=True,
+            abstain_correct=True,
+            acceptable=[],
+            judge_status="invalid_output",
+            judge_latency_ms=None,
+            selected_ids=[],
+            spent_tokens=0,
+        )
+    ]
+    table = je.render_table(rows)
+    line = [line for line in table.splitlines() if line.startswith("| o-failed-abstain")]
+    assert line[0].endswith("| judge-failed |")
 
 
 def test_report_is_deterministic() -> None:

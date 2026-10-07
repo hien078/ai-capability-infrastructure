@@ -25,6 +25,15 @@ judge status counts, latency p50/p95, total judge tokens (None — the
 adapter does not report usage; extend JudgeVerdict if the gate needs real
 token counts).
 
+P2 (independent review 2026-10-07): a row whose judge did not answer
+(``judge_status`` not None/"ok") is EXCLUDED from the irrelevant-attach /
+clean / correct-abstain numerators AND denominators — a judge failure
+produces an empty bundle, which is not a clean attach, not a correct
+abstention (the empty-acceptable trap), and not a measurement of attach
+quality. Those rows are reported separately (``judge_failed`` count) and
+each set summary carries ``judge_ok_rate`` (ok / judged rows; None when no
+judge ran — the heuristic arm).
+
 THE §4 GATE (pre-registered before any JEV number is seen — it travels
 with every report):
   1. Organic irrelevant-attach rate: JEV <= 10% (heuristic baseline on the
@@ -300,26 +309,48 @@ def percentile(values: list[int], p: float) -> int | None:
     return ordered[rank - 1]
 
 
+def _judge_failed(row: dict[str, Any]) -> bool:
+    """A row whose judge did not answer (P2): ``judge_status`` set but not
+    ``ok``. Excluded from the attach metrics — a judge failure produces an
+    empty bundle, which is not a measurement of attach quality."""
+    status = row.get("judge_status")
+    return status is not None and status != "ok"
+
+
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Aggregate one case set (deterministic; the §2.6 gate table fields)."""
+    """Aggregate one case set (deterministic; the §2.6 gate table fields).
+
+    P2: judge-failed rows leave the irrelevant-attach / clean /
+    correct-abstain numerators AND denominators and are reported separately
+    (``judge_failed``); ``judge_ok_rate`` is ok/judged (None when no judge
+    ran — the heuristic arm never runs one).
+    """
     organic = [r for r in rows if r["set"] == "organic"]
+    # P2: only rows the judge ANSWERED (or no judge was involved) measure
+    # attach quality.
+    organic_measured = [r for r in organic if not _judge_failed(r)]
     devish = [r for r in rows if r["set"] in ("dev", "kernel")]
     recalls = [r["recall"] for r in devish if r["recall"] is not None]
     route_latencies = [r["route_latency_ms"] for r in rows]
     judge_latencies = [r["judge_latency_ms"] for r in rows if r["judge_latency_ms"] is not None]
-    abstention_expected = [r for r in organic if r["abstain_correct"] is not None]
+    abstention_expected = [r for r in organic_measured if r["abstain_correct"] is not None]
+    judged = [r for r in rows if r["judge_status"] is not None]
     spent = [r["spent_tokens"] for r in rows]
     return {
         "n_cases": len(rows),
         "hit_in_bundle": sum(1 for r in devish if r["hit_in_bundle"]),
         "mean_recall": round(sum(recalls) / len(recalls), 3) if recalls else None,
         "empty_bundles": sum(1 for r in rows if r["empty_bundle"]),
-        "irrelevant_attach": sum(1 for r in organic if r["irrelevant_attach"]),
+        "irrelevant_attach": sum(1 for r in organic_measured if r["irrelevant_attach"]),
         "irrelevant_attach_rate": (
-            round(sum(1 for r in organic if r["irrelevant_attach"]) / len(organic), 3)
-            if organic
+            round(
+                sum(1 for r in organic_measured if r["irrelevant_attach"]) / len(organic_measured),
+                3,
+            )
+            if organic_measured
             else None
         ),
+        "clean_attach": sum(1 for r in organic_measured if r["clean_attach"]),
         "abstention_expected": len(abstention_expected),
         "abstention_correct": sum(1 for r in abstention_expected if r["abstain_correct"]),
         "correct_abstain_rate": (
@@ -329,6 +360,12 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 3,
             )
             if abstention_expected
+            else None
+        ),
+        "judge_failed": sum(1 for r in rows if _judge_failed(r)),
+        "judge_ok_rate": (
+            round(sum(1 for r in judged if r["judge_status"] == "ok") / len(judged), 3)
+            if judged
             else None
         ),
         "judge_status_counts": dict(Counter(r["judge_status"] or "none" for r in rows)),
@@ -383,8 +420,8 @@ def render_summary(report: dict[str, Any]) -> str:
         f"# organic source: {report['organic_source'] or '(none)'}",
         "",
         "| set | n | hitB | recall | irr-attach | abst-ok | empty |"
-        " judge ok/err/to/inv | route p50/p95 | judge p50/p95 |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        " judge ok/err/to/inv | judge-ok% | route p50/p95 | judge p50/p95 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for set_name, s in report["sets"].items():
         counts = s["judge_status_counts"]
@@ -395,7 +432,7 @@ def render_summary(report: dict[str, Any]) -> str:
             f"| {set_name} | {s['n_cases']} | {s['hit_in_bundle']} | {s['mean_recall']} "
             f"| {s['irrelevant_attach']} ({s['irrelevant_attach_rate']}) "
             f"| {s['abstention_correct']}/{s['abstention_expected']} "
-            f"| {s['empty_bundles']} | {judge} "
+            f"| {s['empty_bundles']} | {judge} | {s['judge_ok_rate']} "
             f"| {s['route_latency_p50_ms']}/{s['route_latency_p95_ms']} "
             f"| {s['judge_latency_p50_ms']}/{s['judge_latency_p95_ms']} |"
         )
@@ -406,14 +443,21 @@ def render_summary(report: dict[str, Any]) -> str:
 
 
 def render_table(rows: list[dict[str, Any]]) -> str:
-    """Per-case markdown table — ids and metrics only (§3: never task texts)."""
+    """Per-case markdown table — ids and metrics only (§3: never task texts).
+
+    P2: a judge-failed row prints ``judge-failed`` in the attach column —
+    never ``clean``/``abstain-ok`` (a failed judge's empty bundle is not an
+    attach-quality verdict).
+    """
     lines = [
         "| case | set | bundle | judge | judge_ms | route_ms | attach |",
         "|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         attach = "-"
-        if r["set"] == "organic":
+        if _judge_failed(r):
+            attach = "judge-failed"
+        elif r["set"] == "organic":
             attach = "irrelevant" if r["irrelevant_attach"] else "clean"
             if r["abstain_correct"] is not None:
                 attach = "abstain-ok" if r["abstain_correct"] else "abstain-miss"
