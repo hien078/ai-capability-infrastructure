@@ -56,7 +56,14 @@ from aci.domain.routing.models import JudgeCandidate, JudgeStatus, JudgeVerdict
 #: and emits the type, then selects only skills whose activity that
 #: classification calls for (generic task semantics — the artifact rule,
 #: the gate rule, domain-over-vocabulary; no task-text keywords).
-JEV_PROMPT_VERSION = "3"
+#: v4 (tuning exp 5): the necessity definition is sharpened to be
+#: ACTIVITY-relative — "required" = the task involves this skill's
+#: activity, and a complementary skill covering the SAME activity as
+#: another selected skill is required (deepens/complements it); a skill
+#: from an UNRELATED activity is optional filler. Measured need (e5a):
+#: the v2/v3 definition made the judge mark same-activity DEV second picks
+#: "optional" (redundant-but-expected), collapsing dev recall 0.575→0.454.
+JEV_PROMPT_VERSION = "4"
 
 #: Task text bound for the wire (§2.4): head 3000 + tail 1000 chars.
 _TASK_HEAD = 3000
@@ -96,8 +103,11 @@ _SYSTEM_TEMPLATE = (
     ' "reason": "<one sentence>"}.\n'
     "Select at most {max_select} entries, and only skills that DIRECTLY help "
     "with this task as written.\n"
-    '"required" = the task as written calls for that skill\'s specific activity;'
-    ' "optional" = it would merely help.\n'
+    '"required" = the task involves this skill\'s specific activity; '
+    "a complementary skill covering the SAME activity as another selected "
+    "skill is also required (it deepens or complements it). "
+    '"optional" = a skill from an unrelated activity that would merely help.\n'
+    "Never add a skill from an unrelated activity as a filler second pick.\n"
     "A skill is NOT relevant just because it shares words "
     "(security, token, audit, CI, review, rate limit).\n"
     "Prefer [] when none clearly apply — an empty selection is a correct answer.\n"
