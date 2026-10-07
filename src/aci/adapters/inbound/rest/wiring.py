@@ -17,6 +17,7 @@ from aci.adapters.outbound.agent_capabilities import (
 )
 from aci.adapters.outbound.model_provider.executor import OpenAICompatExecutor
 from aci.adapters.outbound.model_provider.hashing import HashingEmbedder
+from aci.adapters.outbound.model_provider.jevos_judge import JevosSkillJudge
 from aci.adapters.outbound.model_provider.judge import OpenAICompatSkillJudge
 from aci.adapters.outbound.model_provider.semantic import FastEmbedEmbedder
 from aci.adapters.outbound.object_store.fs import FsObjectStore
@@ -45,7 +46,7 @@ from aci.application.delegate_task import ProfileDrivenAgentRuntime, Unconfigure
 from aci.application.evaluate_bundle import EvaluateBundleService
 from aci.application.list_candidates import ProductionCandidateLoader
 from aci.application.payload_sizes import ArtifactPayloadSizes
-from aci.application.protocols import AgentExecutor
+from aci.application.protocols import AgentExecutor, SkillJudge
 from aci.application.report_outcome import ReportOutcomeService
 from aci.application.resolve_capability import ResolveCapabilityService
 from aci.application.route_capabilities import RouteCapabilitiesService
@@ -82,41 +83,64 @@ def _build_reranker(settings: Settings) -> HeuristicReranker | JevReranker:
 
     ``heuristic`` (default) stays the shipped baseline until the JEV
     promotion gate passes (docs/plans/jev-reranker.md §4 — pre-registered,
-    measured on home-sever, NOT flipped by this code). ``jev`` wires the
-    LLM judge and FAILS CLOSED at startup when its endpoint is not fully
+    measured on home-sever, NOT flipped by this code). ``jev`` wires an LLM
+    judge and FAILS CLOSED at startup when the judge endpoint is not fully
     configured — a half-configured judge must never silently degrade to
     the heuristic (that is the measured source of harm, §1).
+
+    The judge backend (§6) swaps ONLY the ``SkillJudge`` adapter:
+    ``ACI_JEV_BACKEND=llm`` (default) → the OpenAI-compatible chat judge
+    (requires ACI_JEV_BASE_URL/API_KEY/MODEL); ``ACI_JEV_BACKEND=jevos`` →
+    the local Jev typed-decision service (requires only ACI_JEVOS_URL —
+    the bearer key is optional for a localhost service).
     """
     if settings.reranker == "heuristic":
         return HeuristicReranker()
     if settings.reranker != "jev":
         raise ValueError(f"unknown ACI_RERANKER {settings.reranker!r} (heuristic|jev)")
-    missing = [
-        name
-        for name, value in (
-            ("ACI_JEV_BASE_URL", settings.jev_base_url),
-            ("ACI_JEV_API_KEY", settings.jev_api_key),
-            ("ACI_JEV_MODEL", settings.jev_model),
-        )
-        if not value
-    ]
-    if missing:
-        raise ValueError(
-            f"ACI_RERANKER=jev requires {' + '.join(missing)} to be set — "
-            "refusing to start with a half-configured judge (fail closed)"
-        )
+    if settings.jev_backend not in ("llm", "jevos"):
+        raise ValueError(f"unknown ACI_JEV_BACKEND {settings.jev_backend!r} (llm|jevos)")
     if settings.jev_on_failure not in ("abstain", "heuristic"):
         raise ValueError(
             f"unknown ACI_JEV_ON_FAILURE {settings.jev_on_failure!r} (abstain|heuristic)"
         )
-    return JevReranker(
-        OpenAICompatSkillJudge(
+    if settings.jev_backend == "jevos":
+        if not settings.jevos_url:
+            raise ValueError(
+                "ACI_RERANKER=jev with ACI_JEV_BACKEND=jevos requires ACI_JEVOS_URL "
+                "to be set — refusing to start with a half-configured judge (fail closed)"
+            )
+        judge: SkillJudge = JevosSkillJudge(
+            base_url=settings.jevos_url,
+            api_key=settings.jevos_api_key,
+            timeout_s=settings.jev_timeout_seconds,
+            min_probability=settings.jevos_min_probability,
+            min_confidence=settings.jevos_min_confidence,
+        )
+    else:
+        missing = [
+            name
+            for name, value in (
+                ("ACI_JEV_BASE_URL", settings.jev_base_url),
+                ("ACI_JEV_API_KEY", settings.jev_api_key),
+                ("ACI_JEV_MODEL", settings.jev_model),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                f"ACI_RERANKER=jev requires {' + '.join(missing)} to be set — "
+                "refusing to start with a half-configured judge (fail closed)"
+            )
+        judge = OpenAICompatSkillJudge(
             base_url=settings.jev_base_url,
             api_key=settings.jev_api_key,
             model=settings.jev_model,
             reasoning_effort=settings.jev_reasoning_effort,
             timeout_s=settings.jev_timeout_seconds,
-        ),
+        )
+    return JevReranker(
+        judge,
         candidate_limit=settings.jev_candidates,
         max_select=settings.jev_max_select,
         on_failure=settings.jev_on_failure,  # type: ignore[arg-type]

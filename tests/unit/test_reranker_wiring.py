@@ -11,6 +11,8 @@ production runs.
 import pytest
 
 from aci.adapters.inbound.rest.wiring import Container, _build_reranker
+from aci.adapters.outbound.model_provider.jevos_judge import JevosSkillJudge
+from aci.adapters.outbound.model_provider.judge import OpenAICompatSkillJudge
 from aci.config import Settings
 from aci.routing.rerankers.heuristic import HeuristicReranker
 from aci.routing.rerankers.jev import JevReranker
@@ -132,3 +134,86 @@ def test_container_default_settings_wire_the_heuristic(tmp_path) -> None:  # typ
     )
     assert isinstance(container.route_service._reranker, HeuristicReranker)
     assert isinstance(container.benchmark_harness._reranker, HeuristicReranker)
+
+
+# -- ACI_JEV_BACKEND switch (docs/plans/jev-reranker.md §6, worker task 8) ---
+
+
+def test_jev_backend_default_is_llm() -> None:
+    """Default unchanged: jev without ACI_JEV_BACKEND wires the chat judge."""
+    reranker = _build_reranker(
+        Settings(
+            reranker="jev",
+            jev_base_url="http://judge.local/v1",
+            jev_api_key="sk-x",
+        )
+    )
+    assert isinstance(reranker, JevReranker)
+    assert isinstance(reranker._judge, OpenAICompatSkillJudge)
+
+
+def test_unknown_jev_backend_is_rejected() -> None:
+    with pytest.raises(ValueError, match="ACI_JEV_BACKEND"):
+        _build_reranker(
+            Settings(
+                reranker="jev",
+                jev_backend="bogus",
+                jev_base_url="http://judge.local/v1",
+                jev_api_key="sk-x",
+            )
+        )
+
+
+def test_jevos_backend_wires_the_jevos_judge() -> None:
+    reranker = _build_reranker(
+        Settings(
+            reranker="jev",
+            jev_backend="jevos",
+            jevos_url="http://127.0.0.1:8017",
+            jevos_api_key="sk-jev",
+            jevos_min_probability=0.35,
+            jevos_min_confidence=0.30,
+        )
+    )
+    assert isinstance(reranker, JevReranker)
+    assert isinstance(reranker._judge, JevosSkillJudge)
+    # Fail-safe default: abstain, no fallback reranker.
+    assert reranker._on_failure == "abstain"
+    assert reranker._fallback is None
+
+
+def test_jevos_backend_does_not_require_llm_settings() -> None:
+    """The jevos path needs only ACI_JEVOS_URL — empty ACI_JEV_BASE_URL /
+    ACI_JEV_API_KEY must NOT fail the startup gate (that gate is the
+    chat-judge's)."""
+    reranker = _build_reranker(
+        Settings(
+            reranker="jev",
+            jev_backend="jevos",
+            jev_base_url="",
+            jev_api_key="",
+        )
+    )
+    assert isinstance(reranker, JevReranker)
+    assert isinstance(reranker._judge, JevosSkillJudge)
+
+
+def test_jevos_backend_without_url_fails_closed() -> None:
+    with pytest.raises(ValueError, match="ACI_JEVOS_URL"):
+        _build_reranker(Settings(reranker="jev", jev_backend="jevos", jevos_url=""))
+
+
+def test_container_jevos_backend_same_reranker_both_surfaces(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """§2.3: routes AND the benchmark harness share the jevos-backed reranker."""
+    container = Container(
+        Settings(
+            reranker="jev",
+            jev_backend="jevos",
+            database_url=UNREACHABLE_DB,
+            object_store_root=str(tmp_path / "objects"),
+        )
+    )
+    route_reranker = container.route_service._reranker
+    assert isinstance(route_reranker, JevReranker)
+    assert isinstance(route_reranker._judge, JevosSkillJudge)
+    assert route_reranker is container.benchmark_harness._reranker

@@ -49,6 +49,24 @@ class Settings(BaseSettings):
     #: the heuristic is the measured source of harm, never a silent
     #: fallback) or "heuristic" (explicit opt-in delegation).
     jev_on_failure: str = "abstain"
+    #: JEV judge backend (docs/plans/jev-reranker.md §6): "llm" (default —
+    #: the OpenAI-compatible chat judge above) or "jevos" (the local Jev
+    #: typed-decision API, one POST {jevos_url}/v1/systemone). The backend
+    #: swaps ONLY the judge adapter — JevReranker is unchanged.
+    jev_backend: str = "llm"
+    #: jevos endpoint (only read when jev_backend="jevos"). A local service
+    #: (127.0.0.1 by default); REQUIRED on the jevos path — fail closed at
+    #: startup when empty.
+    jevos_url: str = "http://127.0.0.1:8017"
+    #: Bearer key for jevos ("" = no Authorization header — a localhost
+    #: service may run without auth; the key is never required).
+    jevos_api_key: str = ""
+    #: Minimum per-option probability for a jevos candidate to be selected
+    #: (§6: selected = candidates with probability >= this, best first).
+    jevos_min_probability: float = Field(default=0.35, ge=0.0, le=1.0)
+    #: Minimum jevos answer confidence — at or above it the selection
+    #: stands, below it the judge abstains (§6).
+    jevos_min_confidence: float = Field(default=0.30, ge=0.0, le=1.0)
     #: Base URL this service is reachable at (A2A Agent Card interface URL,
     #: V3 §56; deployment overrides via ACI_SERVICE_URL).
     service_url: str = "http://localhost:8000"
