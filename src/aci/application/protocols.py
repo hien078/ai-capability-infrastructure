@@ -39,6 +39,8 @@ from aci.domain.policy.models import (
 from aci.domain.provenance.models import LicenseAssessment, SecurityAssessment
 from aci.domain.routing.models import (
     CompositionResult,
+    JudgeCandidate,
+    JudgeVerdict,
     RankedCandidate,
     RerankResult,
     ResolutionResult,
@@ -203,6 +205,21 @@ class CapabilityReranker(Protocol):
         candidates: list[ScoredCandidate],
         context: RoutingRequestContext,
     ) -> RerankResult: ...
+
+
+class SkillJudge(Protocol):
+    """LLM judge behind the JEV reranker (§17 ``JevReranker``;
+
+    docs/plans/jev-reranker.md §2.3). Sees ONLY the task text and the
+    candidates' trusted routing documents (§17.1) — never raw skill bodies,
+    never artifact contents. Implementations live in adapters (a model
+    client); every failure maps to a ``JudgeVerdict`` status instead of
+    raising, so the reranker can abstain (ADR-008) rather than crash a route.
+    """
+
+    def judge(
+        self, task_text: str, candidates: list[JudgeCandidate], max_select: int
+    ) -> JudgeVerdict: ...
 
 
 class RelationRepository(Protocol):

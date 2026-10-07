@@ -1,0 +1,156 @@
+"""JEV domain contracts (docs/plans/jev-reranker.md §2.3, spec task 1).
+
+JudgeCandidate / JudgeVerdict / SkillJudge / the optional RerankTrace judge
+fields. The load-bearing property here is byte-compatibility: a trace
+produced WITHOUT a judge (the heuristic) must serialize exactly as before
+JEV existed — unset judge fields are dropped, never emitted as nulls.
+"""
+
+import pytest
+from pydantic import ValidationError
+
+from aci.application.protocols import SkillJudge
+from aci.domain.routing.models import (
+    JudgeCandidate,
+    JudgeVerdict,
+    RankedCandidate,
+    RerankResult,
+    RerankTrace,
+)
+
+
+def test_judge_candidate_is_frozen_and_minimal() -> None:
+    candidate = JudgeCandidate(capability_id="debugging", document_text="debug skills")
+    assert candidate.capability_id == "debugging"
+    assert candidate.document_text == "debug skills"
+    with pytest.raises(ValidationError):
+        candidate.capability_id = "tdd"  # type: ignore[misc]
+
+
+def test_judge_candidate_document_text_defaults_empty() -> None:
+    assert JudgeCandidate(capability_id="x").document_text == ""
+
+
+def test_judge_verdict_status_is_closed() -> None:
+    for status in ("ok", "timeout", "error", "invalid_output"):
+        assert JudgeVerdict(status=status).status == status
+    with pytest.raises(ValidationError):
+        JudgeVerdict.model_validate({"status": "bogus"})
+
+
+def test_judge_verdict_defaults() -> None:
+    verdict = JudgeVerdict(status="ok")
+    assert verdict.selected == []
+    assert verdict.reason == ""
+    assert verdict.model_id == ""
+    assert verdict.latency_ms is None
+    assert verdict.invalid_ids == 0
+
+
+def test_judge_verdict_reason_is_bounded() -> None:
+    assert JudgeVerdict(status="ok", reason="x" * 500).reason == "x" * 500
+    with pytest.raises(ValidationError):
+        JudgeVerdict(status="ok", reason="x" * 501)
+
+
+def test_judge_verdict_is_frozen() -> None:
+    verdict = JudgeVerdict(status="ok", selected=["debugging"])
+    with pytest.raises(ValidationError):
+        verdict.status = "error"  # type: ignore[misc]
+
+
+def test_rerank_trace_without_judge_fields_is_byte_compatible() -> None:
+    """The heuristic trace serializes exactly as before JEV (§2.3)."""
+    trace = RerankTrace(
+        implementation="heuristic-reranker", version="3", input_count=2, output_count=2
+    )
+    assert trace.model_dump(mode="json") == {
+        "implementation": "heuristic-reranker",
+        "version": "3",
+        "input_count": 2,
+        "output_count": 2,
+    }
+
+
+def test_rerank_trace_carries_judge_fields_when_set() -> None:
+    trace = RerankTrace(
+        implementation="jev",
+        version="1.0.0",
+        input_count=12,
+        output_count=2,
+        judge_status="ok",
+        judge_model_id="OneNexus/glm-5.3",
+        judge_latency_ms=1500,
+        judge_reason="picked debugging skills",
+        selected_ids=["debugging", "testing"],
+        invalid_ids=1,
+    )
+    dump = trace.model_dump(mode="json")
+    assert dump["judge_status"] == "ok"
+    assert dump["judge_model_id"] == "OneNexus/glm-5.3"
+    assert dump["judge_latency_ms"] == 1500
+    assert dump["judge_reason"] == "picked debugging skills"
+    assert dump["selected_ids"] == ["debugging", "testing"]
+    assert dump["invalid_ids"] == 1
+
+
+def test_rerank_trace_keeps_empty_selected_ids_but_drops_unset() -> None:
+    """An honest abstention records selected_ids == []; an unset field is absent."""
+    abstain = RerankTrace(
+        implementation="jev",
+        version="1.0.0",
+        input_count=5,
+        output_count=0,
+        judge_status="ok",
+        selected_ids=[],
+    )
+    dump = abstain.model_dump(mode="json")
+    assert dump["selected_ids"] == []
+    assert "invalid_ids" not in dump
+    assert "judge_reason" not in dump
+
+
+def test_rerank_result_default_ranked_is_empty() -> None:
+    result = RerankResult(
+        ranked=[],
+        trace=RerankTrace(implementation="jev", version="1.0.0", input_count=0, output_count=0),
+    )
+    assert result.ranked == []
+    assert isinstance(result.ranked, list)
+
+
+def test_ranked_candidate_reasons_default_empty() -> None:
+    """RankedCandidate is unchanged by JEV (it is the shared output shape)."""
+    from aci.domain.policy.models import EligibleCandidate
+
+    candidate = EligibleCandidate.model_validate(
+        {
+            "capability_id": "debugging",
+            "version": "1.0.0",
+            "digest": "sha256:" + "ab" * 32,
+            "kind": "skill",
+            "channel": "production",
+            "status": "active",
+        }
+    )
+    ranked = RankedCandidate(candidate=candidate, score=0.5, retrieval_score=0.5, rank=1)
+    assert ranked.reasons == []
+    assert ranked.document_text == ""
+
+
+def test_skill_judge_protocol_shape() -> None:
+    """A fake judge satisfies SkillJudge structurally (§44: swappable)."""
+
+    class FakeJudge:
+        def judge(
+            self, task_text: str, candidates: list[JudgeCandidate], max_select: int
+        ) -> JudgeVerdict:
+            return JudgeVerdict(
+                status="ok",
+                selected=[c.capability_id for c in candidates[:max_select]],
+                reason="fake",
+            )
+
+    judge: SkillJudge = FakeJudge()
+    verdict = judge.judge("fix a bug", [JudgeCandidate(capability_id="debugging")], 2)
+    assert verdict.selected == ["debugging"]

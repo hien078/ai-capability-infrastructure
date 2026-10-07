@@ -255,8 +255,67 @@ class ResolvedVersion(BaseModel):
     artifact: CapabilityArtifact | None = None
 
 
+#: Outcome of one judge call (docs/plans/jev-reranker.md §2.3). ``ok`` is the
+#: only status that carries a selection; every other status means the
+#: reranker must treat the verdict as "nothing selected" (fail-safe =
+#: abstain, ADR-008 — never a silent fallback to the heuristic).
+JudgeStatus = Literal["ok", "timeout", "error", "invalid_output"]
+
+
+class JudgeCandidate(BaseModel):
+    """One candidate as the judge sees it (§17.1: trusted text only).
+
+    ``document_text`` is the trusted routing document — sanitized metadata,
+    never a raw ``SKILL.md`` body. The judge adapter truncates it further for
+    the wire; this model carries the stage's full trusted text.
+    """
+
+    model_config = {"frozen": True}
+
+    capability_id: str
+    document_text: str = ""
+
+
+class JudgeVerdict(BaseModel):
+    """The judge's answer for one task (docs/plans/jev-reranker.md §2.3).
+
+    ``selected`` is the judge's raw id list — NOT yet subset-validated; the
+    reranker drops ids outside the candidate set and counts them in
+    ``invalid_ids`` (which also accumulates parse-level drops from the
+    adapter). ``reason`` is bounded (≤500 chars) so it can land in telemetry
+    verbatim.
+    """
+
+    model_config = {"frozen": True}
+
+    status: JudgeStatus
+    selected: list[str] = Field(default_factory=list)
+    reason: str = Field(default="", max_length=500)
+    model_id: str = ""
+    latency_ms: int | None = None
+    invalid_ids: int = Field(default=0, ge=0)
+
+
+#: RerankTrace judge fields (below): dropped from ``model_dump`` while UNSET
+#: so a trace produced without a judge serializes exactly as before JEV
+#: existed (byte-compatible telemetry — the heuristic never emits nulls).
+_JUDGE_TRACE_FIELDS = (
+    "judge_status",
+    "judge_model_id",
+    "judge_latency_ms",
+    "judge_reason",
+    "selected_ids",
+    "invalid_ids",
+)
+
+
 class RerankTrace(BaseModel):
-    """Trace data for the rerank stage (§14; §52: version recorded in trace)."""
+    """Trace data for the rerank stage (§14; §52: version recorded in trace).
+
+    The optional judge fields (docs/plans/jev-reranker.md §2.3) are set only
+    by the JEV reranker; ``model_dump`` drops them while unset so the
+    heuristic trace stays byte-compatible.
+    """
 
     model_config = {"frozen": True}
 
@@ -264,6 +323,23 @@ class RerankTrace(BaseModel):
     version: str
     input_count: int
     output_count: int
+    judge_status: JudgeStatus | None = None
+    judge_model_id: str | None = None
+    judge_latency_ms: int | None = None
+    judge_reason: str | None = None
+    #: Ids the judge selected that survived subset validation, in judge
+    #: order (rank = position). An honest abstention records ``[]``.
+    selected_ids: list[str] | None = None
+    #: Judge-selected ids dropped as unknown + parse-level drops.
+    invalid_ids: int | None = None
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        """Serialize, dropping UNSET judge fields (byte-compatibility)."""
+        dump = super().model_dump(**kwargs)
+        for field in _JUDGE_TRACE_FIELDS:
+            if dump.get(field) is None:
+                dump.pop(field, None)
+        return dump
 
 
 class RerankResult(BaseModel):
