@@ -1,0 +1,15 @@
+[Unit]
+Description=jevos (feder-cr/jev v4, MIT) — local Jev-compatible typed-decision server for the ACI JEV reranker
+After=default.target
+
+[Service]
+WorkingDirectory=%h/jevos/jev
+EnvironmentFile=%h/.config/jevos/env
+ExecStart=%h/jevos/jev/jev serve --host 127.0.0.1 --port 8017 --threads 2
+Restart=on-failure
+RestartSec=10
+MemoryMax=2G
+Nice=5
+
+[Install]
+WantedBy=default.target

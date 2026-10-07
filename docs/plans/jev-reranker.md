@@ -141,3 +141,35 @@ Then record the result as an ADR-008 amendment. Re-check on real traffic after o
 
 Out of scope for the worker: changing the OpenCode plugin, touching home-sever, enabling JEV anywhere,
 exporting/labeling organic data, committing to `main` or pushing.
+
+## 6. Addendum 2026-10-07 — second judge backend: jevos (local Jev-compatible model)
+
+User decision: also evaluate **jevos** (github.com/feder-cr/jev, MIT, release `jevos-v4`, OpenVINO int8) —
+an open-source, CPU-only implementation of TypeSafe's Jev typed-decision API (`POST /v1/systemone`).
+Installed on home-sever by the lead: `~/jevos/jev`, systemd --user `jevos.service`
+(`127.0.0.1:8017`, `--threads 2`, `MemoryMax=2G`, bearer key in `~/.config/jevos/env`; unit copy in
+`deploy/systemd/jevos.service`). Checksums verified against the release `SHA256SUMS.txt` (integrity only).
+
+Spot check on 4 real-shaped tasks × 10 candidates (lead, before the gate — NOT the gate):
+- 10 independent `noul` questions: flat P≈0.20 for every skill, no discrimination, 8–10 s → unusable.
+- ONE `choice` question with criteria = candidates + `none`: migration → database-migration (p 0.77);
+  no-skill task → none (low confidence); plan task → test-driven-development (0.56) over writing-plans
+  (0.22, should win); moderation task → TDD at confidence 0.14 with an attractor second. 3.3–5.0 s
+  (4 threads: no gain — CPU-bound on this host). glm-5.3 low-effort judge on the moderation task:
+  correct pair in 1.5–1.7 s.
+
+Design for the backend (same `SkillJudge` protocol, so `JevReranker` is unchanged):
+- `src/aci/adapters/outbound/model_provider/jevos_judge.py` — `JevosSkillJudge(base_url, api_key,
+  timeout_s, min_probability=0.35, min_confidence=0.30)`: one `choice` question, criteria =
+  `{capability_id: document_text[:160]} + {"none": "no listed skill clearly helps"}`; selected = candidates
+  (not `none`) with probability ≥ `min_probability`, best first, capped by `max_select`; if the top answer is
+  `none` or `confidence < min_confidence` → `[]`. Same failure mapping as the LLM judge.
+- Settings: `jev_backend = "llm" | "jevos"` (default `llm`), `jevos_url = "http://127.0.0.1:8017"`,
+  `jevos_api_key`, `jevos_min_probability`, `jevos_min_confidence`.
+- Tests: httpx MockTransport — request shape (one `choice`, includes `none`), threshold/`none`/confidence
+  abstention, unknown option ids dropped, failures → statuses, key never leaked.
+- Gate (§4): run the eval for BOTH backends on the same sets; pick the backend that passes; if both pass,
+  prefer lower irrelevant-attach rate, then latency. As measured, jevos on home-sever is slower than the LLM
+  judge, so it must win on precision to be chosen.
+
+Worker task 8 (after 1–7): implement this backend + tests; default stays `llm`.
