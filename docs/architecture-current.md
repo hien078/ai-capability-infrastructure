@@ -133,6 +133,10 @@ mặc định `aci`. Không bao giờ trỏ pytest vào `aci_bench`.
 **Ranh giới chống prompt-injection (ADR-008/009):** chỉ embed/rerank **tóm tắt chuẩn hóa tin
 cậy**; thân SKILL.md bên thứ ba không bao giờ tới router; tầng kích thước chỉ đọc `size_bytes`.
 
+**JEV reranker (2026-10-07):** ⏸ `JevReranker` (LLM judge, biết bỏ chọn) + `OpenAICompatSkillJudge`
+đã dựng xong sau `ACI_RERANKER=heuristic|jev` — mặc định **heuristic**, `jev` fail-closed khi thiếu
+`ACI_JEV_*`; cổng §4 (`scripts/jev_eval.py`, đo trên home-sever) chưa chạy → chưa bật đâu cả.
+
 ### Level 3 — hai luồng chạy thật
 
 **Luồng A — Routing (WHAT)**, ví dụ OpenCode hỏi skill cho một task:

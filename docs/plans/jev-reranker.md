@@ -1,6 +1,9 @@
 # JEV reranker — replace the heuristic reranker with an LLM judge (2026-10-07)
 
-Status: DESIGN APPROVED by the user (2026-10-07: "nghiêm túc thay thế JEV cho router hiện tại").
+Status: **IMPLEMENTED (spec §5 tasks 1–7, Mac worker 2026-10-07), §4 promotion gate PENDING** —
+the default stays `ACI_RERANKER=heuristic` until the gate is measured on home-sever; nothing is
+enabled anywhere by this implementation. Design approved by the user 2026-10-07
+("nghiêm túc thay thế JEV cho router hiện tại").
 Plan anchors: `plan_v2_revised.md` §17 (`JevReranker [experimental]` behind `CapabilityReranker`),
 §17.1 (reranker security rule), §59 (JEV policy: promote only on end-to-end evidence), ADR-008/009.
 
