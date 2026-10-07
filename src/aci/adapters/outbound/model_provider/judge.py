@@ -26,12 +26,18 @@ construction so a malformed ``ACI_JEV_BASE_URL`` fails closed at
 wiring/startup, before any request. ``JevReranker.rerank`` additionally wraps
 the judge call defensively (a raising judge abstains).
 
+P3 (same review): ``timeout_s`` is a TOTAL wall-clock deadline per judge call
+— ``httpx`` ``timeout=`` alone is per phase, so a dribbling endpoint could
+overrun it indefinitely; the request runs in a worker thread joined for
+``timeout_s`` and an overrun is a ``timeout`` verdict.
+
 The API key never appears in any log line or verdict text, and the full
 prompt is never logged (§2.3; pinned by test).
 """
 
 import json
 import logging
+import threading
 import time
 from typing import Any
 from urllib.parse import urlparse
@@ -199,23 +205,14 @@ class OpenAICompatSkillJudge:
         }
         headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
 
-        client = self._client or httpx.Client()
         try:
-            response = client.post(
-                f"{self._base_url}/chat/completions",
-                json=request_body,
-                headers=headers,
-                timeout=self._timeout_s,
-            )
+            response = self._post_with_deadline(request_body, headers)
         except httpx.TimeoutException:
             # Type name only: the exception text can carry the URL, and the
             # verdict must stay free of anything request-shaped.
             return self._verdict("timeout", "judge request timed out", started)
         except httpx.HTTPError:
             return self._verdict("error", "judge endpoint unreachable", started)
-        finally:
-            if self._client is None:
-                client.close()
         latency_ms = self._latency_ms(started)
 
         if response.status_code != 200:
@@ -265,6 +262,53 @@ class OpenAICompatSkillJudge:
     @staticmethod
     def _latency_ms(started: float) -> int:
         return int((time.perf_counter() - started) * 1000)
+
+    def _post_with_deadline(
+        self, request_body: dict[str, Any], headers: dict[str, str]
+    ) -> httpx.Response:
+        """POST bounded by a TOTAL wall-clock deadline (P3).
+
+        ``timeout=`` is PER PHASE — connect/read/write each get
+        ``timeout_s`` separately — so an endpoint that dribbles bytes (or a
+        transport with no phase timeouts at all) can run many multiples
+        over ``timeout_s`` without ever tripping a single phase. The
+        request runs in a daemon worker thread joined for ``timeout_s``:
+        an overrun raises ``httpx.ReadTimeout`` on THIS thread (→ status
+        ``timeout``) while the worker finishes in the background and its
+        outcome is discarded. The per-phase ``timeout`` still applies
+        inside the worker, so a hung connect/read raises
+        ``TimeoutException`` there and is re-raised here unchanged.
+        """
+        box: list[httpx.Response | BaseException] = []
+
+        def run() -> None:
+            client = self._client or httpx.Client()
+            try:
+                box.append(
+                    client.post(
+                        f"{self._base_url}/chat/completions",
+                        json=request_body,
+                        headers=headers,
+                        timeout=self._timeout_s,
+                    )
+                )
+            except BaseException as exc:  # noqa: BLE001 — re-raised on the caller thread
+                box.append(exc)
+            finally:
+                if self._client is None:
+                    client.close()
+
+        worker = threading.Thread(target=run, daemon=True, name="aci-jev-judge")
+        worker.start()
+        worker.join(self._timeout_s)
+        if worker.is_alive():
+            raise httpx.ReadTimeout(f"judge call exceeded the total deadline of {self._timeout_s}s")
+        if not box:  # the worker died without an outcome (thread machinery)
+            raise RuntimeError("judge worker ended without an outcome")
+        outcome = box[0]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
 
     def _verdict(self, status: JudgeStatus, reason: str, started: float) -> JudgeVerdict:
         """A failure verdict: nothing selected, honest reason, no secrets."""

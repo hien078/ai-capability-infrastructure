@@ -10,6 +10,8 @@ exception text or log record).
 
 import json
 import logging
+import time
+from collections.abc import Iterator
 
 import httpx
 import pytest
@@ -388,3 +390,84 @@ def test_base_url_scheme_is_validated_at_construction() -> None:
     for bad in ("ftp://judge.local/v1", "not a url", "//judge.local/v1", ""):
         with pytest.raises(ValueError, match="http/https"):
             OpenAICompatSkillJudge(base_url=bad, api_key=KEY, model=MODEL)
+
+
+# ---------- P3: a TOTAL wall-clock deadline per judge call (review 2026-10-07) ----------
+#
+# httpx ``timeout=`` is PER PHASE (connect/read/write each get timeout_s
+# separately) — and MockTransport bypasses httpcore's phase timeouts
+# entirely — so a delaying endpoint never trips any single phase and the
+# call blocks for the handler's full delay. The judge call must return
+# status ``timeout`` after ~timeout_s TOTAL, not wait the endpoint out.
+
+
+def test_slow_endpoint_hits_the_total_deadline() -> None:
+    """A handler that delays past timeout_s → status ``timeout`` at the
+    deadline, not a blocked call that eventually returns ``ok``."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        time.sleep(0.6)
+        return completion('{"selected": [], "reason": ""}')
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    judge = OpenAICompatSkillJudge(
+        base_url=BASE,
+        api_key=KEY,
+        model=MODEL,
+        reasoning_effort="low",
+        timeout_s=0.15,
+        client=client,
+    )
+    started = time.perf_counter()
+    verdict = judge.judge("fix a bug", candidates("debugging"), 2)
+    elapsed = time.perf_counter() - started
+    assert verdict.status == "timeout"
+    assert verdict.selected == []
+    # The deadline is ENFORCED (the verdict returns at ~timeout_s), not
+    # merely detected after the fact: a 0.15s deadline must not wait out
+    # the 0.6s handler.
+    assert elapsed < 0.5, elapsed
+
+
+def test_dribbling_endpoint_hits_the_total_deadline() -> None:
+    """The per-phase gap the finding is about: an endpoint that yields a
+    byte often enough to keep every read under timeout_s still overruns
+    the TOTAL wall clock — the deadline, not a phase, stops it."""
+    payload = json.dumps(
+        {"choices": [{"message": {"content": '{"selected": [], "reason": ""}'}}]}
+    ).encode()
+
+    def slow_bytes() -> Iterator[bytes]:
+        for i in range(0, len(payload), 8):
+            time.sleep(0.05)
+            yield payload[i : i + 8]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=slow_bytes())
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    judge = OpenAICompatSkillJudge(
+        base_url=BASE,
+        api_key=KEY,
+        model=MODEL,
+        reasoning_effort="low",
+        timeout_s=0.2,
+        client=client,
+    )
+    started = time.perf_counter()
+    verdict = judge.judge("fix a bug", candidates("debugging"), 2)
+    elapsed = time.perf_counter() - started
+    assert verdict.status == "timeout"
+    assert elapsed < 1.0, elapsed
+
+
+def test_fast_endpoint_is_unaffected_by_the_deadline() -> None:
+    """The deadline machinery must not perturb a normal call: a fast
+    endpoint returns ``ok`` with the parsed selection."""
+    judge, captured = make_judge(
+        lambda request: completion('{"selected": ["debugging"], "reason": "r"}')
+    )
+    verdict = judge.judge("fix a bug", candidates("debugging"), 2)
+    assert verdict.status == "ok"
+    assert verdict.selected == ["debugging"]
+    assert len(captured) == 1
