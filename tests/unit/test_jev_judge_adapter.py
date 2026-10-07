@@ -285,3 +285,106 @@ def test_no_authorization_header_without_key() -> None:
     )
     verdict = judge.judge("fix a bug", candidates("debugging"), 2)
     assert verdict.status == "ok"
+
+
+# ---------- P1: judge() NEVER raises (independent review 2026-10-07) ----------
+#
+# The SSE fallback called ``.get`` on whatever a ``data:`` line decoded to;
+# the caller tuple caught KeyError/IndexError/TypeError/ValueError but NOT
+# AttributeError, so list/string events (and a string delta) escaped judge()
+# entirely — JevReranker.rerank has no try/except, so an unhandled 500 on
+# /v1/routes and an aborted eval. Same for a non-ASCII API key
+# (UnicodeEncodeError — whose .object holds the Bearer header) and any other
+# unexpected exception. Contract: judge() maps EVERY failure to a status.
+
+
+def sse(*data_lines: str) -> httpx.Response:
+    """An SSE-shaped body: one ``data:`` line per argument."""
+    body = "".join(f"data: {line}\n\n" for line in data_lines)
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+
+def test_sse_data_line_decoding_to_a_list_maps_to_invalid_output() -> None:
+    """``data: [1]`` decodes to a list — ``.get`` on it raised AttributeError."""
+    judge, _ = make_judge(lambda request: sse("[1]"))
+    verdict = judge.judge("fix a bug", candidates("debugging"), 2)
+    assert verdict.status == "invalid_output"
+    assert verdict.selected == []
+
+
+def test_sse_data_line_decoding_to_a_string_maps_to_invalid_output() -> None:
+    """``data: "x"`` decodes to a str — ``.get`` on it raised AttributeError."""
+    judge, _ = make_judge(lambda request: sse('"x"'))
+    verdict = judge.judge("fix a bug", candidates("debugging"), 2)
+    assert verdict.status == "invalid_output"
+    assert verdict.selected == []
+
+
+def test_sse_chunk_delta_string_maps_to_invalid_output() -> None:
+    """``{"choices":[{"delta":"s"}]}``: delta is a str, ``.get("content")`` on
+    it raised AttributeError."""
+    judge, _ = make_judge(
+        lambda request: sse('{"object": "chat.completion.chunk", "choices": [{"delta": "s"}]}')
+    )
+    verdict = judge.judge("fix a bug", candidates("debugging"), 2)
+    assert verdict.status == "invalid_output"
+    assert verdict.selected == []
+
+
+def test_nonascii_api_key_maps_to_error_without_leaking(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A non-ASCII key makes header ENCODING raise UnicodeEncodeError — whose
+    ``.object`` holds the Bearer header. The verdict carries the TYPE NAME
+    only; the key never reaches the reason or any log line."""
+    key = "sk-" + "\U0001f600" * 3
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: completion('{"selected": [], "reason": ""}'))
+    )
+    judge = OpenAICompatSkillJudge(
+        base_url=BASE,
+        api_key=key,
+        model=MODEL,
+        reasoning_effort="low",
+        timeout_s=8.0,
+        client=client,
+    )
+    with caplog.at_level(logging.DEBUG, logger="aci.adapters.outbound.model_provider.judge"):
+        verdict = judge.judge("fix a bug", candidates("debugging"), 2)
+    assert verdict.status == "error"
+    assert verdict.selected == []
+    assert "UnicodeEncodeError" in verdict.reason
+    assert key not in verdict.reason
+    for record in caplog.records:
+        assert key not in record.getMessage(), record.getMessage()
+
+
+def test_unexpected_exception_maps_to_error_with_type_name_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Any unexpected exception → status ``error``; the reason carries the
+    exception TYPE NAME only — never str(exc), which can hold the URL, the
+    key, or response bodies."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise RuntimeError(f"boom {KEY} http://judge.local/v1")
+
+    judge, _ = make_judge(handler)
+    with caplog.at_level(logging.DEBUG, logger="aci.adapters.outbound.model_provider.judge"):
+        verdict = judge.judge("fix a bug", candidates("debugging"), 2)
+    assert verdict.status == "error"
+    assert verdict.selected == []
+    assert "RuntimeError" in verdict.reason
+    assert "boom" not in verdict.reason
+    assert KEY not in verdict.reason
+    for record in caplog.records:
+        assert KEY not in record.getMessage(), record.getMessage()
+        assert "boom" not in record.getMessage(), record.getMessage()
+
+
+def test_base_url_scheme_is_validated_at_construction() -> None:
+    """Fail closed at wiring/startup: a malformed ACI_JEV_BASE_URL never
+    reaches a request (P1)."""
+    for bad in ("ftp://judge.local/v1", "not a url", "//judge.local/v1", ""):
+        with pytest.raises(ValueError, match="http/https"):
+            OpenAICompatSkillJudge(base_url=bad, api_key=KEY, model=MODEL)

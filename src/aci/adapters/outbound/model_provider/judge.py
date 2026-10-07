@@ -16,6 +16,16 @@ reranker can abstain (ADR-008) rather than crash a route:
   never the response body, which can echo request headers);
 - non-JSON / wrong-shape output → ``invalid_output``.
 
+P1 (independent review 2026-10-07): ``judge()`` NEVER raises — an unexpected
+exception of ANY other kind (a non-ASCII API key making header encoding raise
+``UnicodeEncodeError`` whose ``.object`` holds the Bearer header, a malformed
+base URL, an exotic response shape) maps to ``error`` with a reason that
+carries the exception TYPE NAME only — never ``str(exc)``, which can hold the
+URL, the key, or response bodies. The base URL scheme is validated at
+construction so a malformed ``ACI_JEV_BASE_URL`` fails closed at
+wiring/startup, before any request. ``JevReranker.rerank`` additionally wraps
+the judge call defensively (a raising judge abstains).
+
 The API key never appears in any log line or verdict text, and the full
 prompt is never logged (§2.3; pinned by test).
 """
@@ -24,6 +34,7 @@ import json
 import logging
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -125,6 +136,14 @@ class OpenAICompatSkillJudge:
         timeout_s: float = 8.0,
         client: httpx.Client | None = None,
     ) -> None:
+        # P1: fail closed at construction (= wiring/startup, both wirings
+        # build the adapter there) on a malformed endpoint — a bad
+        # ACI_JEV_BASE_URL must never reach a request.
+        scheme = urlparse(base_url).scheme.lower()
+        if scheme not in ("http", "https"):
+            raise ValueError(
+                f"jev base_url must be an http/https URL, got scheme {scheme!r} in {base_url!r}"
+            )
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
@@ -135,12 +154,36 @@ class OpenAICompatSkillJudge:
     def judge(
         self, task_text: str, candidates: list[JudgeCandidate], max_select: int
     ) -> JudgeVerdict:
-        """One selection call; every failure is a status, never an exception."""
+        """One selection call; every failure is a status, never an exception.
+
+        P1: this method is the NEVER-RAISE boundary — an unexpected exception
+        from ANY layer (URL parsing, header encoding, an exotic response
+        shape) becomes an ``error`` verdict instead of an unhandled 500 on
+        /v1/routes.
+        """
         if not candidates:
             # Nothing to select from: skip the call entirely (the reranker
             # already short-circuits empty input; this guards direct use).
             return JudgeVerdict(status="ok", reason="no candidates", model_id=self._model)
 
+        started = time.perf_counter()
+        try:
+            return self._judge(task_text, candidates, max_select, started)
+        except Exception as exc:  # noqa: BLE001 — the contract IS never-raise
+            # TYPE NAME ONLY: str(exc) can carry the URL, response bodies,
+            # or (UnicodeEncodeError) the Authorization header bytes.
+            log.warning("judge call failed unexpectedly: %s", type(exc).__name__)
+            return self._verdict("error", f"judge call failed: {type(exc).__name__}", started)
+
+    def _judge(
+        self,
+        task_text: str,
+        candidates: list[JudgeCandidate],
+        max_select: int,
+        started: float,
+    ) -> JudgeVerdict:
+        """The call itself; the EXPECTED failure classes map to their statuses
+        here, everything else falls to the never-raise boundary above."""
         request_body = {
             "model": self._model,
             "messages": [
@@ -156,7 +199,6 @@ class OpenAICompatSkillJudge:
         }
         headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
 
-        started = time.perf_counter()
         client = self._client or httpx.Client()
         try:
             response = client.post(
@@ -186,7 +228,11 @@ class OpenAICompatSkillJudge:
 
         try:
             content = self._completion_content(response)
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
+        except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
+            # P1: AttributeError joined the tuple — an SSE ``data:`` line can
+            # decode to a non-dict (list/string) or carry a string delta, and
+            # ``.get`` on those raised past the old tuple. Body-shape problems
+            # are ``invalid_output``; the type name is logged, never str(exc).
             log.warning("malformed judge response: %s", type(exc).__name__)
             return self._verdict("invalid_output", "judge response had no content", started)
 
@@ -253,6 +299,14 @@ class OpenAICompatSkillJudge:
 
     @staticmethod
     def _content_from_sse(raw: str) -> str:
+        """Extract the completion text from an SSE body.
+
+        P1: a ``data:`` line can decode to ANY JSON value — a list
+        (``data: [1]``), a string (``data: "x"``), a chunk whose ``delta`` is
+        a string — and ``.get`` on those raises ``AttributeError``. The
+        caller maps that to ``invalid_output`` (a body-shape problem), so
+        this method stays simple: no per-shape isinstance ladder.
+        """
         chunks: list[str] = []
         for line in raw.splitlines():
             if not line.startswith("data:"):
@@ -264,6 +318,8 @@ class OpenAICompatSkillJudge:
                 event = json.loads(payload)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(event, dict):
+                continue  # e.g. ``data: [1]`` / ``data: "x"`` — not an event
             if event.get("object") == "chat.completion":
                 content = event["choices"][0]["message"]["content"]
                 return content if isinstance(content, str) else ""

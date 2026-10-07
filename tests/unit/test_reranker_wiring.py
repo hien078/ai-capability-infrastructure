@@ -67,6 +67,15 @@ def test_jev_unknown_on_failure_is_rejected() -> None:
         )
 
 
+def test_jev_base_url_scheme_is_validated_fail_closed() -> None:
+    """P1: a malformed ACI_JEV_BASE_URL fails closed at startup — the judge
+    adapter refuses construction on a non-http(s) endpoint."""
+    with pytest.raises(ValueError, match="http/https"):
+        _build_reranker(
+            Settings(reranker="jev", jev_base_url="ftp://judge.local/v1", jev_api_key="sk-x")
+        )
+
+
 def test_jev_wires_the_judge_with_settings() -> None:
     reranker = _build_reranker(
         Settings(

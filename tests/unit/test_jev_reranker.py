@@ -289,3 +289,46 @@ def test_result_type_is_rerank_result() -> None:
     assert isinstance(result, RerankResult)
     with pytest.raises(ValidationError):
         result.trace.implementation = "mutated"  # type: ignore[misc]
+
+
+# ---------- P1: a RAISING judge abstains (independent review 2026-10-07) ----------
+
+
+class ExplodingJudge:
+    """A judge that raises instead of returning — the defensive backstop."""
+
+    def judge(
+        self, task_text: str, candidates: list[JudgeCandidate], max_select: int
+    ) -> JudgeVerdict:
+        raise RuntimeError("judge exploded, secret http://evil.example")
+
+
+def test_reranker_abstains_when_the_judge_raises() -> None:
+    """Defensive try/except around the judge call (P1): a raising judge must
+    ABSTAIN with status ``error`` — never propagate an unhandled exception
+    into /v1/routes. The trace reason carries the exception TYPE NAME only
+    (never str(exc), which can hold anything the judge saw)."""
+    result = JevReranker(ExplodingJudge()).rerank(task(), many(3), context())
+    assert result.ranked == []
+    assert result.trace.judge_status == "error"
+    assert result.trace.selected_ids == []
+    assert result.trace.output_count == 0
+    assert result.trace.input_count == 3
+    assert "RuntimeError" in (result.trace.judge_reason or "")
+    assert "exploded" not in (result.trace.judge_reason or "")
+
+
+def test_reranker_raising_judge_honors_the_heuristic_opt_in() -> None:
+    """The defensive catch routes through the SAME failure path: with the
+    explicit ``on_failure="heuristic"`` opt-in a raising judge delegates."""
+    fallback = HeuristicReranker()
+    candidates = many(4)
+    result = JevReranker(ExplodingJudge(), on_failure="heuristic", fallback=fallback).rerank(
+        task(), candidates, context()
+    )
+    expected = fallback.rerank(task(), candidates, context())
+    assert [r.candidate.capability_id for r in result.ranked] == [
+        r.candidate.capability_id for r in expected.ranked
+    ]
+    assert result.trace.implementation == "heuristic-reranker"
+    assert result.trace.judge_status == "error"

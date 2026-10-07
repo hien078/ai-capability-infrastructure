@@ -22,7 +22,9 @@ Invariants (§2.2, review-blocking — pinned by tests/unit/test_jev_reranker.py
 5. FAIL-SAFE = ABSTAIN: timeout / transport error / non-JSON / schema-invalid
    output → ``ranked = []`` with ``judge_status`` set. Never a silent fallback
    to the heuristic (it is the measured source of harm);
-   ``on_failure="heuristic"`` exists only as an explicit opt-in.
+   ``on_failure="heuristic"`` exists only as an explicit opt-in. A judge that
+   RAISES instead of returning (P1: the adapter contract is never-raise,
+   but a judge is a plug-in) abstains through the same path.
 6. DETERMINISTIC CONTRACT AROUND A NON-DETERMINISTIC JUDGE: temperature 0 and
    bounded output are the ADAPTER's job; here, order = judge order and ties
    are impossible (rank = position).
@@ -103,16 +105,28 @@ class JevReranker:
             )
 
         top = self._top(candidates)
-        verdict = self._judge.judge(
-            task.task_text,
-            [
-                JudgeCandidate(
-                    capability_id=s.candidate.capability_id, document_text=s.document_text
-                )
-                for s in top
-            ],
-            self._max_select,
-        )
+        try:
+            verdict = self._judge.judge(
+                task.task_text,
+                [
+                    JudgeCandidate(
+                        capability_id=s.candidate.capability_id, document_text=s.document_text
+                    )
+                    for s in top
+                ],
+                self._max_select,
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive: a raising judge abstains
+            # P1: the adapter contract is never-raise, but a judge is a
+            # plug-in (§44) — this backstop keeps a raising one from turning
+            # into an unhandled 500 on /v1/routes. TYPE NAME ONLY in the
+            # reason: str(exc) can carry anything the judge saw. The verdict
+            # flows through the SAME failure path as any other judge failure
+            # (abstain by default, the explicit heuristic opt-in included).
+            verdict = JudgeVerdict(
+                status="error",
+                reason=f"judge raised {type(exc).__name__}",
+            )
 
         if verdict.status != "ok":
             return self._on_judge_failure(task, candidates, context, verdict)

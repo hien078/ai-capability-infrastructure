@@ -689,6 +689,18 @@ def test_judge_config_check_fails_closed() -> None:
         )
 
 
+def test_judge_config_rejects_non_http_base_url() -> None:
+    """P1: a malformed --jev-base-url fails closed before any request."""
+    with pytest.raises(ValueError, match="http/https"):
+        je.judge_from_config(
+            base_url="ftp://judge.local/v1",
+            api_key="sk-x",
+            model="OneNexus/glm-5.3",
+            reasoning_effort="low",
+            timeout_s=8.0,
+        )
+
+
 def test_judge_from_config_builds_the_adapter() -> None:
     judge = je.judge_from_config(
         base_url="http://j/v1",
