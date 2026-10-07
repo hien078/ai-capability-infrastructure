@@ -173,3 +173,23 @@ Design for the backend (same `SkillJudge` protocol, so `JevReranker` is unchange
   judge, so it must win on precision to be chosen.
 
 Worker task 8 (after 1–7): implement this backend + tests; default stays `llm`.
+
+## 7. Gate v2 — held-out evaluation (pre-registered 2026-10-07 ~21:55 +07, BEFORE any tuning workflow)
+
+Gate run #1 (glm-5.3 low, max_select 2) on the 98-case organic set + DEV_CASES: organic irrelevant-attach
+17/98 = 17.3% (gate #1 FAIL), DEV mean recall 0.530 vs heuristic 0.548 (pass), p95 judge 2.5 s, ok 156/158.
+Exploratory variant (max_select 1): 8.2% (pass) but DEV mean recall 0.419 (FAIL). The 98 cases and the
+failure rows have now been SEEN, so they become the **tuning set** — they can no longer certify a config.
+
+Rules from here on:
+1. Tuning (prompt, selection policy, thresholds, backend, candidate text) may use the 98-case tuning set and
+   DEV_CASES/KERNEL_QUERY_CASES freely.
+2. The **held-out set** = organic route_runs (opencode-* principals, lead smoke tests excluded) created
+   **after 2026-10-07 22:00 +07** (15:00 UTC). Nobody runs any JEV variant on them before the config freeze.
+3. **Config freeze** = one commit on the JEV branch fixing prompt version + every judge/selection parameter.
+4. After the freeze, the lead labels the held-out cases with `data/jev-eval/label.py` rules (label rules may
+   be clarified BEFORE the freeze from task semantics only — never from a variant's outputs on held-out
+   data), N ≥ 40 unique cases, then runs heuristic + the frozen config ONCE.
+5. Pass = §4 thresholds on the held-out set (irrelevant-attach ≤ 10%; DEV mean recall ≥ heuristic − 5 pts;
+   p95 ≤ 4 s; judge ok ≥ 95%; security green). Report DEV hit-rate too. One shot: a failure means a new
+   pre-registration with new data, never a re-run of a tweaked config on the same held-out set.
