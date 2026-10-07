@@ -51,7 +51,12 @@ from aci.domain.routing.models import JudgeCandidate, JudgeStatus, JudgeVerdict
 #: v2 (tuning exp 3, selection policy): the judge returns per-pick necessity
 #: ({"id": ..., "necessity": "required"|"optional"}) so the reranker can
 #: attach a second skill only when the task actually requires it.
-JEV_PROMPT_VERSION = "2"
+#: v3 (tuning exp 4, task-type guidance): the judge FIRST classifies the
+#: task by the artifact it produces or changes (code|plan|review|schema|docs)
+#: and emits the type, then selects only skills whose activity that
+#: classification calls for (generic task semantics — the artifact rule,
+#: the gate rule, domain-over-vocabulary; no task-text keywords).
+JEV_PROMPT_VERSION = "3"
 
 #: Task text bound for the wire (§2.4): head 3000 + tail 1000 chars.
 _TASK_HEAD = 3000
@@ -60,10 +65,34 @@ _TASK_TAIL = 1000
 _LINE_MAX = 400
 #: JudgeVerdict.reason bound (domain model enforces ≤500; truncate before).
 _REASON_MAX = 500
+#: Task-type display bound inside ``reason`` (v3): a hallucinated long type
+#: must not crowd out the reason's informative tail.
+_TYPE_MAX = 32
 
 _SYSTEM_TEMPLATE = (
     "You select skills for a coding agent. You get a TASK and CANDIDATE skills (id: description).\n"
-    'Return ONLY JSON: {"selected": [{"id": "<id>", "necessity": "required"|"optional"}],'
+    "First classify the task by the artifact it produces or changes: "
+    "code | plan | review | schema | docs.\n"
+    "- code: writing, fixing, refactoring, debugging, or testing code "
+    "(including acting on review feedback with a code change)\n"
+    "- plan: writing or revising a plan, spec, or design document "
+    "(including after reviewer feedback)\n"
+    "- review: reviewing or verifying existing work, without producing the change itself\n"
+    "- schema: a database schema or migration change\n"
+    "- docs: documentation or operational runbooks\n"
+    "Then select ONLY skills whose specific activity that classification calls for:\n"
+    "- A plan or docs deliverable takes planning/writing skills. Code-process skills "
+    "(test discipline, completion verification, code review, git workflow, branch finishing) "
+    "do not apply to a document, even if the task mentions review, feedback, "
+    "tests, or verification.\n"
+    "- A code change takes the skills matching the kind of change "
+    "(debugging, testing, refactoring, security hardening, ...).\n"
+    "- A review task takes the skill for reviewing or verifying work, "
+    "including claiming completion only after checks pass.\n"
+    "- A schema change takes the database/migration skill over any process skill "
+    "that shares words with the task.\n"
+    'Return ONLY JSON: {"type": "<code|plan|review|schema|docs>", '
+    '"selected": [{"id": "<id>", "necessity": "required"|"optional"}],'
     ' "reason": "<one sentence>"}.\n'
     "Select at most {max_select} entries, and only skills that DIRECTLY help "
     "with this task as written.\n"
@@ -273,6 +302,12 @@ class OpenAICompatSkillJudge:
                 invalid += 1  # dropped at parse level; the reranker counts it
         reason = data.get("reason")
         reason_text = reason[:_REASON_MAX] if isinstance(reason, str) else ""
+        # v3: the judge's task-type classification rides along in the reason
+        # (telemetry/audit — "[plan] ..."); an absent/oversized type is
+        # display-only, never a parse failure.
+        task_type = data.get("type")
+        if isinstance(task_type, str) and task_type.strip():
+            reason_text = f"[{task_type.strip()[:_TYPE_MAX]}] {reason_text}"[:_REASON_MAX]
         return JudgeVerdict(
             status="ok",
             selected=ids,

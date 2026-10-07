@@ -81,9 +81,11 @@ def test_request_shape_is_the_spec_contract() -> None:
     assert [m["role"] for m in body["messages"]] == ["system", "user"]
     system = body["messages"][0]["content"]
     user = body["messages"][1]["content"]
-    # The §2.4 system prompt, verbatim shape (v2: per-pick necessity).
+    # The §2.4 system prompt, verbatim shape (v3: classify first, then select).
     assert "Return ONLY JSON" in system
     assert "Select at most 2 entries" in system
+    assert "First classify the task by the artifact it produces or changes" in system
+    assert '"type": "<code|plan|review|schema|docs>"' in system
     assert '"necessity": "required"|"optional"' in system
     assert '"required" = the task as written calls for that skill' in system
     assert "Prefer [] when none clearly apply" in system
@@ -93,7 +95,7 @@ def test_request_shape_is_the_spec_contract() -> None:
     assert "- debugging: a skill description" in user
     assert "- tdd: a skill description" in user
     assert isinstance(JEV_PROMPT_VERSION, str)
-    assert JEV_PROMPT_VERSION == "2"
+    assert JEV_PROMPT_VERSION == "3"
 
 
 def test_bare_json_parse() -> None:
@@ -577,3 +579,46 @@ def test_necessities_align_with_selected_after_parse_drops() -> None:
     assert verdict.selected == ["debugging", "tdd"]
     assert verdict.necessities == ["optional", "required"]
     assert verdict.invalid_ids == 1
+
+
+# ---------- exp 4: task-type classification rides in the reason ----------
+
+
+def test_v3_type_is_folded_into_the_reason() -> None:
+    """The judge's classification is telemetry: "[plan] <reason>"."""
+    payload = json.dumps(
+        {
+            "type": "plan",
+            "selected": [{"id": "writing-plans", "necessity": "required"}],
+            "reason": "a plan deliverable",
+        }
+    )
+    judge, _ = make_judge(lambda request: completion(payload))
+    verdict = judge.judge("write a plan", candidates("writing-plans"), 2)
+    assert verdict.status == "ok"
+    assert verdict.selected == ["writing-plans"]
+    assert verdict.reason == "[plan] a plan deliverable"
+
+
+def test_v3_missing_type_leaves_the_reason_untouched() -> None:
+    """A judge that omits "type" (or emits a non-string) is NOT a parse
+    failure — the type is display-only."""
+    payload = json.dumps({"selected": [], "reason": "none apply"})
+    judge, _ = make_judge(lambda request: completion(payload))
+    verdict = judge.judge("t", candidates("debugging"), 2)
+    assert verdict.status == "ok"
+    assert verdict.reason == "none apply"
+    payload2 = json.dumps({"type": 7, "selected": [], "reason": "r"})
+    judge2, _ = make_judge(lambda request: completion(payload2))
+    verdict2 = judge2.judge("t", candidates("debugging"), 2)
+    assert verdict2.reason == "r"
+
+
+def test_v3_oversized_type_is_bounded() -> None:
+    """A hallucinated long type cannot crowd out the reason's tail."""
+    payload = json.dumps({"type": "x" * 900, "selected": [], "reason": "tail"})
+    judge, _ = make_judge(lambda request: completion(payload))
+    verdict = judge.judge("t", candidates("debugging"), 2)
+    assert verdict.reason.startswith("[")
+    assert verdict.reason.endswith("tail")
+    assert len(verdict.reason) <= 500
