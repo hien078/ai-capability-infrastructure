@@ -69,7 +69,15 @@ from aci.domain.routing.models import JudgeCandidate, JudgeStatus, JudgeVerdict
 #: security-review first, a code-review second next to plan writing, both
 #: marked required and both irrelevant). "required" = this skill's
 #: activity is what the task itself is about; "optional" = merely related.
-JEV_PROMPT_VERSION = "5"
+#: v6 (tuning exp 5e): v4's clause + v5's examples. Measured (e5c vs e5d):
+#: the abstract definition alone cannot separate dev complementary
+#: seconds (keep — dev recall floor) from organic pair fillers (drop —
+#: precision floor): v4 kept both (dev 0.546 / organic 10.5%), v5 dropped
+#: both (dev 0.417 / organic 7.4%). A low-effort judge follows explicit
+#: EXAMPLES far better than abstract clauses, so v6 keeps v4's
+#: same-activity clause (dev seconds stay required) and adds the three
+#: measured organic pair shapes as ALWAYS-optional examples.
+JEV_PROMPT_VERSION = "6"
 
 #: Task text bound for the wire (§2.4): head 3000 + tail 1000 chars.
 _TASK_HEAD = 3000
@@ -109,12 +117,12 @@ _SYSTEM_TEMPLATE = (
     ' "reason": "<one sentence>"}.\n'
     "Select at most {max_select} entries, and only skills that DIRECTLY help "
     "with this task as written.\n"
-    '"required" = this skill\'s specific activity is what the task itself is '
-    "about (per the classification above); "
-    '"optional" = a skill whose activity is merely related to the task '
-    "(e.g. completion-verification next to a security review, a code-review "
-    "skill next to plan writing, a database skill next to a testing task) "
-    "— it would merely help.\n"
+    "\"required\" = this skill's specific activity matches the task's "
+    "classification, or covers the SAME activity as another selected skill "
+    "(deepening or complementing it); "
+    '"optional" = anything merely related — ALWAYS optional: '
+    "completion-verification next to a security review, a code-review "
+    "skill next to plan writing, a database skill next to a testing task.\n"
     "Never add a skill from an unrelated activity as a filler second pick.\n"
     "A skill is NOT relevant just because it shares words "
     "(security, token, audit, CI, review, rate limit).\n"
