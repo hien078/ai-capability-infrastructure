@@ -17,6 +17,7 @@ from aci.adapters.outbound.agent_capabilities import (
 )
 from aci.adapters.outbound.model_provider.executor import OpenAICompatExecutor
 from aci.adapters.outbound.model_provider.hashing import HashingEmbedder
+from aci.adapters.outbound.model_provider.judge import OpenAICompatSkillJudge
 from aci.adapters.outbound.model_provider.semantic import FastEmbedEmbedder
 from aci.adapters.outbound.object_store.fs import FsObjectStore
 from aci.adapters.outbound.pgvector.repository import SqlAlchemyEmbeddingRepository
@@ -58,6 +59,7 @@ from aci.routing.composer import MinimalBundleComposer
 from aci.routing.dependencies import DefaultDependencyResolver
 from aci.routing.eligibility import DefaultEligibilityPolicy
 from aci.routing.rerankers.heuristic import HeuristicReranker
+from aci.routing.rerankers.jev import JevReranker
 from aci.routing.retrieval import EmbeddingRetriever
 
 
@@ -73,6 +75,53 @@ def _build_embedder(settings: Settings) -> HashingEmbedder | FastEmbedEmbedder:
     if settings.embedder != "hashing":
         raise ValueError(f"unknown ACI_EMBEDDER {settings.embedder!r} (hashing|fastembed)")
     return HashingEmbedder()
+
+
+def _build_reranker(settings: Settings) -> HeuristicReranker | JevReranker:
+    """Pick the reranker from settings (§17: swappable behind the protocol).
+
+    ``heuristic`` (default) stays the shipped baseline until the JEV
+    promotion gate passes (docs/plans/jev-reranker.md §4 — pre-registered,
+    measured on home-sever, NOT flipped by this code). ``jev`` wires the
+    LLM judge and FAILS CLOSED at startup when its endpoint is not fully
+    configured — a half-configured judge must never silently degrade to
+    the heuristic (that is the measured source of harm, §1).
+    """
+    if settings.reranker == "heuristic":
+        return HeuristicReranker()
+    if settings.reranker != "jev":
+        raise ValueError(f"unknown ACI_RERANKER {settings.reranker!r} (heuristic|jev)")
+    missing = [
+        name
+        for name, value in (
+            ("ACI_JEV_BASE_URL", settings.jev_base_url),
+            ("ACI_JEV_API_KEY", settings.jev_api_key),
+            ("ACI_JEV_MODEL", settings.jev_model),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(
+            f"ACI_RERANKER=jev requires {' + '.join(missing)} to be set — "
+            "refusing to start with a half-configured judge (fail closed)"
+        )
+    if settings.jev_on_failure not in ("abstain", "heuristic"):
+        raise ValueError(
+            f"unknown ACI_JEV_ON_FAILURE {settings.jev_on_failure!r} (abstain|heuristic)"
+        )
+    return JevReranker(
+        OpenAICompatSkillJudge(
+            base_url=settings.jev_base_url,
+            api_key=settings.jev_api_key,
+            model=settings.jev_model,
+            reasoning_effort=settings.jev_reasoning_effort,
+            timeout_s=settings.jev_timeout_seconds,
+        ),
+        candidate_limit=settings.jev_candidates,
+        max_select=settings.jev_max_select,
+        on_failure=settings.jev_on_failure,  # type: ignore[arg-type]
+        fallback=HeuristicReranker() if settings.jev_on_failure == "heuristic" else None,
+    )
 
 
 def _load_agent_profiles(path: str) -> dict[str, AgentProfile]:
@@ -169,7 +218,10 @@ class Container:
         loader = ProductionCandidateLoader(capabilities, releases, licenses, securities)
         eligibility = DefaultEligibilityPolicy()
         retriever = EmbeddingRetriever(capabilities, _build_embedder(settings), embeddings)
-        reranker = HeuristicReranker()
+        # §17 swappable: heuristic (default) or the JEV judge
+        # (ACI_RERANKER — same instance for routes AND the benchmark harness
+        # so DEV_CASES measures what production runs).
+        reranker = _build_reranker(settings)
         resolver = DefaultDependencyResolver(relations, releases)
         # Budget on real entry-file sizes (artifact manifest metadata only).
         composer = MinimalBundleComposer(ArtifactPayloadSizes(capabilities, artifacts))

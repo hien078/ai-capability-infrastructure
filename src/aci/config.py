@@ -23,6 +23,32 @@ class Settings(BaseSettings):
     #: fastembed model name (only used when embedder="fastembed"). Must
     #: emit EMBEDDING_DIMS (384) — bge-small-en-v1.5 does.
     embedder_model: str = "BAAI/bge-small-en-v1.5"
+    #: Which reranker backs the rerank stage: "heuristic" (the v3 min-max
+    #: calibrated baseline — DEFAULT until the JEV promotion gate passes,
+    #: docs/plans/jev-reranker.md §4) or "jev" (an LLM judge that can
+    #: abstain; requires the ACI_JEV_* endpoint settings, fails closed at
+    #: startup when they are missing).
+    reranker: str = "heuristic"
+    #: JEV judge endpoint (OpenAI-compatible; one POST {base}/chat/completions).
+    jev_base_url: str = ""
+    #: API key for the judge endpoint ("" = no Authorization header).
+    jev_api_key: str = ""
+    #: Judge model id.
+    jev_model: str = "OneNexus/glm-5.3"
+    #: Judge reasoning effort (glm-5.3 low-effort selection measured
+    #: 1.5–1.7 s on the real task, docs/plans/jev-reranker.md §1).
+    jev_reasoning_effort: str = "low"
+    #: Judge request timeout (seconds) — a timeout ABSTAINS (fail-safe),
+    #: it never falls back to the heuristic unless ACI_JEV_ON_FAILURE says so.
+    jev_timeout_seconds: float = 8.0
+    #: How many top-retrieval candidates the judge sees (§2.3).
+    jev_candidates: int = 12
+    #: Max skills the judge may select per route (bounded output, §2.2.6).
+    jev_max_select: int = 2
+    #: Judge failure policy: "abstain" (default — empty bundle, ADR-008;
+    #: the heuristic is the measured source of harm, never a silent
+    #: fallback) or "heuristic" (explicit opt-in delegation).
+    jev_on_failure: str = "abstain"
     #: Base URL this service is reachable at (A2A Agent Card interface URL,
     #: V3 §56; deployment overrides via ACI_SERVICE_URL).
     service_url: str = "http://localhost:8000"
