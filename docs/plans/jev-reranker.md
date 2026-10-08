@@ -196,3 +196,65 @@ Rules from here on:
 5. Pass = §4 thresholds on the held-out set (irrelevant-attach ≤ 10%; DEV mean recall ≥ heuristic − 5 pts;
    p95 ≤ 4 s; judge ok ≥ 95%; security green). Report DEV hit-rate too. One shot: a failure means a new
    pre-registration with new data, never a re-run of a tweaked config on the same held-out set.
+
+## 8. Gate v3 + config freeze (amended 2026-10-08 ~11:20 +07, user decision, BEFORE any JEV variant has seen held-out data)
+
+**Why the §4/§7 thresholds were amended.** Clean re-measurement of the frozen candidate on the tuning set
+(gateway cascade fixed — §8.3) showed run-to-run noise of about ±3 organic cases on IDENTICAL configs
+(temperature 0 notwithstanding): v7 = 5.9% / 11.5% irrelevant-attach, DEV 0.481 / 0.508; v4 = 16.3% / 18.6%,
+DEV 0.567 / 0.508. The heuristic re-measured exactly (85.7%, 0.548). A ≤ 10% threshold set before this noise
+was known makes a single run a coin flip for the best config. Separately, upstream glm-5.3 stalls on ~5–13% of
+uncached judge calls for 15–65 s (a gateway property, not a selection property); a failed call abstains to an
+EMPTY bundle, which is harmless relative to the heuristic's 86% irrelevant attachment. The amendment was
+chosen by the user from task-semantics/noise evidence only — no variant has been run on held-out data.
+
+### 8.1 Frozen config (the freeze commit is the commit that adds this section)
+
+Prompt `JEV_PROMPT_VERSION = "7"` (judge.py at this commit) and:
+
+```
+ACI_RERANKER=jev
+ACI_JEV_BACKEND=llm
+ACI_JEV_MODEL=OneNexus/glm-5.3          # via home-sever 9router
+ACI_JEV_REASONING_EFFORT=low
+ACI_JEV_TIMEOUT_SECONDS=8.0
+ACI_JEV_CANDIDATES=30
+ACI_JEV_MAX_SELECT=2
+ACI_JEV_NECESSITY_GATE=second
+ACI_JEV_ON_FAILURE=abstain
+ACI_JEV_MAX_INFLIGHT=2
+```
+
+Eval equivalent: `scripts/jev_eval.py --reranker jev --jev-reasoning-effort low --jev-max-select 2
+--jev-candidates 30 --jev-necessity-gate second --jev-timeout 8 --jev-max-inflight 2` (settle on).
+Any change to the prompt text or a parameter above after this commit = a new pre-registration.
+
+### 8.2 Held-out evaluation (replaces §7 rule 5; §7 rules 1–4 stand)
+
+- **Window:** organic route_runs (opencode-* principals; lead smoke tests excluded) created
+  2026-10-07 22:00 → **2026-10-09 12:00 +07**. If fewer than 40 unique cases, extend in 24 h steps — the
+  decision to extend uses the COUNT only (no labels, no variant outputs).
+- **Labels:** the lead labels with the unchanged `data/jev-eval/label.py` rules after this freeze and BEFORE
+  running anything on the held-out cases. Labels are final; no relabel after seeing outputs.
+- **Runs:** heuristic once + the frozen config **twice** (sequential, settle on); DEV_CASES/KERNEL ride along
+  in each run. Metrics are the MEAN of the two frozen runs (pooled rows for latency/ok).
+- **Pass = ALL of:**
+  1. held-out irrelevant-attach (over judge-ok rows) **≤ 15%**;
+  2. DEV mean recall **≥ 0.498** (heuristic 0.548 − 5 pts);
+  3. judge p95 over **ok rows ≤ 4 s**;
+  4. judge ok rate **≥ 85%**, and **every** non-ok row returned an empty bundle (abstain verified);
+  5. `tests/security` green at the freeze commit.
+  Report also: heuristic irrelevant-attach on the held-out set, DEV hit-rate, KERNEL recall, all-row p95.
+- **One shot:** a failure means a new pre-registration with NEW data — never a re-run of a tweaked config on
+  this held-out set. A pass enables `ACI_RERANKER=jev` on home-sever only with the user's go-ahead, with the
+  heuristic as instant rollback (`ACI_RERANKER=heuristic` + restart) and an ADR-008 amendment.
+
+### 8.3 Gateway cascade note (measured 2026-10-08)
+
+Two infra faults spoiled the 10-07 evening/night tuning runs: (a) home-sever has no IPv6 route while the
+9router unit disabled Node's family auto-selection → intermittent upstream connect failures (fixed:
+`--dns-result-order=ipv4first`); (b) a judge timeout abandons the request client-side but 9router does not
+cancel it upstream, so back-to-back eval calls queued behind stalls and tripped 9router's 30 s fail-fast
+(instant 503s). The eval now cools down 2 s after any non-ok verdict; the judge caps in-flight requests
+(`max_inflight`, "judge busy" → abstain). The settle `wait_idle` measured as a no-op (the abandoned worker
+ends at its own httpx phase timeout); clean runs since show 0 error rows in 632 judge calls.
