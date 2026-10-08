@@ -283,3 +283,27 @@ judge-ok rows was 0.513 / 0.507. Held-out offenders: database-migration ×4 per 
 KERNEL recall 0.397 / 0.431 (heuristic 0.520). Precision on unseen organic traffic replicated (12.4% vs heuristic 76%);
 the failing criterion is DEV recall, which is coupled to upstream stalls because a timed-out judge call abstains.
 Next step is a USER decision (keep heuristic, or a new pre-registration with new data) — `ACI_RERANKER` stays heuristic.
+
+## 9. Gate v4 — pre-registered 2026-10-08 ~19:50 +07 (after the v3 FAIL, before any v4 code or data)
+
+**Production state (fact, recorded after it happened):** on 2026-10-08 ~19:20 +07 the user, accepting the risk of the
+v3 FAIL, turned JEV v7 (§8.1 config) ON for the operational ACI on home-sever by running `enable_jev.sh` themselves;
+the OpenCode plugin timeout was raised 2 s → 10 s on Arch and Mac (~19:40). Rollback = `enable_jev.sh --rollback`
+(heuristic). This production decision does not change any gate rule below.
+
+The v3 held-out set (50 cases) has now been SEEN → it joins the tuning set (148 organic cases). Only the one measured
+v3 failure mechanism is targeted: an upstream stall makes the judge abstain, and on DEV an abstention scores recall 0.
+
+1. **Single change:** the judge retries ONCE on `timeout` / connect error / HTTP 5xx: per-attempt timeout 5 s, 0.5 s
+   pause, 2 attempts max (worst case ≈ 10.5 s; the in-flight limiter still applies). Prompt v7 and every other §8.1
+   parameter stay frozen. Implemented by the Mac worker (`jev-retry`), reviewed by the lead.
+2. **Freeze** = the lead's commit that merges the reviewed change and records the exact config in this section.
+3. **Held-out v4** = organic route_runs (opencode-*, lead smoke tests excluded) created AFTER the freeze commit; the
+   first 50 unique cases (distinct task text). Labels: the `label_heldout.py` category sets (incl. `UI`), applied and
+   locked by hash in a commit BEFORE any reranker runs on them; a new category needs its reason recorded there.
+4. **Runs:** heuristic ×1 + frozen v4 ×2, sequential, settle on. Metrics = mean of the two runs (pooled rows for
+   latency/ok). Failures still score recall 0 on DEV (no ok-only rescue).
+5. **Pass = ALL of:** held-out irrelevant-attach (judge-ok rows) ≤ 15%; DEV mean recall ≥ 0.498; judge p95 over ok
+   rows ≤ 6 s (retries included); judge ok rate ≥ 90%, every non-ok row empty; `tests/security` green.
+6. One shot, as before. A pass lets the v4 config replace v7 in production; a fail leaves the user's production
+   decision to the user.
