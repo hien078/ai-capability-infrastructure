@@ -671,8 +671,8 @@ def test_max_inflight_two_admits_a_second_concurrent_call() -> None:
 # v2 asks for {"selected": [{"id": ..., "necessity": "required"|"optional"}]}.
 # "required" only when EXPLICITLY said (case-insensitive); a missing or
 # garbage necessity is "optional" (not endorsed as required). v1-shape
-# strings carry no necessity concept → "required" (old-shape output keeps
-# v1 semantics instead of being silently dropped by the gate).
+# strings carry no necessity concept → "required" (old-shape output is
+# attached, never silently dropped by the gate).
 
 
 def test_v2_shape_parses_ids_and_necessities() -> None:
@@ -725,7 +725,7 @@ def test_v2_object_without_necessity_is_optional() -> None:
 
 
 def test_v1_string_entries_are_required() -> None:
-    """Old-shape strings keep v1 semantics: the gate must not drop them."""
+    """Old-shape strings are attached as required: the gate must not drop them."""
     payload = json.dumps({"selected": ["debugging", "tdd"], "reason": "v1 shape"})
     judge, _ = make_judge(lambda request: completion(payload))
     verdict = judge.judge("fix a bug", candidates("debugging", "tdd"), 2)

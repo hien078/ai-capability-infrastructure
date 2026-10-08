@@ -762,7 +762,8 @@ def main(argv: list[str] | None = None) -> int:
         "--jev-necessity-gate",
         default="none",
         choices=["none", "second", "all"],
-        help="per-pick necessity gate (exp 3): none = v1 behavior; second = a "
+        help="per-pick necessity gate (exp 3): none = no gate (every validated "
+        "pick attached — NOT v1 behavior, the prompt changed); second = a "
         "second pick only when the judge marked it required; all = every pick "
         "must be required (default: none)",
     )

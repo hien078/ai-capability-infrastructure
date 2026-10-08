@@ -386,8 +386,8 @@ class OpenAICompatSkillJudge:
             # "required" only when EXPLICITLY said (case-insensitive) — a
             # missing/garbage necessity is "optional" (not endorsed as
             # required). v1-shape strings carry no necessity concept:
-            # treat them as "required" so old-shape output keeps v1
-            # semantics instead of being silently dropped by the gate.
+            # treat them as "required" so old-shape output is attached
+            # (no gate drop), never silently dropped.
             if isinstance(entry, str) and entry:
                 ids.append(entry)
                 necessities.append("required")

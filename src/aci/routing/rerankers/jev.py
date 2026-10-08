@@ -31,7 +31,8 @@ Invariants (§2.2, review-blocking — pinned by tests/unit/test_jev_reranker.py
 7. NECESSITY GATE (exp 3) ONLY DROPS: it removes picks the judge itself
    marked "optional" (per ``necessity_gate``); it can never add, rescue or
    reorder — a dropped pick is exactly a pick the judge never made. A judge
-   that reports no usable necessities leaves the gate a no-op (v1 stands).
+   that reports no usable necessities leaves the gate a no-op (every
+   validated pick is attached).
 
 Pure logic, no HTTP — the ``SkillJudge`` protocol is plugged in by wiring
 (``adapters/inbound/rest/wiring.py``); unit tests use a fake judge.
@@ -57,7 +58,9 @@ VERSION = "1.1.0"
 
 OnFailure = Literal["abstain", "heuristic"]
 #: Selection policy (tuning exp 3): what the per-pick necessity gate does.
-#: "none" = v1 behavior (every validated pick is attached, up to max_select);
+#: "none" = no gate (every validated pick is attached, up to max_select) —
+#: NOT "v1 behavior": the prompt has changed since (v7), so what the judge
+#: picks under "none" is v7's selection, ungated;
 #: "second" = the first pick is always attached, a SECOND pick only when the
 #: judge marked it "required"; "all" = every pick must be "required".
 NecessityGate = Literal["none", "second", "all"]
@@ -197,7 +200,8 @@ class JevReranker:
         (exp 3) then drops picks the judge itself marked "optional";
         ``max_select`` caps LAST so a required pick is never crowded out
         by an optional one in front of it. Over-cap picks are truncated
-        (not invalid, not gate-dropped) — the v1 semantics.
+        (not invalid, not gate-dropped) — over-cap truncation, not a gate
+        drop.
         """
         by_id = {s.candidate.capability_id: s for s in top}
         necessities = self._aligned_necessities(verdict)
@@ -231,7 +235,7 @@ class JevReranker:
 
         No report (``None`` — pre-exp-3 shape, jevos, fakes) or a length
         mismatch → the gate is a NO-OP: a malformed report never drops
-        picks silently (v1 semantics stand).
+        picks silently (every validated pick is attached).
         """
         if verdict.necessities is None or len(verdict.necessities) != len(verdict.selected):
             return None

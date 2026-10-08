@@ -82,7 +82,7 @@ def test_jev_unknown_necessity_gate_is_rejected() -> None:
 
 def test_jev_necessity_gate_wires_through() -> None:
     """exp 3: ACI_JEV_NECESSITY_GATE=second reaches the reranker; the
-    default stays "none" (v1 behavior — nothing is enabled by the code)."""
+    default stays "none" (no gate — nothing is enabled by the code)."""
     reranker = _build_reranker(
         Settings(
             reranker="jev",

@@ -50,7 +50,9 @@ class Settings(BaseSettings):
     #: fallback) or "heuristic" (explicit opt-in delegation).
     jev_on_failure: str = "abstain"
     #: Per-pick necessity gate (tuning exp 3, selection policy): "none"
-    #: (default — every validated judge pick is attached, v1 behavior),
+    #: (default — no gate: every validated pick is attached; NOT "v1
+    #: behavior" — the judge prompt has changed since, so "none" gates
+    #: nothing but the selection itself is the current prompt's),
     #: "second" (the first pick is always attached; a SECOND pick only
     #: when the judge marked it "required"), "all" (every pick must be
     #: "required"). Only drops — never adds or rescues (§2.2.1).

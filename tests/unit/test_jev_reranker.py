@@ -350,7 +350,8 @@ def test_reranker_raising_judge_honors_the_heuristic_opt_in() -> None:
 #
 # "second" = the first pick is ALWAYS attached, a second pick only when the
 # judge marked it "required"; "all" = every pick must be "required"; "none"
-# (default) = v1 behavior. The gate ONLY DROPS (§2.2.1): a dropped pick is
+# (default) = no gate (every validated pick attached). The gate ONLY DROPS
+# (§2.2.1): a dropped pick is
 # exactly a pick the judge never made — never added, rescued or reordered.
 
 
@@ -409,7 +410,8 @@ def test_gate_none_is_v1_behavior() -> None:
 
 def test_gate_is_noop_without_reported_necessities() -> None:
     """A judge that reports no necessities (v1 shape, jevos, fakes) keeps
-    v1 semantics — the gate never drops picks it cannot see a necessity for."""
+    every validated pick attached — the gate never drops picks it cannot
+    see a necessity for."""
     judge = FakeJudge(ok_verdict("c-1", "c-2"))
     result = JevReranker(judge, necessity_gate="second").rerank(task(), many(3), context())
     assert [r.candidate.capability_id for r in result.ranked] == ["c-1", "c-2"]
