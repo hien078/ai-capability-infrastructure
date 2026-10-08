@@ -231,9 +231,11 @@ Any change to the prompt text or a parameter above after this commit = a new pre
 
 ### 8.2 Held-out evaluation (replaces §7 rule 5; §7 rules 1–4 stand)
 
-- **Window:** organic route_runs (opencode-* principals; lead smoke tests excluded) created
-  2026-10-07 22:00 → **2026-10-09 12:00 +07**. If fewer than 40 unique cases, extend in 24 h steps — the
-  decision to extend uses the COUNT only (no labels, no variant outputs).
+- **Window:** organic route_runs (opencode-* principals; lead smoke tests excluded) created from
+  2026-10-07 22:00 +07 up to the moment the set reaches **50 unique cases** (unique = distinct task text
+  hash), counted in created_at order — the first 50 unique cases are the held-out set. Amended 2026-10-08
+  ~11:45 +07 (user decision) from a fixed end date; at amendment time the count was 39 unique (count only —
+  no labels, no variant outputs seen).
 - **Labels:** the lead labels with the unchanged `data/jev-eval/label.py` rules after this freeze and BEFORE
   running anything on the held-out cases. Labels are final; no relabel after seeing outputs.
 - **Runs:** heuristic once + the frozen config **twice** (sequential, settle on); DEV_CASES/KERNEL ride along
