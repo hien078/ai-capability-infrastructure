@@ -34,6 +34,18 @@ quality. Those rows are reported separately (``judge_failed`` count) and
 each set summary carries ``judge_ok_rate`` (ok / judged rows; None when no
 judge ran — the heuristic arm).
 
+Settle (2026-10-08, the measured cascade fix): an abandoned overrun judge
+worker keeps running upstream (a client disconnect does not cancel it), so
+back-to-back cases queue behind stalls and cascade into gateway fail-fast
+503s — last night's unssettled numbers were garbage. Before EACH case the
+runner settles (``judge.wait_idle(120)``) so a stalled request never bleeds
+into the next case, records the wait as per-row ``settle_ms``, and after
+any non-ok judge status sleeps 2s before the next case. ``--no-settle``
+disables both (A/B against the anti-cascade behavior). The judge adapter
+additionally caps itself at ``--jev-max-inflight`` concurrent requests
+(abandoned included) — over the cap a call answers "judge busy" without an
+HTTP call and the reranker abstains.
+
 THE §4 GATE (pre-registered before any JEV number is seen — it travels
 with every report):
   1. Organic irrelevant-attach rate: JEV <= 10% (heuristic baseline on the
@@ -397,6 +409,7 @@ def build_report(
         set_rows = [r for r in rows if r["set"] == set_name]
         if set_rows:
             sets[set_name] = summarize(set_rows)
+    settle_values = [int(r.get("settle_ms") or 0) for r in rows]
     return {
         "reranker": reranker,
         "embedder_model": embedder_model,
@@ -405,6 +418,10 @@ def build_report(
         "read_only": True,
         "config": config or {},
         "n_cases": len(rows),
+        "settle": {
+            "total_ms": sum(settle_values),
+            "max_ms": max(settle_values) if settle_values else 0,
+        },
         "gate": list(GATE),
         "sets": sets,
         "rows": rows,
@@ -440,6 +457,12 @@ def render_summary(report: dict[str, Any]) -> str:
             f"| {s['route_latency_p50_ms']}/{s['route_latency_p95_ms']} "
             f"| {s['judge_latency_p50_ms']}/{s['judge_latency_p95_ms']} |"
         )
+    lines.append("")
+    settle = report.get("settle") or {}
+    lines.append(
+        f"# settle: total {settle.get('total_ms', 0) / 1000:.1f}s "
+        f"/ max {settle.get('max_ms', 0) / 1000:.1f}s"
+    )
     lines.append("")
     lines.append("## the §4 gate (pre-registered)")
     lines.extend(f"- {item}" for item in report["gate"])
@@ -536,6 +559,80 @@ def reranker_from_config(
         fallback=HeuristicReranker() if on_failure == "heuristic" else None,
         necessity_gate=necessity_gate,  # type: ignore[arg-type]
     )
+
+
+# ---------------------------------------------------------------------------
+# Settle (2026-10-08): stop judge stalls from cascading into the next case.
+# ---------------------------------------------------------------------------
+
+#: Pre-case settle budget (seconds). Measured stalls run 15-65s upstream
+#: (abandoned workers keep running — a client disconnect does not cancel
+#: the request in 9router); 120s covers them with margin.
+SETTLE_TIMEOUT_S = 120.0
+#: Post-failure cooldown (seconds): after any non-ok judge status the
+#: shared gateway gets breathing room before the next case.
+COOLDOWN_S = 2.0
+
+
+def settle_before_case(
+    judge: OpenAICompatSkillJudge | None,
+    *,
+    enabled: bool,
+    timeout_s: float = SETTLE_TIMEOUT_S,
+) -> int:
+    """Wait for the judge to go idle before a case, so a stalled/abandoned
+    request never bleeds into the next case (the measured cascade).
+
+    Returns the settle time in ms (0 when disabled or no judge to wait
+    on). A wait that hits ``timeout_s`` prints a stderr note and proceeds
+    anyway — the next call may then answer ``judge busy`` (the limiter),
+    which the row records like any judge failure.
+    """
+    if not enabled or judge is None:
+        return 0
+    started = time.perf_counter()
+    if not judge.wait_idle(timeout_s):
+        print(
+            f"# settle: judge still busy after {timeout_s}s — proceeding anyway",
+            file=sys.stderr,
+        )
+    return int((time.perf_counter() - started) * 1000)
+
+
+def cooldown_after_failure(
+    row: dict[str, Any], *, enabled: bool, seconds: float = COOLDOWN_S
+) -> float:
+    """After any non-ok judge status, sleep before the next case.
+
+    Returns the seconds slept (0.0 when no cooldown applies: settle
+    disabled, no judge ran, or the judge answered ``ok``).
+    """
+    status = row.get("judge_status")
+    if not enabled or status is None or status == "ok":
+        return 0.0
+    time.sleep(seconds)
+    return seconds
+
+
+def run_cases(
+    router: EvalRouter,
+    cases: list[tuple[str, Any]],
+    *,
+    judge: OpenAICompatSkillJudge | None = None,
+    settle: bool = True,
+    settle_timeout_s: float = SETTLE_TIMEOUT_S,
+    cooldown_s: float = COOLDOWN_S,
+) -> list[dict[str, Any]]:
+    """The eval loop: settle → run the case → record ``settle_ms`` →
+    cooldown after a judge failure. NOTHING is persisted (run_case)."""
+    rows: list[dict[str, Any]] = []
+    for set_name, case in cases:
+        settle_ms = settle_before_case(judge, enabled=settle, timeout_s=settle_timeout_s)
+        row = router.run_case(case, set_name=set_name)
+        row["settle_ms"] = settle_ms
+        rows.append(row)
+        cooldown_after_failure(row, enabled=settle, seconds=cooldown_s)
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -655,6 +752,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--jev-on-failure", default="abstain", choices=["abstain", "heuristic"])
     parser.add_argument(
+        "--no-settle",
+        action="store_true",
+        help="disable the pre-case judge settle (wait_idle) AND the 2s "
+        "post-failure cooldown — for A/B against the anti-cascade behavior "
+        "(default: settle on when the reranker is jev)",
+    )
+    parser.add_argument(
         "--jev-necessity-gate",
         default="none",
         choices=["none", "second", "all"],
@@ -701,9 +805,17 @@ def main(argv: list[str] | None = None) -> int:
         necessity_gate=args.jev_necessity_gate,
     )
     rows: list[dict[str, Any]] = []
+    # Settle only when a REAL OpenAICompatSkillJudge backs the arm (the llm
+    # backend): the heuristic arm runs no judge, the jevos backend is not
+    # wired here. judge_from_config builds exactly that class or fails.
+    settle_judge = judge if isinstance(judge, OpenAICompatSkillJudge) else None
     try:
-        for set_name, case in cases:
-            rows.append(router.run_case(case, set_name=set_name))
+        rows = run_cases(
+            router,
+            cases,
+            judge=settle_judge,
+            settle=not args.no_settle,
+        )
     finally:
         engine.dispose()
 
@@ -723,6 +835,8 @@ def main(argv: list[str] | None = None) -> int:
             "necessity_gate": args.jev_necessity_gate,
             "timeout_s": args.jev_timeout,
             "on_failure": args.jev_on_failure,
+            "max_inflight": args.jev_max_inflight if args.reranker == "jev" else None,
+            "settle": not args.no_settle,
         },
     )
     print(render_summary(report))

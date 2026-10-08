@@ -10,19 +10,23 @@ as scripts/routing_replay.py).
 
 import json
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from aci.adapters.outbound.model_provider.hashing import HashingEmbedder
+from aci.adapters.outbound.model_provider.judge import OpenAICompatSkillJudge
 from aci.domain.capability.models import (
     CapabilityVersion,
     SkillSpec,
 )
 from aci.domain.policy.models import EligibleCandidate, PolicyRules
 from aci.domain.routing.models import (
+    JudgeCandidate,
     JudgeVerdict,
     RankedCandidate,
     RerankResult,
@@ -869,3 +873,138 @@ def test_summarize_counts_necessity_drops() -> None:
     ]
     s = je.summarize(rows)
     assert s["necessity_dropped"] == 1
+
+
+# ---------- settle (2026-10-08): stalls must not cascade into the next case ----------
+#
+# An abandoned overrun judge worker keeps running upstream (a client
+# disconnect does not cancel the request), so back-to-back cases queue
+# behind stalls and cascade into gateway fail-fast 503s. The runner settles
+# (wait_idle) before each case, records the wait as per-row settle_ms, and
+# cools down 2s after any non-ok judge status. --no-settle disables both.
+
+
+def stalling_judge(*, timeout_s: float = 0.05, stall_s: float = 0.5) -> OpenAICompatSkillJudge:
+    """A real judge over a MockTransport whose FIRST request stalls past
+    the deadline (abandoned worker) — no network, no live model."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            time.sleep(stall_s)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"role": "assistant", "content": '{"selected": [], "reason": ""}'}}
+                ]
+            },
+        )
+
+    return OpenAICompatSkillJudge(
+        base_url="http://judge.local/v1",
+        api_key="sk-test",
+        model="test-model",
+        timeout_s=timeout_s,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
+def test_settle_before_case_waits_for_an_abandoned_worker() -> None:
+    judge = stalling_judge()
+    # Idle already: the settle is a no-op (sub-millisecond wait).
+    assert je.settle_before_case(judge, enabled=True, timeout_s=10) <= 100
+    verdict = judge.judge("t", [JudgeCandidate(capability_id="a", document_text="d")], 2)
+    assert verdict.status == "timeout"  # the worker is abandoned, still running
+    assert judge.inflight == 1
+    # The settle WAITS the abandoned worker out before the next case.
+    settle_ms = je.settle_before_case(judge, enabled=True, timeout_s=10)
+    assert settle_ms >= 100, settle_ms
+    assert judge.inflight == 0
+    # Disabled / no judge → 0, no wait at all.
+    assert je.settle_before_case(judge, enabled=False) == 0
+    assert je.settle_before_case(None, enabled=True) == 0
+
+
+def test_cooldown_after_failure_sleeps_only_on_non_ok() -> None:
+    """ok / no-judge / disabled → no cooldown; any non-ok judge status →
+    the shared gateway gets its pause before the next case."""
+    assert je.cooldown_after_failure({"judge_status": "ok"}, enabled=True, seconds=0.01) == 0.0
+    assert je.cooldown_after_failure({"judge_status": None}, enabled=True, seconds=0.01) == 0.0
+    assert (
+        je.cooldown_after_failure({"judge_status": "timeout"}, enabled=False, seconds=0.01) == 0.0
+    )
+    for status in ("timeout", "error", "invalid_output"):
+        assert (
+            je.cooldown_after_failure({"judge_status": status}, enabled=True, seconds=0.01) == 0.01
+        )
+
+
+def test_run_cases_records_settle_ms_per_row() -> None:
+    """The loop: settle → run → record settle_ms → cooldown. A case whose
+    judge timed out leaves an abandoned worker; the NEXT case's settle
+    waits it out (settle_ms > 0) instead of queuing behind it."""
+    versions = [make_version("debugging", "debug failing tests")]
+    candidates = [make_candidate(v.capability_id) for v in versions]
+    case_a = je.OrganicCase(
+        case_id="o-a", task_text="debug a failing test", acceptable=("debugging",)
+    )
+    case_b = je.OrganicCase(
+        case_id="o-b", task_text="debug another test", acceptable=("debugging",)
+    )
+
+    # Heuristic arm: no judge → settle_ms 0 everywhere, no cooldown.
+    heuristic = make_eval_router(versions, candidates, reranker=HeuristicReranker())
+    rows = je.run_cases(heuristic, [("organic", case_a)], judge=None, cooldown_s=0.0)
+    assert rows[0]["settle_ms"] == 0
+    assert rows[0]["judge_status"] is None
+
+    # JEV arm: case 1 times out (abandoned worker), case 2's settle waits.
+    judge = stalling_judge()
+    router = make_eval_router(
+        versions, candidates, reranker=JevReranker(judge, candidate_limit=2, max_select=1)
+    )
+    rows2 = je.run_cases(
+        router, [("organic", case_a), ("organic", case_b)], judge=judge, cooldown_s=0.0
+    )
+    assert rows2[0]["judge_status"] == "timeout"
+    assert rows2[0]["settle_ms"] <= 100  # idle before case 1
+    assert rows2[1]["settle_ms"] >= 100  # waited the abandoned worker out
+    assert rows2[1]["judge_status"] == "ok"
+    # --no-settle: no waiting, no cooldown — the row records settle_ms 0.
+    judge2 = stalling_judge()
+    router2 = make_eval_router(
+        versions, candidates, reranker=JevReranker(judge2, candidate_limit=2, max_select=1)
+    )
+    rows3 = je.run_cases(
+        router2,
+        [("organic", case_a), ("organic", case_b)],
+        judge=judge2,
+        settle=False,
+        cooldown_s=0.0,
+    )
+    assert rows3[0]["judge_status"] == "timeout"
+    assert rows3[1]["settle_ms"] == 0  # did NOT wait for the abandoned worker
+
+
+def test_build_report_carries_settle_total_and_max() -> None:
+    rows = [_organic_row("o-1", settle_ms=1500), _organic_row("o-2", settle_ms=250)]
+    report = je.build_report(
+        rows, reranker="jev", embedder_model="m", database="d", organic_source="s"
+    )
+    assert report["settle"] == {"total_ms": 1750, "max_ms": 1500}
+    # Rows without settle_ms (built directly, no runner) count as 0.
+    report2 = je.build_report(
+        [_organic_row("o-3")], reranker="jev", embedder_model="m", database="d", organic_source="s"
+    )
+    assert report2["settle"] == {"total_ms": 0, "max_ms": 0}
+
+
+def test_render_summary_prints_the_settle_line() -> None:
+    rows = [_organic_row("o-1", settle_ms=1500), _organic_row("o-2", settle_ms=250)]
+    report = je.build_report(
+        rows, reranker="jev", embedder_model="m", database="d", organic_source="s"
+    )
+    text = je.render_summary(report)
+    assert "settle: total 1.8s / max 1.5s" in text
