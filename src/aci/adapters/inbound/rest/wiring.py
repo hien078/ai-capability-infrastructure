@@ -142,6 +142,7 @@ def _build_reranker(settings: Settings) -> HeuristicReranker | JevReranker:
             model=settings.jev_model,
             reasoning_effort=settings.jev_reasoning_effort,
             timeout_s=settings.jev_timeout_seconds,
+            max_inflight=settings.jev_max_inflight,
         )
     return JevReranker(
         judge,

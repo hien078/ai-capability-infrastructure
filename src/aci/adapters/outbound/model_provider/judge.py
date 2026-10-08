@@ -31,6 +31,17 @@ P3 (same review): ``timeout_s`` is a TOTAL wall-clock deadline per judge call
 overrun it indefinitely; the request runs in a worker thread joined for
 ``timeout_s`` and an overrun is a ``timeout`` verdict.
 
+In-flight limiter (2026-10-08, measured on the shared gateway): an
+ABANDONED overrun worker keeps running — a client disconnect does not
+cancel the upstream request — so back-to-back calls queue behind stalled
+requests and cascade into gateway fail-fast 503s. ``max_inflight`` caps how
+many worker requests (abandoned ones INCLUDED — the slot is held until the
+worker thread ends, whatever its outcome) may run at once; a call that
+would exceed the cap returns status ``error`` / reason ``judge busy``
+WITHOUT any HTTP call, and the reranker abstains as for any failure
+(§2.2.5). ``inflight`` exposes the live count; ``wait_idle`` blocks until
+the judge quiesces (the eval settles between cases with it).
+
 The API key never appears in any log line or verdict text, and the full
 prompt is never logged (§2.3; pinned by test).
 """
@@ -142,6 +153,12 @@ _SYSTEM_TEMPLATE = (
 log = logging.getLogger(__name__)
 
 
+class _JudgeBusyError(Exception):
+    """Internal sentinel: the in-flight limiter is saturated — NO HTTP call
+    was made. Never escapes ``judge()``; ``_judge`` maps it to status
+    ``error`` / reason ``judge busy`` so the reranker abstains (§2.2.5)."""
+
+
 def _task_for_wire(task_text: str) -> str:
     """Head + tail bound: the middle of a long prompt never reaches the wire."""
     if len(task_text) <= _TASK_HEAD + _TASK_TAIL:
@@ -210,6 +227,7 @@ class OpenAICompatSkillJudge:
         model: str,
         reasoning_effort: str = "low",
         timeout_s: float = 8.0,
+        max_inflight: int = 2,
         client: httpx.Client | None = None,
     ) -> None:
         # P1: fail closed at construction (= wiring/startup, both wirings
@@ -220,12 +238,58 @@ class OpenAICompatSkillJudge:
             raise ValueError(
                 f"jev base_url must be an http/https URL, got scheme {scheme!r} in {base_url!r}"
             )
+        if max_inflight < 1:
+            raise ValueError(f"max_inflight must be >= 1, got {max_inflight}")
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
         self._reasoning_effort = reasoning_effort
         self._timeout_s = timeout_s
+        self._max_inflight = max_inflight
         self._client = client
+        # In-flight limiter state: how many worker requests (abandoned
+        # overruns included) are CURRENTLY running. Thread-safe — judge()
+        # may be called concurrently (server) or from eval settle probes.
+        self._inflight_lock = threading.Lock()
+        self._inflight = 0
+
+    # -- in-flight limiter (2026-10-08) -----------------------------------
+
+    @property
+    def inflight(self) -> int:
+        """Worker requests currently running, abandoned overruns included."""
+        with self._inflight_lock:
+            return self._inflight
+
+    def wait_idle(self, timeout_s: float) -> bool:
+        """Block until no request is in flight (abandoned workers included).
+
+        Returns ``True`` once idle, ``False`` if ``timeout_s`` elapsed first
+        — a stalled upstream request can outlive any practical timeout, and
+        the caller decides what to do next (the eval records the wait and
+        proceeds; the next call may then answer ``judge busy``).
+        """
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            with self._inflight_lock:
+                if self._inflight == 0:
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
+    def _acquire_inflight(self) -> None:
+        """Atomically reserve a slot or refuse — check+increment under one
+        lock hold, so concurrent callers can never exceed ``max_inflight``."""
+        with self._inflight_lock:
+            if self._inflight >= self._max_inflight:
+                raise _JudgeBusyError()
+            self._inflight += 1
+
+    def _release_inflight(self) -> None:
+        """Give a slot back (worker ended, whatever the outcome)."""
+        with self._inflight_lock:
+            self._inflight = max(0, self._inflight - 1)
 
     def judge(
         self, task_text: str, candidates: list[JudgeCandidate], max_select: int
@@ -277,6 +341,11 @@ class OpenAICompatSkillJudge:
 
         try:
             response = self._post_with_deadline(request_body, headers)
+        except _JudgeBusyError:
+            # The limiter is saturated (abandoned workers included): NO HTTP
+            # call was made. Status ``error`` → the reranker abstains (§2.2.5)
+            # exactly as for any other judge failure.
+            return self._verdict("error", "judge busy", started)
         except httpx.TimeoutException:
             # Type name only: the exception text can carry the URL, and the
             # verdict must stay free of anything request-shaped.
@@ -362,7 +431,8 @@ class OpenAICompatSkillJudge:
     def _post_with_deadline(
         self, request_body: dict[str, Any], headers: dict[str, str]
     ) -> httpx.Response:
-        """POST bounded by a TOTAL wall-clock deadline (P3).
+        """POST bounded by a TOTAL wall-clock deadline (P3) + the in-flight
+        limiter (2026-10-08).
 
         ``timeout=`` is PER PHASE — connect/read/write each get
         ``timeout_s`` separately — so an endpoint that dribbles bytes (or a
@@ -374,28 +444,50 @@ class OpenAICompatSkillJudge:
         outcome is discarded. The per-phase ``timeout`` still applies
         inside the worker, so a hung connect/read raises
         ``TimeoutException`` there and is re-raised here unchanged.
+
+        The limiter slot is acquired BEFORE the worker spawns (a saturated
+        limiter raises ``_JudgeBusyError`` — no HTTP call at all) and held
+        until the worker thread ENDS, whatever the outcome: an abandoned
+        overrun worker keeps its slot, which is exactly the load the
+        limiter must count (a client disconnect does not cancel the
+        upstream request). ``worker.start()`` failing releases here — the
+        worker never ran; ``httpx.Client()`` construction failing is inside
+        the worker's try so its ``finally`` still releases.
         """
         box: list[httpx.Response | BaseException] = []
+        self._acquire_inflight()  # _JudgeBusyError → "judge busy", no HTTP call
 
         def run() -> None:
-            client = self._client or httpx.Client()
             try:
-                box.append(
-                    client.post(
-                        f"{self._base_url}/chat/completions",
-                        json=request_body,
-                        headers=headers,
-                        timeout=self._timeout_s,
+                client = self._client or httpx.Client()
+                try:
+                    box.append(
+                        client.post(
+                            f"{self._base_url}/chat/completions",
+                            json=request_body,
+                            headers=headers,
+                            timeout=self._timeout_s,
+                        )
                     )
-                )
+                finally:
+                    if self._client is None:
+                        client.close()
             except BaseException as exc:  # noqa: BLE001 — re-raised on the caller thread
                 box.append(exc)
             finally:
-                if self._client is None:
-                    client.close()
+                # The worker ended (response, transport error, or client
+                # construction failure): the slot goes back HERE, so an
+                # abandoned overrun holds it for exactly as long as it
+                # actually runs upstream.
+                self._release_inflight()
 
         worker = threading.Thread(target=run, daemon=True, name="aci-jev-judge")
-        worker.start()
+        try:
+            worker.start()
+        except BaseException:  # noqa: BLE001 — re-raised below
+            # The worker never ran, so its finally never releases.
+            self._release_inflight()
+            raise
         worker.join(self._timeout_s)
         if worker.is_alive():
             raise httpx.ReadTimeout(f"judge call exceeded the total deadline of {self._timeout_s}s")

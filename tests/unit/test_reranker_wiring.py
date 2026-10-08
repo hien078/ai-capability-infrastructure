@@ -133,6 +133,32 @@ def test_jev_wires_the_judge_with_settings() -> None:
     assert verdict_reranker._fallback is None
 
 
+def test_jev_max_inflight_wires_through() -> None:
+    """2026-10-08: ACI_JEV_MAX_INFLIGHT reaches the judge (default 2) — the
+    limiter caps concurrent judge requests, abandoned overruns included."""
+    reranker = _build_reranker(
+        Settings(
+            reranker="jev",
+            jev_base_url="http://judge.local/v1",
+            jev_api_key="sk-x",
+            jev_max_inflight=3,
+        )
+    )
+    assert isinstance(reranker, JevReranker)
+    assert isinstance(reranker._judge, OpenAICompatSkillJudge)
+    assert reranker._judge._max_inflight == 3
+    assert reranker._judge.inflight == 0
+    default = _build_reranker(
+        Settings(
+            reranker="jev",
+            jev_base_url="http://judge.local/v1",
+            jev_api_key="sk-x",
+        )
+    )
+    assert isinstance(default._judge, OpenAICompatSkillJudge)
+    assert default._judge._max_inflight == 2
+
+
 def test_jev_on_failure_heuristic_wires_the_fallback() -> None:
     reranker = _build_reranker(
         Settings(

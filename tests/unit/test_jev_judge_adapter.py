@@ -10,8 +10,9 @@ exception text or log record).
 
 import json
 import logging
+import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import httpx
 import pytest
@@ -20,7 +21,7 @@ from aci.adapters.outbound.model_provider.judge import (
     JEV_PROMPT_VERSION,
     OpenAICompatSkillJudge,
 )
-from aci.domain.routing.models import JudgeCandidate
+from aci.domain.routing.models import JudgeCandidate, JudgeVerdict
 
 BASE = "http://judge.local/v1"
 KEY = "sk-test-SECRET-KEY"
@@ -478,6 +479,191 @@ def test_fast_endpoint_is_unaffected_by_the_deadline() -> None:
     assert verdict.status == "ok"
     assert verdict.selected == ["debugging"]
     assert len(captured) == 1
+
+
+# ---------- in-flight limiter (2026-10-08: abandoned workers keep slots) ----------
+#
+# DIAGNOSIS (measured on the shared gateway): _post_with_deadline ABANDONS an
+# overrun worker but the HTTP request keeps running upstream (a client
+# disconnect does not cancel it) — back-to-back calls then queue behind
+# stalled requests and cascade into gateway fail-fast 503s. The limiter
+# counts worker requests STILL RUNNING (abandoned ones included): the slot
+# is held until the worker thread ends, whatever its outcome. A call over
+# max_inflight answers status "error" / reason "judge busy" WITHOUT any
+# HTTP call, and the reranker abstains as for any failure (§2.2.5).
+
+
+def _await(condition: Callable[[], bool], timeout: float = 10.0) -> None:
+    """Poll until the condition holds (bounded — never a hung test)."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() >= deadline:
+            raise AssertionError("condition not reached in time")
+        time.sleep(0.01)
+
+
+def blocking_judge(
+    handler,  # type: ignore[no-untyped-def]
+    *,
+    timeout_s: float,
+    max_inflight: int,
+) -> tuple[OpenAICompatSkillJudge, list[httpx.Request]]:
+    """A judge over a capturing MockTransport with a controllable handler."""
+    captured: list[httpx.Request] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return handler(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(transport))
+    judge = OpenAICompatSkillJudge(
+        base_url=BASE,
+        api_key=KEY,
+        model=MODEL,
+        reasoning_effort="low",
+        timeout_s=timeout_s,
+        max_inflight=max_inflight,
+        client=client,
+    )
+    return judge, captured
+
+
+def test_max_inflight_zero_fails_closed_at_construction() -> None:
+    """0 would mean "permanently busy" — refuse at wiring/startup."""
+    with pytest.raises(ValueError, match="max_inflight"):
+        OpenAICompatSkillJudge(base_url=BASE, api_key=KEY, model=MODEL, max_inflight=0)
+
+
+def test_busy_verdict_when_inflight_at_cap() -> None:
+    """max_inflight=1 with one call in flight: the next call answers
+    ``error``/"judge busy" WITHOUT an HTTP call; the reranker abstains."""
+    release = threading.Event()
+    verdicts: list[JudgeVerdict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        release.wait(10)
+        return completion('{"selected": [], "reason": ""}')
+
+    judge, captured = blocking_judge(handler, timeout_s=5.0, max_inflight=1)
+    assert judge.inflight == 0
+
+    first = threading.Thread(target=lambda: verdicts.append(judge.judge("t1", candidates("a"), 2)))
+    first.start()
+    # Wait until the worker ENTERED the handler (captured) — the slot is
+    # acquired before the thread runs, so inflight alone would race.
+    _await(lambda: len(captured) == 1)
+    assert judge.inflight == 1
+
+    busy = judge.judge("t2", candidates("b"), 2)
+    assert busy.status == "error"
+    assert busy.reason == "judge busy"
+    assert busy.selected == []
+    assert busy.model_id == MODEL
+    assert isinstance(busy.latency_ms, int)
+    # NO HTTP call for the busy one — only the first request was sent.
+    assert len(captured) == 1
+    # The empty-candidates short-circuit never consumes a slot (no call).
+    assert judge.judge("t3", [], 2).status == "ok"
+    assert len(captured) == 1
+
+    release.set()
+    first.join(10)
+    assert verdicts[0].status == "ok"
+    assert judge.inflight == 0
+
+
+def test_abandoned_timeout_worker_keeps_its_slot_until_it_finishes() -> None:
+    """The measured cascade shape: an overrun call times out (the worker is
+    ABANDONED but still running) — it must stay counted, so the next call
+    answers ``judge busy`` until the worker actually ends."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            time.sleep(0.5)  # the first request stalls past the deadline
+        return completion('{"selected": [], "reason": ""}')
+
+    judge, _ = blocking_judge(handler, timeout_s=0.1, max_inflight=1)
+    verdict = judge.judge("t", candidates("a"), 2)
+    assert verdict.status == "timeout"
+    assert judge.inflight == 1  # abandoned, still running upstream
+
+    busy = judge.judge("t2", candidates("b"), 2)
+    assert busy.status == "error"
+    assert busy.reason == "judge busy"
+
+    assert judge.wait_idle(10) is True  # the worker ended → slot released
+    assert judge.inflight == 0
+    ok = judge.judge("t3", candidates("c"), 2)
+    assert ok.status == "ok"
+
+
+def test_wait_idle_returns_false_while_a_worker_is_stalled() -> None:
+    """wait_idle is honest: False while the abandoned worker still runs,
+    True once it quiesces (the eval records the wait either way)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        time.sleep(0.4)
+        return completion('{"selected": [], "reason": ""}')
+
+    judge, _ = blocking_judge(handler, timeout_s=0.05, max_inflight=1)
+    assert judge.wait_idle(0.1) is True  # idle already
+    verdict = judge.judge("t", candidates("a"), 2)
+    assert verdict.status == "timeout"
+    assert judge.wait_idle(0.05) is False  # still in flight
+    assert judge.wait_idle(10) is True
+    assert judge.inflight == 0
+
+
+def test_inflight_slot_is_released_on_every_outcome() -> None:
+    """Whatever the worker's outcome — transport error, non-200, invalid
+    output, ok — the slot goes back when the worker ends."""
+
+    def refused(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    def overloaded(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="overloaded")
+
+    def not_json(request: httpx.Request) -> httpx.Response:
+        return completion("not json")
+
+    def picks_a(request: httpx.Request) -> httpx.Response:
+        return completion('{"selected": ["a"], "reason": "r"}')
+
+    for handler, expected in (
+        (refused, "error"),
+        (overloaded, "error"),
+        (not_json, "invalid_output"),
+        (picks_a, "ok"),
+    ):
+        judge, _ = blocking_judge(handler, timeout_s=2.0, max_inflight=1)
+        verdict = judge.judge("t", candidates("a"), 2)
+        assert verdict.status == expected
+        assert judge.inflight == 0
+
+
+def test_max_inflight_two_admits_a_second_concurrent_call() -> None:
+    """The cap is a CAP, not a mutex: with one abandoned worker running,
+    a second call still goes through (in flight = 2), then settles to 1."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            time.sleep(0.4)  # the first request stalls past the deadline
+        return completion('{"selected": [], "reason": ""}')
+
+    judge, _ = blocking_judge(handler, timeout_s=0.1, max_inflight=2)
+    first = judge.judge("t", candidates("a"), 2)
+    assert first.status == "timeout"  # abandoned, slot held
+    assert judge.inflight == 1
+    second = judge.judge("t2", candidates("b"), 2)  # 1 < 2 → admitted
+    assert second.status == "ok"
+    assert judge.inflight == 1  # the abandoned worker still holds its slot
+    assert judge.wait_idle(10) is True
+    assert judge.inflight == 0
 
 
 # ---------- exp 3: per-pick necessity parse (prompt v2 output shape) ----------

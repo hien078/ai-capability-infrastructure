@@ -485,6 +485,7 @@ def judge_from_config(
     model: str,
     reasoning_effort: str,
     timeout_s: float,
+    max_inflight: int = 2,
 ) -> SkillJudge:
     """The §2.3 rule: jev requires base_url+api_key+model, else fail closed."""
     missing = [
@@ -507,6 +508,7 @@ def judge_from_config(
         model=model,
         reasoning_effort=reasoning_effort,
         timeout_s=timeout_s,
+        max_inflight=max_inflight,
     )
 
 
@@ -644,6 +646,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--jev-timeout", type=float, default=8.0)
     parser.add_argument("--jev-candidates", type=int, default=12)
     parser.add_argument("--jev-max-select", type=int, default=2)
+    parser.add_argument(
+        "--jev-max-inflight",
+        type=int,
+        default=int(os.environ.get("ACI_JEV_MAX_INFLIGHT") or 2),
+        help="max judge requests in flight (abandoned overruns included) before "
+        "a call answers 'judge busy' without an HTTP call (default: 2)",
+    )
     parser.add_argument("--jev-on-failure", default="abstain", choices=["abstain", "heuristic"])
     parser.add_argument(
         "--jev-necessity-gate",
@@ -671,6 +680,7 @@ def main(argv: list[str] | None = None) -> int:
             model=args.jev_model,
             reasoning_effort=args.jev_reasoning_effort,
             timeout_s=args.jev_timeout,
+            max_inflight=args.jev_max_inflight,
         )
 
     cases: list[tuple[str, Any]] = []

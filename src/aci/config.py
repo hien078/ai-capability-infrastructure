@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     #: when the judge marked it "required"), "all" (every pick must be
     #: "required"). Only drops — never adds or rescues (§2.2.1).
     jev_necessity_gate: str = "none"
+    #: Max judge requests in flight at once (2026-10-08), ABANDONED overrun
+    #: workers included — a client disconnect does not cancel the upstream
+    #: request, so back-to-back calls queue behind stalls and cascade into
+    #: gateway fail-fast 503s. A call over the cap returns "judge busy"
+    #: (status error) WITHOUT an HTTP call; the reranker abstains (§2.2.5).
+    jev_max_inflight: int = 2
     #: JEV judge backend (docs/plans/jev-reranker.md §6): "llm" (default —
     #: the OpenAI-compatible chat judge above) or "jevos" (the local Jev
     #: typed-decision API, one POST {jevos_url}/v1/systemone). The backend
