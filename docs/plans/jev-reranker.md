@@ -260,3 +260,9 @@ cancel it upstream, so back-to-back eval calls queued behind stalls and tripped 
 (instant 503s). The eval now cools down 2 s after any non-ok verdict; the judge caps in-flight requests
 (`max_inflight`, "judge busy" → abstain). The settle `wait_idle` measured as a no-op (the abandoned worker
 ends at its own httpx phase timeout); clean runs since show 0 error rows in 632 judge calls.
+
+**Held-out labels locked 2026-10-08 18:25 +07, before any reranker ran on them:** 50 unique cases (55 rows,
+window closed 18:11 +07), labeled with the label.py category sets plus ONE new category `UI = {frontend-design}`
+(1 case: a UI audit/redesign task — no such case existed in the tuning set). Private files (gitignored):
+`label_heldout.py` sha256 `30e0aa1813f320f8…`, `heldout-unique.jsonl` sha256 `01feab722657ecfb…`. Production heuristic bundles
+on this set: irrelevant-attach 38/50 = 76%.
