@@ -266,3 +266,20 @@ window closed 18:11 +07), labeled with the label.py category sets plus ONE new c
 (1 case: a UI audit/redesign task — no such case existed in the tuning set). Private files (gitignored):
 `label_heldout.py` sha256 `30e0aa1813f320f8…`, `heldout-unique.jsonl` sha256 `01feab722657ecfb…`. Production heuristic bundles
 on this set: irrelevant-attach 38/50 = 76%.
+
+### 8.4 Gate v3 result (2026-10-08 ~18:55 +07) — **FAIL** (one shot; no re-run on this held-out set)
+
+Frozen v7, two sequential runs on home-sever (read-only aci_bench), 50 held-out cases + DEV_CASES/KERNEL:
+
+| | heuristic | v7 run 1 | v7 run 2 | gate (mean / pooled) |
+|---|---|---|---|---|
+| held-out irrelevant-attach (judge-ok rows) | 38/50 = 76.0% | 6/49 = 12.2% | 6/48 = 12.5% | **12.4% ≤ 15% PASS** |
+| DEV mean recall (failures count 0) | 0.548 | 0.513 | 0.392 | **0.453 < 0.498 FAIL** |
+| judge p95, ok rows | — | | | **3460 ms ≤ 4000 PASS** (all rows 6764 ms) |
+| judge ok rate / non-ok rows with items | — | 107/110 | 101/110 | **94.5% ≥ 85%, 0 leaked PASS** |
+
+Descriptive only (does NOT change the verdict): run 2 had 7 DEV judge timeouts, each scored recall 0; DEV recall over
+judge-ok rows was 0.513 / 0.507. Held-out offenders: database-migration ×4 per run, tdd ×2–3, singletons.
+KERNEL recall 0.397 / 0.431 (heuristic 0.520). Precision on unseen organic traffic replicated (12.4% vs heuristic 76%);
+the failing criterion is DEV recall, which is coupled to upstream stalls because a timed-out judge call abstains.
+Next step is a USER decision (keep heuristic, or a new pre-registration with new data) — `ACI_RERANKER` stays heuristic.
