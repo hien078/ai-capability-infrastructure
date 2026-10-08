@@ -286,9 +286,9 @@ Next step is a USER decision (keep heuristic, or a new pre-registration with new
 
 ## 9. Gate v4 — pre-registered 2026-10-08 ~19:50 +07 (after the v3 FAIL, before any v4 code or data)
 
-**Production state (fact, recorded after it happened):** on 2026-10-08 ~19:20 +07 the user, accepting the risk of the
+**Production state (fact, recorded after it happened):** on 2026-10-08 19:40 +07 (aci-server restart 12:40 UTC) the user, accepting the risk of the
 v3 FAIL, turned JEV v7 (§8.1 config) ON for the operational ACI on home-sever by running `enable_jev.sh` themselves;
-the OpenCode plugin timeout was raised 2 s → 10 s on Arch and Mac (~19:40). Rollback = `enable_jev.sh --rollback`
+the OpenCode plugin timeout was raised 2 s → 10 s on Arch and Mac (~19:40–19:45). Rollback = `enable_jev.sh --rollback`
 (heuristic). This production decision does not change any gate rule below.
 
 The v3 held-out set (50 cases) has now been SEEN → it joins the tuning set (148 organic cases). Only the one measured
