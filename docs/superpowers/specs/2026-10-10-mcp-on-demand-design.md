@@ -42,7 +42,7 @@ only context/tokens are saved); changing JEV prompt v7 (frozen for gate v4).
 OpenCode prompt ──prompt hook──► aci-router.ts ──POST /v1/routes──► ACI (home-sever)
                                                                           ├─ skill pipeline (JEV v7, unchanged)
                                                                           └─ ToolServerSelector (new, parallel)
-          ◄── bundle (skills) + tool_servers {decision, selected, reason, confidence} ──┘
+          ◄── bundle (skills) + tool_servers {decision, selected, reason, selector_version} ──┘
 plugin: decision=select → `context` hook removes unselected MCP tools before every model request + notice line;
         `aci_enable_mcp` re-enables a server mid-turn; decision=all / any error → change nothing (today's behavior)
 ```
@@ -65,10 +65,11 @@ plugin: decision=select → `context` hook removes unselected MCP tools before e
   `adapters/outbound/model_provider/` reusing the JEV judge plumbing (base URL, key, in-flight limiter, total deadline,
   never-raise boundary, SSE handling). Own prompt + own `TOOL_SELECTOR_PROMPT_VERSION`; JEV v7 untouched.
 - Input: task text (bounded like today) + the eligible `mcp:*` capabilities' trusted descriptions.
-- Output: `{"selected": ["mcp:..."], "confidence": "high"|"low", "reason": "..."}`; default instruction = "select none
-  unless the task clearly needs the server".
-- Decision rule: judge ok AND confidence high → `decision="select"` with the validated subset (unknown ids dropped);
-  anything else (timeout, error, invalid output, low confidence, limiter busy) → `decision="all"`.
+- Output: `{"selected": ["mcp:..."], "reason": "..."}`; instructions = "select none unless the task clearly needs
+  the server; if you are unsure whether a server is needed, select it" (uncertainty ⇒ enabled, no separate
+  confidence field).
+- Decision rule: judge ok → `decision="select"` with the validated subset (unknown ids dropped); anything else
+  (timeout, error, invalid output, limiter busy, no installed+eligible servers) → `decision="all"`.
 - Runs in parallel with the skill pipeline (thread pool in the route use case); route latency = max, not sum.
 - Settings: `ACI_TOOL_SELECTOR` = `off` (default) | `judge`; model/effort/timeout reuse `ACI_JEV_*` unless
   overridden by `ACI_TOOL_SELECTOR_*`. Default `off` ⇒ response always `decision="all"` (no behavior change).
@@ -79,7 +80,7 @@ plugin: decision=select → `context` hook removes unselected MCP tools before e
 
 ```json
 "tool_servers": {"decision": "select" | "all", "selected": ["mcp:playwright"],
-                 "reason": "<bounded>", "confidence": "high" | "low", "selector_version": "1"}
+                 "reason": "<bounded>", "selector_version": "1"}
 ```
 
 Request: a new optional `tool_selection: {"servers": ["mcp:github", ...]}` lists the servers the client has installed
@@ -123,14 +124,14 @@ The deployed client is **OpenCode V2 (2.0.22, `@opencode/plugin`)**. Verified in
 | situation | result |
 |---|---|
 | selector timeout / error / invalid output / busy | `decision="all"` |
-| low confidence | `"all"` |
+| judge unsure | selects the server (enabled) |
 | ACI unreachable, plugin error | no change |
 | selected id not in registry | dropped (subset-only) |
 | selected server not installed on client | ignored |
 | `+mcp:x` in prompt | x always on |
 | selector disabled (`ACI_TOOL_SELECTOR=off`) | `"all"` |
 
-Telemetry (`route_runs.stages.tool_selection`): decision, selected ids, confidence, judge status, latency, version.
+Telemetry (`route_runs.stages.tool_selection`): decision, selected ids, judge status, latency, version.
 No new task-text storage. Security tests: the judge never sees MCP-provided descriptions; response never contains
 credentials/config; selector cannot add servers outside the eligible registry set.
 
@@ -165,7 +166,7 @@ Implementation by the Mac OpenCode worker in a worktree (TDD), reviewed by the l
   override = rollback (`ACI_TOOL_SELECTOR=off`).
 
 Risk: positives are rare (~1–5% of sessions) → the wrongly-disabled rate is noisy (1 case ≈ 5–7%); hence the
-high-confidence threshold and the "prefer enabling" default.
+"unsure ⇒ select" instruction and the "prefer enabling" default.
 
 ## 8. Rollback
 

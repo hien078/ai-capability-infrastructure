@@ -22,7 +22,7 @@ số phiên từng gọi bất kỳ tool MCP nào; `memory` và `duckdb` chưa t
 3. **Bộ chọn riêng:** `ToolServerSelector` (judge riêng, prompt + version riêng) chạy SONG SONG
    với pipeline skill; không đụng prompt JEV v7. Kết quả `tool_servers {decision, selected, …}`
    trong response `/v1/routes` (trường tùy chọn, tương thích ngược).
-4. **Fail-open:** mọi lỗi / timeout / độ tin cậy thấp / selector tắt → `decision="all"` (giữ
+4. **Fail-open:** mọi lỗi / timeout / selector tắt → `decision="all"`; judge không chắc thì CHỌN server (giữ
    nguyên hành vi hiện tại). Chỉ chọn trong tập server client khai báo đã cài ∩ registry eligible.
 5. **Client thực thi cục bộ:** plugin OpenCode V2 bỏ tool của server không được chọn trong hook
    `context` (trước mỗi lần gọi model) và đăng ký tool `aci_enable_mcp` để model bật lại server
