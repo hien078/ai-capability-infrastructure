@@ -30,6 +30,8 @@
 - ADR-014 — HarnessKernel: service-side agent runtime →
   `014-harness-kernel.md` (plan `docs/plans/harness.md`; refines ADR-011 —
   kernel là module monolith mới, không phải service riêng).
+- ADR-015 — MCP server là capability được route; client bật theo từng prompt →
+  `015-mcp-on-demand.md` (spec `docs/superpowers/specs/2026-10-10-mcp-on-demand-design.md`).
 
-Toàn bộ 14 ADR đã Accepted. Mọi ADR có Context/Decision/Consequences/Rejected/Verification
+Toàn bộ 15 ADR đã Accepted. Mọi ADR có Context/Decision/Consequences/Rejected/Verification
 và test tương ứng trong `tests/`.

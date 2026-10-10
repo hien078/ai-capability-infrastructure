@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 AI Capability Infrastructure (ACI) — a Capability Registry + Skill Intelligence + Multi-Adapter Delivery system for composable agent skills. Not a *generalized* agent platform, but it does have a real service-side agent execution plane (HarnessKernel, ADR-014) — capability WHAT, optional kernel HOW, client-side global DAG. Status: V1 + V2 complete, V3 alive (real executor + A2A), V4-1 Evaluation live, three real clients (OpenCode + Antigravity + Goose) — REAL-CLIENT ERA, operating.
 
 - `AGENTS.md` — detailed repo state, gotchas, measured results, and build order. Read it before doing anything non-trivial; it is the operational source of truth alongside this file.
-- `plan_v2_revised.md` — the architecture plan (single source of truth for design). Follow it; do not invent a competing design. `docs/adr/` holds 14 accepted ADRs (001–014) — read the relevant ADR before implementing its phase.
+- `plan_v2_revised.md` — the architecture plan (single source of truth for design). Follow it; do not invent a competing design. `docs/adr/` holds 15 accepted ADRs (001–015) — read the relevant ADR before implementing its phase.
 - `docs/architecture-current.md` — concise current-state overview (Vietnamese, 2026-10-01): what is actually implemented / enabled by default / built-but-frozen / merely proposed.
 - `docs/plans/aci-improvement-2026-10.md` — the current actionable improvement plan (Vietnamese): staged reopening of targeted features, ownership, acceptance checks, rollback, measurement limits.
 

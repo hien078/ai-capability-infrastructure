@@ -3,9 +3,9 @@
 Tài liệu này là **ảnh trạng thái hiện tại** (current-state overview), viết sau khi đối chiếu
 mã nguồn và các bản ghi trong `AGENTS.md`. Nó không thay thế:
 
-- `plan_v2_revised.md` — nguồn chân lý **thiết kế** (đã được 14 ADR khóa lại);
+- `plan_v2_revised.md` — nguồn chân lý **thiết kế** (đã được 15 ADR khóa lại);
 - `AGENTS.md` — nguồn chân lý **vận hành** (lệnh, gotcha, kết quả đo);
-- `docs/adr/` — 14 ADR Accepted (001–014; ADR-014 có các amendment tới 17).
+- `docs/adr/` — 15 ADR Accepted (001–015; ADR-014 có các amendment tới 17).
 
 Kế hoạch hành động và đánh giá đầu tư: `docs/plans/aci-improvement-2026-10.md`.
 
@@ -62,7 +62,7 @@ Mã tồn tại không đồng nghĩa đang vận hành — trạng thái thật
 
 ## 4. Sự thật đã kiểm chứng tại chỗ (2026-10-01)
 
-- **14 ADR** Accepted (001–014); **migrations 0001–0019**.
+- **15 ADR** Accepted (001–015); **migrations 0001–0019**.
 - Reranker **v3** (`heuristic.py`, `VERSION = "3"`, min-max calibration per-signal).
 - Composer **v2** — budget theo **kích thước SKILL.md thật** (`application/payload_sizes.py`),
   `DEFAULT_MAX_CONTEXT_TOKENS = 8000` (ADR-008 amended).
@@ -167,7 +167,7 @@ POST /v1/agent-runs {objective, workspace, verification_command, approval_requir
 | Câu cũ | Đúng hiện tại |
 |---|---|
 | "Not an agent platform" | Không phải nền tảng agent **tổng quát**; có mặt phẳng thực thi thật (HarnessKernel) |
-| "13 accepted ADRs" | **14** (001–014) |
+| "13 accepted ADRs" | **14** (001–015) |
 | "two real clients (OpenCode + Antigravity)" | **Ba**: + Goose |
 | "SandboxWorkspace is a non-goal" | Thay bởi amendment 13: **bwrap sandbox live**, fail-closed |
 | "corpus cleanup awaiting the human gate" | Đã áp dụng rồi **rollback** cùng ngày; 0 relations |

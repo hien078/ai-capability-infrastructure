@@ -1,8 +1,8 @@
 # MCP on demand — ACI selects which MCP servers a prompt needs (design)
 
-Status: **DRAFT for user review** (2026-10-10). Decisions taken with the user in chat: fallback = A+C,
+Status: **Approved** (2026-10-10, user: "làm 3 việc luôn"). Decisions taken with the user in chat: fallback = A+C,
 granularity = per MCP server, decision mechanism = a separate tool-server judge (option 1).
-Requires an ADR (§9 draft, would become ADR-015) before implementation.
+ADR: `docs/adr/015-mcp-on-demand.md` (Accepted).
 
 ## 1. Why (measured 2026-10-10, not assumed)
 
@@ -24,8 +24,8 @@ any MCP (sysmgr 5, github 1); Arch 15/294 (5.1%) (playwright 9, context7 4, sysm
 zero uses ever. So > 95% of sessions carry ~10–14k tokens of tool definitions they never use, on every model call of
 the agent loop.
 
-Unverified assumption that gates the whole project: disabling tools through OpenCode's per-message `tools` map
-removes their schemas from the request (§6, step 0).
+Unverified assumption that gates the whole project: removing entries from the V2 `context` hook's `tools` record
+removes their schemas from the model request (§6, step 0).
 
 ## 2. Goal and non-goals
 
@@ -39,12 +39,12 @@ only context/tokens are saved); changing JEV prompt v7 (frozen for gate v4).
 ## 3. Architecture
 
 ```
-OpenCode prompt ──chat.message hook──► aci-router.ts ──POST /v1/routes──► ACI (home-sever)
+OpenCode prompt ──prompt hook──► aci-router.ts ──POST /v1/routes──► ACI (home-sever)
                                                                           ├─ skill pipeline (JEV v7, unchanged)
                                                                           └─ ToolServerSelector (new, parallel)
           ◄── bundle (skills) + tool_servers {decision, selected, reason, confidence} ──┘
-plugin: decision=select → message.tools[<server>_*]=false for unselected servers + one notice line
-        decision=all / any error → change nothing (today's behavior)
+plugin: decision=select → `context` hook removes unselected MCP tools before every model request + notice line;
+        `aci_enable_mcp` re-enables a server mid-turn; decision=all / any error → change nothing (today's behavior)
 ```
 
 ### 3.1 Registry: MCP servers as capabilities
@@ -87,25 +87,36 @@ Request: a new optional `tool_selection: {"servers": ["mcp:github", ...]}` lists
 `constraints.allowed_kinds` stays `["skill"]`: `mcp:*` capabilities NEVER enter skill retrieval or the bundle — the
 selector reads the eligible `mcp:*` entries through its own path (eligibility still applies: status/channel/trust).
 
-### 3.4 OpenCode plugin (`aci-router.ts`, Arch + Mac)
+### 3.4 OpenCode plugin (`src/aci/adapters/inbound/opencode/plugin/index.ts`, deployed as `aci-router.ts`)
 
-- Move/extend the routing call into the `chat.message` hook (verified in plugin types v1.18.34: input has `sessionID`,
-  output has `message: UserMessage` whose `tools?: {[name]: boolean}` is mutable).
-- `decision="select"`: for each configured MCP server not selected, set `message.tools["<local>_*"] = false`
-  (exact key form verified in step 0); add one notice part: "MCP off for this prompt: … — ask for `+mcp:<name>` next
-  prompt if needed".
-- Override: if the prompt text contains `+mcp:<name>`, that server is never disabled (user or model can request it).
-- `decision="all"`, ACI error/timeout, plugin exception → touch nothing.
-- Plugin option `toolSelection: false` = kill switch (default true once released).
+The deployed client is **OpenCode V2 (2.0.22, `@opencode/plugin`)**. Verified in its plugin type definitions
+(`node_modules/@opencode/plugin/dist/promise/{session,tool}.d.ts`), not yet at runtime:
+
+- `ctx.session.hook("prompt", …)` — already used for skills; it now also stores the `tool_servers` decision per
+  `sessionID` in plugin memory (latest prompt wins).
+- `ctx.session.hook("context", …)` — runs before **every model request** of the agent loop with a mutable
+  `tools: Record<name, {description, input}>`. When the session's decision is `select`, the hook deletes the entries
+  of every configured MCP server that is neither selected nor enabled on request (key form, e.g. `github_search_code`
+  vs `github.search_code`, is recorded in step 0).
+- `ctx.tool.transform(editor => editor.add(...))` — the plugin registers one small tool, `aci_enable_mcp`
+  (`{server: string}`): calling it adds the server to the session's enabled set, so its tools reappear from the
+  **next model request in the same turn** (fallback A without waiting for the next prompt). Unknown servers → error
+  result listing the valid names.
+- The prompt hook appends one notice line: "MCP off for this prompt: … — call `aci_enable_mcp` if you need one".
+- Override: `+mcp:<name>` in the prompt text enables that server for the session.
+- `decision="all"`, no stored decision, ACI error/timeout, any plugin exception → `context` hook leaves `tools`
+  untouched.
+- Plugin option `toolSelection: false` = kill switch (default false until the §7 gate passes).
 
 ## 4. Data flow per prompt
 
-1. User/orchestrator prompt → plugin `chat.message`.
+1. User/orchestrator prompt → plugin `prompt` hook.
 2. Plugin POSTs `/v1/routes` (timeout 10 s, unchanged).
 3. ACI: [eligibility → retrieval → JEV → compose (skills only)] ‖ [eligible `mcp:*` ∩ client-installed →
    ToolServerSelector] → persist route_run (stages gain `tool_selection`) → respond.
-4. Plugin applies skills (as today) + `message.tools` + notice.
-5. OpenCode builds the model request without the disabled tools for this whole turn.
+4. Plugin applies skills (as today), stores the decision for the session, adds the notice.
+5. Before every model request the `context` hook removes the disabled MCP tools; `aci_enable_mcp` calls widen the
+   session's set for the following requests.
 
 ## 5. Error handling (principle C: any doubt ⇒ today's behavior)
 
@@ -125,13 +136,13 @@ credentials/config; selector cannot add servers outside the eligible registry se
 
 ## 6. Build order
 
-0. **Spike (go/no-go):** in a throwaway OpenCode session send the same prompt twice — once normal, once with
-   `message.tools` disabling 5 servers via a minimal plugin — and compare input tokens recorded by the Ubuntu 9router
-   (`usageHistory`). Go only if input tokens drop by ≈ the measured schema size; also record the exact working key
-   form (`github_*` vs per-tool names). No-go ⇒ stop and report.
+0. **Spike (go/no-go):** a throwaway V2 plugin whose `context` hook deletes the tools of 5 MCP servers; send the same
+   prompt in two fresh `opencode run` sessions (plugin on / off) and compare input tokens recorded by the Ubuntu
+   9router (`usageHistory`). Go only if input tokens drop by ≈ the measured schema size AND a plugin-added tool is
+   callable; record the exact MCP tool key form. No-go ⇒ stop and report.
 1. Registry entries `mcp:*` with trusted descriptions (curated by the lead, promoted by the user via capctl).
 2. `ToolServerSelector` protocol + judge adapter + route wiring (parallel) + API field + telemetry + unit/security tests.
-3. Plugin `chat.message` change + override + notice + kill switch; plugin tests.
+3. Plugin `prompt` + `context` hooks, `aci_enable_mcp` tool, override, notice, kill switch; plugin tests.
 4. Offline eval script `scripts/tool_selector_eval.py` over §7 data.
 5. Gate run, then (user decision) enable.
 
@@ -167,6 +178,7 @@ restore the plugin backup. Neither touches the JEV skill path.
 **Decision:** register MCP servers as `tool` capabilities with ACI-authored descriptions; a separate selector returns a
 per-prompt server set; the client enforces it locally. ACI never executes or proxies tools and never holds MCP
 credentials. Default off; fail-open to "all".
-**Consequences:** saves context only (not RAM); depends on OpenCode's per-message `tools` map (verified in step 0);
+**Consequences:** saves context only (not RAM); depends on OpenCode V2's `context` hook `tools` record (verified in
+step 0);
 adds one judge call per prompt (parallel); one registry preserved; production enablement stays a user decision behind
 the §7 gate.
