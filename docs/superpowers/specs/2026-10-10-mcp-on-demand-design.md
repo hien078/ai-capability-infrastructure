@@ -1,6 +1,7 @@
 # MCP on demand — ACI selects which MCP servers a prompt needs (design)
 
-Status: **Approved** (2026-10-10, user: "làm 3 việc luôn"). Decisions taken with the user in chat: fallback = A+C,
+Status: **Approved (2026-10-10, user: "làm 3 việc luôn") → NO-GO the same day** — the §6 step-0 spike falsified the §1
+premise on OpenCode V2 2.0.22 (Code Mode: MCP schemas are not in the model request); see ADR-015 "Outcome". Decisions taken with the user in chat: fallback = A+C,
 granularity = per MCP server, decision mechanism = a separate tool-server judge (option 1).
 ADR: `docs/adr/015-mcp-on-demand.md` (Accepted).
 

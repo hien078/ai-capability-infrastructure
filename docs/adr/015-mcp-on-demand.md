@@ -1,7 +1,8 @@
 # ADR-015 — MCP server là capability được route; client bật theo từng prompt
 
 - Status: Accepted (2026-10-10, user decision "làm 3 việc luôn" sau khi duyệt spec
-  `docs/superpowers/specs/2026-10-10-mcp-on-demand-design.md`).
+  `docs/superpowers/specs/2026-10-10-mcp-on-demand-design.md`) — **NOT IMPLEMENTED: premise
+  falsified by the Task 0 spike the same day (NO-GO)**, xem "Outcome" cuối file.
 - Scope: MCP server selection per prompt for OpenCode (V2) clients.
 - Refines: ADR-008/009 (routing pipeline, trusted text only), ADR-013/014 (ACI không thành
   execution plane cho tool bên thứ ba).
@@ -55,3 +56,16 @@ số phiên từng gọi bất kỳ tool MCP nào; `memory` và `duckdb` chưa t
   `"all"`; skill bundle không bao giờ chứa `mcp:*`.
 - Gate spec §7 (held-out): tắt nhầm ≤ 10%, tiết kiệm ≥ 5.000 token/prompt, p95 route tăng ≤ 1 s,
   100% lỗi → `"all"`, security xanh.
+
+## Outcome (2026-10-10, Task 0 spike — NO-GO)
+
+OpenCode V2 2.0.22 (bản đang chạy trên Arch + Mac) dùng **Code Mode** mặc định: tool MCP KHÔNG
+nằm trong định nghĩa tool của request model và KHÔNG có trong record `tools` của hook `context`;
+model chỉ truy cập chúng qua tool `execute` (catalog + `search(...)` lúc gọi). Đo bằng 9router:
+cùng một prompt OFF 12.218 vs ON 12.218 promptTokens (giảm 0); body request 40,8 KB không chứa
+tên tool MCP nào. Bước 1 (2026-10-10) đo kích thước `tools/list` trực tiếp từ server MCP nên đã
+**sai khi giả định** số token đó đi kèm mỗi request — giả định đã được ghi là "unverified" trong spec
+và spike đã bác bỏ nó trước khi viết code sản phẩm. MCP bật mà không dùng trên OpenCode V2 tốn
+≈ 0 token request; không còn gì để tiết kiệm. `codemode: false` không có trong schema 2.0.22 và bị
+bỏ qua; chặn `execute` làm MCP không dùng được. Chỉ làm lại nếu OpenCode đổi hành vi (chạy lại
+spike nguyên văn). Không có code nào được merge.
